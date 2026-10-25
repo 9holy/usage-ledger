@@ -150,8 +150,8 @@
     },
     {
       "path": ".github/workflows/macos-test.yml",
-      "bytes": 2724,
-      "sha256": "90eca086b4378a62de144d95f6761a5abbcb5a425f8c15fa92915a7c17842f79"
+      "bytes": 2772,
+      "sha256": "08e90d2403a5f37506159115b117ba3d17b167281ce17060f0dca2dc62b61d56"
     },
     {
       "path": ".gitignore",
