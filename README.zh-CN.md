@@ -2,87 +2,250 @@
 
 # 用量账本
 
-**版本 0.2.24 · Windows 桌面应用**
+**版本 0.2.24 · AI 用量监控与成本工作台 · English / 中文**
 
-用量账本是一款 Windows 桌面工作区，用于查看本地 AI 工具用量、会话与子代理、模型参考费用，以及 Sub2API、CLIProxyAPI 和 Cockpit 的来源专属成本数据。应用支持中文和英文。
+用量账本是一款桌面应用，用于了解 AI 工具的使用情况，以及背后账号和服务的成本。它把本地用量监控与 Sub2API、CLIProxyAPI、Cockpit 的成本工作台放在同一应用中。
 
-源码仓库：[9holy/usage-ledger](https://github.com/9holy/usage-ledger)。访问要求取决于仓库可见性。源码快照不包含 Git 历史；准备快照本身不会发布安装包，也不会更改仓库可见性。
+你可以用它：
 
-## 平台状态
+- 比较不同工具已记录的 Token、缓存、请求与输出速率。
+- 从会话追踪轮次、请求及关联的子代理。
+- 按账号额度轮次查看用量，而不与自然周统计混淆。
+- 对照用量参考价值、采购成本、费用、退款与损失。
+- 在把总数当作完整结果之前，发现缺失记录或缺失单价。
 
-| 平台 | 状态 |
+软件计算的金额基于可取得的用量、价格与自定义成本设置，属于估算，不是服务商账单，也不是实际付款凭证。
+
+[源码仓库](https://github.com/9holy/usage-ledger) · [English guide](README.md) · [完整配图](docs/screenshots/README.md)
+
+## 获取应用
+
+Windows 可按下方步骤从源码构建。Mac 测试包可在 [Mac 测试构建页面](https://github.com/9holy/usage-ledger/actions?query=branch%3Atest%2Fmacos-free-20261026)获取：打开成功的构建记录，在 Artifacts 中下载适合自己处理器的包；下载时可能需要登录 GitHub。目前 [Releases 页面](https://github.com/9holy/usage-ledger/releases)尚未提供正式安装包。
+
+| 平台 | 支持状态 |
 | --- | --- |
-| Windows | 现有且已验证的 Windows 目标；NSIS 配置保持不变。 |
-| macOS | 源码已适配 Apple Silicon（`arm64`）和 Intel（`x86_64`）通用 app/DMG，最低 macOS 13.0。原生构建与运行验证仍待完成。 |
+| Windows 10/11，x64 | 当前主要桌面目标，使用 WebView2，可构建 NSIS 安装包。|
+| macOS 13+，Apple Silicon | 独立于 Windows 基线的实验性构建与测试通道。|
+| macOS 13+，Intel | 独立于 Windows 基线的实验性构建与测试通道。|
+| Linux | 本文不提供受支持的桌面打包流程。|
 
-本文档不提供或声称已有 macOS `.app` 或 `.dmg`，目前也未配置或运行云端 CI。请查看 [macOS 构建与验证指南](docs/platforms/macos.md)。本次文档更新不声称新增的 Windows 回归检查结果。
+Mac 测试版由 [`test/macos-free-20261026` 分支](https://github.com/9holy/usage-ledger/tree/test/macos-free-20261026)单独维护，与默认的 Windows 分支分开。请参阅 [macOS 指南](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md)了解安装包选择与构建方法。测试包使用免费的本地签名（ad-hoc），没有 Developer ID 签名或 Apple 公证，macOS 可能提示来源风险；不要关闭系统安全功能来绕过提示。部分原生窗口操作和真实服务使用流程仍待验证，试用前请备份重要数据。
 
-## 工作区
+## 首次使用
 
-| 工作区 | 内容 |
+1. 启动桌面应用，在右上角选择英文或中文。语言选择会保存；
+   首次语言可能跟随系统语言。
+2. 通过顶部工作区切换打开**用量监控**，查看本机工具记录。
+   本地监控不要求先连接远程服务。
+3. 打开**成本工作台**，选择已保存的服务、新建连接，或进入本机
+   **Cockpit** 数据源。
+4. 解读数值前先确认当前时间范围与来源状态。
+   新安装只能显示受支持来源实际提供的数据。
+5. 在适用的位置填写自己的采购与成本信息。
+   默认套餐假设只是起点，不是你实际付款的确认记录。
+
+桌面应用不捆绑 Sub2API、CLIProxyAPI、Cockpit 或成本服务后端。需要连接的外部服务必须另行安装、启动与配置。
+
+在 Windows 上关闭主窗口会将应用隐藏到系统托盘，采集仍可继续。通过托盘菜单重新打开工作区；选择**退出用量账本**才会停止应用。
+
+## 页面导航
+
+| 页面 | 用途 |
 | --- | --- |
-| 实时总览 | 输出速率、模型速度、请求、额度与会话 |
-| 用量分析 | Token、缓存、模型排行、参考费用与价格覆盖 |
-| 会话明细 | 会话、子代理、轮次、请求与耗时 |
-| 采集与价格 | 采集状态与价格来源 |
-| 成本工作台 | 资产、账号、渠道、API、三端汇总、财务与数据治理 |
+| 实时总览 | 查看记录窗口内的输出速率、工具/模型活动、账号周期、额度与当前会话。|
+| 用量分析 | 查看期间汇总、缓存组成、模型排行、参考金额和价格覆盖。|
+| 会话明细 | 查看会话家族、子代理、轮次、单次请求、耗时和来源标识。|
+| 采集与价格 | 检查发现的来源、采集错误、保留历史和模型价格目录。|
+| 资产总览 | 查看账号可用性、运营费用、用量价值以及费用/请求趋势。|
+| 账号排行 | 比较所选期间内的账号，并检查各自成本设置。|
+| 渠道成本 | 查看账号池费用及不同来源的成本假设。|
+| API 接入 | 查看来源对应的端点、客户端配置和可用诊断。|
+| 三端汇总 | 在相同期间比较选中的 Sub2API、CLIProxyAPI、Cockpit 读数。|
+| 成本账本 | 记录购买、续费、退款、调整和终止损失。|
+| 数据管理 | 检查来源状态、历史边界以及保留/维护控制。|
 
-## 支持的记录
+不同来源并不提供完全相同的字段或管理操作。进入三端汇总不会自动连接三项服务，也不会补造缺失的数据。
 
-监控器读取 Codex、Claude Code、Antigravity 和 [DeepSeek Harness](docs/integrations/deepseek-harness.md) 支持的本地记录格式。缺失、部分、推导与实测状态保持区分，不会把未知值当作零。参考费用不是服务商账单；速度、订阅额度、额外积分与时间窗口各有独立口径。
-
-## 页面配图
-
-| 实时总览 | 成本总览 |
+| 本地用量监控 | 成本工作台 |
 | --- | --- |
-| ![实时总览，虚构 DEMO 数据](docs/screenshots/monitor-overview.png) | ![成本总览，虚构 DEMO 数据](docs/screenshots/cost-overview.png) |
+| ![本地用量总览](docs/screenshots/monitor-overview.png) | ![账号与成本总览](docs/screenshots/cost-overview.png) |
 
-| 上游账号 | 渠道成本 |
+虚构 DEMO 数据。[查看全部 14 个视图的中英配图](docs/screenshots/README.md)。
+
+## 连接数据源
+
+### Sub2API
+
+1. 选择**新建连接**，填写名称，类型选择 **Sub2API**。
+2. 填写服务根地址，例如 `https://gateway.example.invalid`。
+   这里需要 Sub2API 服务地址，不是 OpenAI 兼容的 `/v1` 推理端点。
+   应用会拼接 `/api/v1`，也接受已经以 `/api/v1` 结尾的地址。
+3. 选择 **Admin API Key**，或使用有相应权限账号的**邮箱与密码**。
+   普通推理 API key 不能代替管理员 API key。
+4. 点击**保存并连接**；若登录要求两步验证，在应用内输入验证码。
+5. 除非部署确实提供独立的 economics/cost-loss 接口服务，否则将
+   **独立 Cost 服务地址**留空。
+
+**记住密码**用于登录过期后的自动重登。不希望在设备上保留密码时请取消勾选；即使不记住密码，已保存的登录仍可能保留会话令牌。远程账号权限和服务实际提供的接口决定哪些账号/成本页面可以加载。
+
+### CLIProxyAPI
+
+1. 启动自己的 CLIProxyAPI 实例，确保管理 API 可访问。
+2. 选择**新建连接**，类型选择 **CLIProxyAPI**。
+3. 填写服务根地址；留空默认使用 `http://127.0.0.1:8317`。
+4. 填写实例 `config.yaml` 中原始的 `remote-management.secret-key`，
+   不要填写加密/哈希后的值，也不要填写供客户端推理使用的 key。
+5. 点击**保存并连接**。
+
+管理 API 使用 `/v0/management`，以管理密钥进行 Bearer 认证。`/v1/chat/completions`、`/v1/responses` 等地址属于客户端业务接口，用途不同，不应当作管理服务地址填写。
+
+历史明细还取决于实际存在的用量记录，包括安装相应组件后产生的受支持本机 CPA 用量数据库。管理 API 能连接，不代表历史 Token 与成本一定完整。管理页面打开的是你连接的 CLIProxyAPI 实例。
+
+当前 Windows 默认分支读取这类本机 CPA 历史库时，需要能通过 `python` 命令运行的 Python 3，并包含标准 `sqlite3` 模块；仅连接管理 API 不需要这项依赖。Mac 测试分支已改为直接读取该数据库，不需要为此安装 Python。
+
+### Cockpit
+
+在连接页的**本地数据**中找到 **Cockpit**，点击**打开成本工作台**。不需要填写服务地址或管理密钥。
+
+应用从当前用户主目录下的 `~/.antigravity_cockpit` 发现受支持的数据。**数据可用**表示本地文件能够读取，不表示 Cockpit 进程正在运行。如果来源不可用，请检查 Cockpit 的安装与实际生成的本机数据；软件不会制造替代记录。
+
+### 切换与删除连接
+
+使用**返回连接页**切换到另一个已保存服务。删除连接只移除本机保存的连接项，不会删除上游服务器数据。不要把密钥、密码、会话令牌或账号文件贴进 issue 或聊天。
+
+## 本地工具记录
+
+监控器读取 **Codex**、**Claude Code**、**DeepSeek Harness** 和 **Antigravity** 的受支持记录格式。实际能显示什么取决于所安装工具及其版本产生的记录，不代表每项指标始终可用。
+
+下表中的 `~` 指当前操作系统用户的主目录。
+
+| 工具 | 发现的记录 | 支持的自定义位置 |
+| --- | --- | --- |
+| Codex | `~/.codex/sessions` 和 `archived_sessions` | 还读取 `CODEX_HOME`，以及 Cockpit 登记的 Codex 主目录。|
+| Claude Code | `~/.claude/projects` | 还读取 `CLAUDE_CONFIG_DIR/projects`。|
+| DeepSeek Harness | `~/.dsh/sessions` | 设置后用 `DSH_HOME/sessions` 替代默认主目录。|
+| Antigravity | `~/.gemini/antigravity/brain`、`antigravity-ide/brain`、`antigravity-cli/brain` | 仅已知本机位置，没有通用自定义路径选择器。|
+
+请在**启动用量账本之前**设置受支持的环境变量，然后重新启动应用。应用继承的是自身进程的环境，在另一个终端随后修改变量不会影响已启动的应用。在**采集与价格**中查看实际发现的目录和状态。这些记录读取器不会改写原始工具日志。
+
+[DeepSeek Harness 接入说明](docs/integrations/deepseek-harness.md)介绍了会话版本、压缩文件及不支持格式的报错行为。Antigravity 自动发现与本地语言服务器元数据属于尽力而为的集成，可能随工具变化；缺少元数据不等于没有活动。
+
+## 正确理解数值
+
+### Token、速度与单价
+
+- 缺失的缓存或推理字段保持未知。推理 Token 不应再次加到输出总数上。
+- 输出速率是记录观察窗口内的平均值，不一定等于模型瞬时流式生成速度。
+- 请求指定的模型/模式与响应确认的模型/模式是不同证据。
+  缺少模式确认可能导致无法确定报价。
+- 请查看价格覆盖与价格来源。未匹配单价的请求仍可能有有效 Token 数；
+  已报价部分的汇总不是完整账单。
+
+### 额度与账号周期
+
+自然周用量、订阅月用量、服务商每周额度轮次是不同视图。额度轮次跟随来源报告的重置边界，不一定是周一到周日。
+
+百分比归零本身不能证明新轮次开始。在已确认达到 100% 的额度边界之后，额外积分用量与该轮包含额度的金额分开统计，但仍计入适用的月累计。
+
+预测需要同一账号、同一轮次的额度百分比和累计金额来自**同一次额度记录**。暂时没有匹配的新记录时，应用可能保留上次有效估值并标明更新时间，或等待新的读数。预测不是最终费用承诺。
+
+### 采购成本与费率
+
+在**成本账本**记录财务事件；在账号成本控制中设置采购金额、币种、计费周期与起算时间。保存前确认当前账号、来源及覆盖日期。
+
+用量成本根据可取得的上游记录和软件价格/成本设置计算。已录入财务事件、分摊后的订阅费用、剩余预付、退款、损失与用量参考价值不是同一个量。来源显示的用户计费不自动等于你的采购成本。
+
+请核对页面显示的币种、汇率、账号倍率与观察期间。手动汇率覆盖在你修改或恢复自动汇率前一直是一项假设。CLIProxyAPI 和 Cockpit 不会因为比较页面包含倍率列，就具备 Sub2API 那样的账号费率层。
+
+**费用兜底设置**中的汇率用于美元/人民币换算，不会改变 Token 数和上游账单原值。估算倍率作用于默认套餐价及按用量参考价估算的费用；已有采购记录覆盖的期间优先使用录入金额，账号自定义采购价不再乘倍率。按量费用已有可用的上游账号成本时，也不重复乘倍率。Cockpit 提供的参考费用估算仍受倍率影响，不等于实际付款。
+
+### 未知、部分与历史状态
+
+**无数据**、**不可用**、**部分**、**估算**和**实测**含义不同。横杠不等于零，部分金额只包含已能计算费用的记录。账号出现在历史记录中，不代表现在仍然可用。比较数值时，请使用相同来源、账号、币种、时间范围，并留意是否有缺失记录。
+
+## 数据与隐私
+
+采集器读取受支持的上游日志/数据库，并保存软件自己的本地账本、采集进度和账号各轮记录。财务记录、本地来源的成本设置、连接信息和界面偏好也会本地保存；Sub2API 成本档案可以保存到远程服务器。
+
+- Windows 的 SQLite 账本通常位于 `%APPDATA%/com.console.2api`；
+  旧版/回退目录包括 `%APPDATA%/2api-console`。
+- 本地成本档案 JSON 在 Windows 使用 `%APPDATA%/2api-console`；
+  非 Windows 的应用账本/档案回退目录是 `~/.local/share/2api-console`。
+- 设置 `CONSOLE2API_LEDGER_DIR` 会改变 SQLite 账本位置。
+  不要假定所有 WebView 偏好与凭据都保存在同一目录。
+- 连接存储中的密钥/密码只是**混淆，不是加密**。
+  保护操作系统账号和备份；这不是凭据保险箱。
+- 备份重要数据时关闭应用。不要让多个相同数据身份的应用实例并行运行，
+  也不要仅为修复显示而删除数据库。
+
+监控不会修改原始来源日志，但整个软件**不是纯只读工具**：保存 Sub2API 成本档案会更新远程账号；管理/导入操作可能修改所配置的服务或本机 Cockpit 文件。财务账本记录、本地 Cockpit/CLIProxy 成本档案也属于软件写入。
+
+已配置服务、价格、汇率、更新和主动检查可能访问网络。上游探测或模型测试可能消耗付费额度，请有意识地使用；打开本地监控不等于同意进行付费测试。更多背景见[隐私说明](docs/PRIVACY.md)。
+
+## 常见问题
+
+| 问题 | 检查方向 |
 | --- | --- |
-| ![上游账号成本，虚构 DEMO 数据](docs/screenshots/cost-upstreams.png) | ![渠道成本，虚构 DEMO 数据](docs/screenshots/cost-oauth.png) |
+| 监控为空 | 先产生受支持的工具记录，查看采集与价格，核对应用继承的主目录和环境变量。|
+| 来源不可用 | 阅读具体原因：文件不存在、不支持的格式、权限不足、服务不可达不是同一种问题。|
+| Sub2API 登录失败 | 检查服务地址、管理员权限/认证模式、登录是否过期及两步验证码。|
+| CLIProxyAPI 返回 401/403 | 使用原始管理密钥和管理服务根地址，确认实例允许当前连接。|
+| Cockpit 显示未安装 | 检查当前 OS 用户下是否存在预期本地数据；仅有进程运行还不够。|
+| 成本或额度缺失 | 核对账号/轮次、观测时间、价格覆盖和来源字段，不要把未知值改成零。|
+| 历史总数不一致 | 对齐期间与筛选项，检查缺失/保留历史和财务覆盖时间。|
+| 浏览器预览没有本地数据 | 本地读取器需要 Tauri 桌面宿主，单独 Vite 不是完整应用。|
+| 桌面本地桥接启动失败 | 检查是否已有另一应用实例占用回环服务，包括 `18765` 端口。|
+| 系统提示安装包风险 | 核对来源与签名；Windows 发布者签名不同于 updater 签名，Mac 测试签名不等于公证。|
 
-可在[截图索引](docs/screenshots/README.md)查看全部 28 个视图，每种语言各 14 个。截图展示 0.2.24 当前 Vue 组件与虚构 DEMO 数据，于 2026-10-26（Asia/Taipei）生成；演示时钟固定在 2026-10-18。截图不代表真实账号或账目核验，也不构成对费用趋势或请求质量效果的视觉验收。现有 Windows DEMO 配图不是 macOS 应用截图或运行验证证据。私人及原生应用验证截图不公开。
+报告问题时，请提供版本、系统/架构、来源类型、观察期间、可见错误与尽可能小的脱敏示例。不要上传整个主目录、凭据文件、数据库或私人会话原始日志。公开截图前检查账号名、邮箱、密钥和服务地址。
 
-## 构建与运行
+## 从源码构建
 
-**工具链要求：** Windows 10/11、Node.js 22 LTS 或兼容的更新版本、pnpm 9.15.9、启用 MSVC 的 Rust stable、Visual Studio C++ Build Tools，以及 Microsoft Edge WebView2 Runtime。
+### Windows
 
-解压源码快照后在其目录执行以下命令；也可在有权限时克隆仓库：
+安装 Node.js 22 LTS 或兼容更新版本、pnpm 9.15.9、MSVC 工具链的 Rust stable、Visual Studio C++ Build Tools 和 WebView2 Runtime。
 
-```powershell
+~~~powershell
 git clone https://github.com/9holy/usage-ledger.git
 cd usage-ledger
 pnpm install --frozen-lockfile
-pnpm exec tauri dev
-```
+pnpm desktop:dev
+~~~
 
-桌面开发地址：`http://127.0.0.1:5180`。
+桌面开发地址为 `http://127.0.0.1:5180`。构建不生成 updater 签名产物的本地安装包：
 
-```powershell
-# 桌面前端
+~~~powershell
 pnpm build:desktop
-
-# 不生成 updater 签名产物的本地安装包
 pnpm exec tauri build --config src-tauri/tauri.local.conf.json
-```
+~~~
 
-也可使用 `pnpm desktop:dev`、`pnpm desktop:build`，或在 Git Bash 中运行 `bash scripts/build-desktop.sh`。前端输出：`dist/`。原生可执行文件：`src-tauri/target/release/console2api.exe`。NSIS 输出：`src-tauri/target/release/bundle/nsis/`。
+前端输出在 `dist/`，原生可执行文件在 `src-tauri/target/release/console2api.exe`，NSIS 安装包位于 `src-tauri/target/release/bundle/nsis/`。`pnpm desktop:build` 使用常规发布配置，其 updater 产物需要维护者签名私钥。未配置 Authenticode 证书时，Windows 可能显示**未知发布者**。
 
-源码快照不附带服务端、外部应用或插件二进制、账号、凭据或用量数据库。请在连接页配置数据源。发布 updater 需要维护者自己的签名私钥，快照不包含该私钥。本地构建配置保留现有应用数据身份；不要同时运行多个共享该身份的实例。
+### macOS 测试通道
 
-## 检查
+使用 Mac、Xcode Command Line Tools、Node.js/pnpm 与 Rust。先切换测试分支，**再使用该分支特有的 Mac 脚本**：
 
-```powershell
-pnpm typecheck
-pnpm exec vitest run src/features/desktop/__tests__/UsageEfficiencyBand.spec.ts src/views/__tests__/UsageMonitorView.spec.ts
-```
+~~~sh
+git clone https://github.com/9holy/usage-ledger.git
+cd usage-ledger
+git switch test/macos-free-20261026
+xcode-select --install
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+pnpm install --frozen-lockfile
+pnpm desktop:test:mac
+pnpm desktop:build:mac
+~~~
 
-`pnpm test:run` 会运行完整前端测试套件。可选的 DeepSeek Harness 后端虚构数据测试：`python scripts/test-deepseek-headless.py`（需要 Python、Cargo 和 C 编译器）。
+构建脚本默认生成通用 app/DMG。[macOS 指南](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md) 还介绍单架构目标与签名限制。默认分支暂不包含这些 Mac 脚本。源码构建成功不能代替真实账号及所有原生交互流程的验证。
 
-真实本机数据诊断默认关闭并跳过。不要在公共 CI 或共享日志中设置 `USAGE_LEDGER_REAL_DATA_AUDIT=1`，也不要公开私人诊断输出。虚构测试或非空图表不能证明生产账目准确。
+## 文档与许可
 
-## 源码、隐私与许可
+- [完整配图](docs/screenshots/README.md)：每种语言各 14 个视图；
+  全部为虚构 DEMO 数据，不是真实账号账单。
+- [DeepSeek Harness 接入说明](docs/integrations/deepseek-harness.md)。
+- [macOS 测试通道指南](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md)。
+- [0.2.24 发布说明](docs/release/0.2.24.md)。
+- [隐私说明](docs/PRIVACY.md)。
+- [第三方来源与许可](THIRD_PARTY_NOTICES.md)及[许可文本](LICENSES/)。
 
-源码归档包含当前模块、语言文件、测试、锁文件、构建配置、图标和运行素材。导出的归档中，`SOURCE_MANIFEST.json` 列出准确文件清单。请参阅 [0.2.24 发布说明](docs/release/0.2.24.md) 和[隐私边界](docs/PRIVACY.md)。
-
-本项目**并非全项目 MIT 授权**。源自 Sub2API 的代码和第三方素材仍受各自条款约束；请查看[第三方来源与许可](THIRD_PARTY_NOTICES.md)及 [`LICENSES/`](LICENSES/)。公开源码不代表获得每项素材的任意商业使用或再授权权利。[桌面发布记录](DESKTOP_RELEASE_NOTES.md)保留历史版本详情；旧版本说明不证明后续快照重复完成了相同检查。
+本项目**并非全项目 MIT 授权**。源自 Sub2API 的代码保留适用的 LGPL-3.0 条款；第三方图标、素材和依赖分别保留各自许可。部分素材涉及非商业/相同方式共享条款，或没有授予通用复用权。源码公开不代表每个组件都能任意商用或再授权，请在分发前阅读相关声明。

@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "version": "0.2.24",
   "repository": "9holy/usage-ledger",
-  "freeze": "0.2.24-macos-ci-candidate",
-  "createdAt": "2026-10-25T20:26:14.681Z",
+  "freeze": "0.2.24-macos-test-90f1a43-with-user-guide",
+  "createdAt": "2026-10-25T21:16:49.966Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.24",
@@ -210,13 +210,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 5715,
-      "sha256": "4d7f90c3a7d65b7f9e5b8920c3b9e0ee47d4635bc9d314f28b76b4b9bc9ee039"
+      "bytes": 19191,
+      "sha256": "848b08c6252745914b7b3757c2c4ec1b60bf0f2bf6e9603682a85a8b309cacb0"
     },
     {
       "path": "README.zh-CN.md",
-      "bytes": 5328,
-      "sha256": "d81e1aa9989239c7ed9482347dcde7c45ebfec6624eb6e313f44a6d60e85dfc3"
+      "bytes": 17551,
+      "sha256": "addee5060e47f86fd8336eb0049064f0c3bf97c2accd31bca064a4c11572bb80"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -255,8 +255,8 @@
     },
     {
       "path": "docs/platforms/macos.md",
-      "bytes": 11388,
-      "sha256": "471b7394e501b52e546191cfac410b499e7ac9700456358df3210203a51fe18c"
+      "bytes": 14876,
+      "sha256": "c1f87b73dc338f7e29dfebe53a79ae3c67c4482f92864e45980c65088d27c0d4"
     },
     {
       "path": "docs/release/0.2.24.md",
