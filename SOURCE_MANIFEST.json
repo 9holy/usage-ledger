@@ -150,8 +150,8 @@
     },
     {
       "path": ".github/workflows/macos-test.yml",
-      "bytes": 2772,
-      "sha256": "08e90d2403a5f37506159115b117ba3d17b167281ce17060f0dca2dc62b61d56"
+      "bytes": 2801,
+      "sha256": "dee8813a0c8aedd6a876efd1e0e4e23f855bc91da40896d955f3e871b8d55536"
     },
     {
       "path": ".gitignore",
@@ -880,8 +880,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/antigravity_macos.rs",
-      "bytes": 19685,
-      "sha256": "75d921007b6e6521ca8f7ecbf3c542a971db408dceb719c6f6da310b2b94efd0"
+      "bytes": 20258,
+      "sha256": "9b1964411222c035ba77140d34b7def2dd94d6fb0822a907221fa5b5c8aa5718"
     },
     {
       "path": "src-tauri/src/usage_monitor/codex_mode_logs.rs",

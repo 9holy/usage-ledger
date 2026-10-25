@@ -47,6 +47,7 @@ jobs:
         run: |
           test "$(uname -m)" = '${{ matrix.arch }}'
           xcode-select -p
+          sysctl kern.argmax
           rustup update stable --no-self-update
           rustup default stable
           rustup target add '${{ matrix.target }}'

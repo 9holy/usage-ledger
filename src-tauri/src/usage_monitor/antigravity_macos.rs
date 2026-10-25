@@ -5,6 +5,15 @@ use super::Connection;
 
 const ARGS_ERROR: &str = "Antigravity macOS process arguments are unavailable or invalid";
 const PORTS_ERROR: &str = "Antigravity macOS process listener metadata is unavailable or invalid";
+const BUFFER_LIMIT: usize = 1024 * 1024;
+
+fn argument_buffer_size(argmax: i32) -> Result<usize, &'static str> {
+    if argmax <= 0 || argmax as usize > BUFFER_LIMIT {
+        return Err(ARGS_ERROR);
+    }
+    // Darwin limits the payload to ARG_MAX; KERN_PROCARGS2 prepends an extra argc word.
+    Ok(argmax as usize + std::mem::size_of::<i32>())
+}
 
 fn known_executable(path: &str) -> bool {
     if !path.starts_with('/') || path.split('/').any(|p| p == "." || p == "..") {
@@ -166,7 +175,6 @@ mod native {
     use std::{mem, process::Command, ptr};
 
     const PROCESS_ERROR: &str = "Antigravity macOS process metadata is unavailable";
-    const BUFFER_LIMIT: usize = 1024 * 1024;
     // Apple's proc_info.h defines PROC_UID_ONLY; libc exposes the function but not this constant.
     const PROC_UID_ONLY: u32 = 4;
 
@@ -241,14 +249,10 @@ mod native {
                 0,
             )
         };
-        if result != 0
-            || size != mem::size_of::<i32>()
-            || argmax <= 0
-            || argmax as usize > BUFFER_LIMIT - 4
-        {
+        if result != 0 || size != mem::size_of::<i32>() {
             return Err(ARGS_ERROR.into());
         }
-        Ok(vec![0; argmax as usize + 4])
+        Ok(vec![0; argument_buffer_size(argmax)?])
     }
 
     fn arguments(pid: i32, buffer: &mut [u8]) -> Result<Vec<&str>, String> {
@@ -389,6 +393,15 @@ mod tests {
             "--csrf_token",
             "fixture-token with spaces",
         ]
+    }
+
+    #[test]
+    fn macos_argument_buffer_allows_full_argmax_plus_argc_header() {
+        assert_eq!(argument_buffer_size(1_048_576), Ok(1_048_580));
+        assert_eq!(argument_buffer_size(262_144), Ok(262_148));
+        for invalid in [-1, 0, 1_048_577, i32::MAX] {
+            assert_eq!(argument_buffer_size(invalid), Err(ARGS_ERROR));
+        }
     }
 
     #[test]
