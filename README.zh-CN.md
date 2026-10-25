@@ -101,6 +101,8 @@ Mac 测试版由 [`test/macos-free-20261026` 分支](https://github.com/9holy/us
 
 历史明细还取决于实际存在的用量记录，包括安装相应组件后产生的受支持本机 CPA 用量数据库。管理 API 能连接，不代表历史 Token 与成本一定完整。管理页面打开的是你连接的 CLIProxyAPI 实例。
 
+当前 Windows 默认分支读取这类本机 CPA 历史库时，需要能通过 `python` 命令运行的 Python 3，并包含标准 `sqlite3` 模块；仅连接管理 API 不需要这项依赖。Mac 测试分支已改为直接读取该数据库，不需要为此安装 Python。
+
 ### Cockpit
 
 在连接页的**本地数据**中找到 **Cockpit**，点击**打开成本工作台**。不需要填写服务地址或管理密钥。

@@ -103,6 +103,8 @@ The management API uses `/v0/management` with the management key as Bearer authe
 
 Historical detail also depends on the available usage records, including the supported local CPA usage database when present. A reachable management API alone does not guarantee complete historical token/cost data. The management page opens your connected CLIProxyAPI instance.
 
+On the Windows default branch, reading that optional local CPA database requires Python 3 with its standard `sqlite3` module, available as `python` on PATH. This is not needed just to connect to the management API. The Mac test branch reads this database directly and does not require Python for it.
+
 ### Cockpit
 
 On the connection screen, find **Cockpit** under **Local data** and select **Open cost workspace**. No service URL or management key is required.
