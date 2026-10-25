@@ -11,6 +11,8 @@
     "preview": "vite preview",
     "desktop:dev": "node scripts/desktop-command.mjs dev",
     "desktop:build": "node scripts/desktop-command.mjs build",
+    "desktop:build:mac": "node scripts/build-macos.mjs",
+    "desktop:test:mac": "node scripts/test-macos.mjs",
     "lint": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts --fix",
     "lint:check": "eslint . --ext .vue,.js,.jsx,.cjs,.mjs,.ts,.tsx,.cts,.mts",
     "typecheck": "vue-tsc --noEmit",

@@ -20,6 +20,7 @@ const announcementStore = useAnnouncementStore()
 const adminComplianceStore = useAdminComplianceStore()
 const adminSettingsStore = useAdminSettingsStore()
 const desktopRuntime = isDesktopRuntime()
+const nativeMacChrome = desktopRuntime && /Mac/i.test(navigator.platform)
 
 function updateDocumentTitle() {
   const customMenuItems = [
@@ -121,7 +122,7 @@ router.afterEach(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('admin-compliance-required', onAdminComplianceRequired)
-  document.documentElement.classList.remove('desktop-runtime')
+  document.documentElement.classList.remove('desktop-runtime', 'desktop-native-chrome')
 })
 
 async function initializeApplication() {
@@ -140,14 +141,15 @@ watch(() => route.path, (_next, previous) => {
 
 onMounted(async () => {
   document.documentElement.classList.toggle('desktop-runtime', desktopRuntime)
+  document.documentElement.classList.toggle('desktop-native-chrome', nativeMacChrome)
   window.addEventListener('admin-compliance-required', onAdminComplianceRequired)
   await initializeApplication()
 })
 </script>
 
 <template>
-  <div class="app-window" :class="{ 'app-window--desktop': desktopRuntime }">
-    <DesktopTitleBar v-if="desktopRuntime" />
+  <div class="app-window" :class="{ 'app-window--desktop': desktopRuntime, 'app-window--native-chrome': nativeMacChrome }">
+    <DesktopTitleBar v-if="desktopRuntime && !nativeMacChrome" />
     <div class="app-window__content">
       <NavigationProgress />
       <RouterView />
@@ -169,6 +171,10 @@ onMounted(async () => {
   overflow: hidden;
   background: #0c110d;
   border: 1px solid #2f3930;
+}
+.app-window--native-chrome {
+  --desktop-titlebar-height: 0px;
+  border: 0;
 }
 .app-window--desktop .app-window__content {
   position: relative;
@@ -198,6 +204,9 @@ onMounted(async () => {
    controls or drag region. */
 :root.desktop-runtime {
   --desktop-titlebar-height: 36px;
+}
+:root.desktop-runtime.desktop-native-chrome {
+  --desktop-titlebar-height: 0px;
 }
 :root.desktop-runtime body :is(.fixed.inset-0, .modal-overlay) {
   top: var(--desktop-titlebar-height);

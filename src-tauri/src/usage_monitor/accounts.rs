@@ -440,7 +440,7 @@ fn decode_subscription(bytes: &[u8]) -> Result<Option<(String, AccountSubscripti
 
 fn read_local_subscriptions() -> LocalSubscriptions {
     let mut paths = Vec::new();
-    if let Some(profile) = std::env::var_os("USERPROFILE") {
+    if let Some(profile) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
         paths.push(PathBuf::from(profile).join(".codex").join("auth.json"));
     }
     if let Some(home) = std::env::var_os("CODEX_HOME").filter(|home| !home.is_empty()) {
@@ -2544,6 +2544,47 @@ mod tests {
             (b.request_count, b.priced_cost_usd, b.priced_cost_cny),
             (1, 9., 0.)
         );
+    }
+
+    #[test]
+    fn local_subscriptions_use_home_only_and_preserve_profile_and_codex_home_precedence() {
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "ledger-subscription-paths-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let home = root.join("home");
+        let profile = root.join("profile");
+        let codex = root.join("custom-codex");
+        let write_auth = |base: &std::path::Path, account: &str, checked: i64| {
+            std::fs::create_dir_all(base).unwrap();
+            let payload = json!({"https://api.openai.com/auth":{
+                "chatgpt_account_id":account,
+                "chatgpt_subscription_active_start":"2026-10-01T00:00:00Z",
+                "chatgpt_subscription_last_checked":checked
+            }});
+            let encoded = URL_SAFE_NO_PAD.encode(payload.to_string());
+            std::fs::write(base.join("auth.json"), json!({"tokens":{"id_token":format!("header.{encoded}.signature")}}).to_string()).unwrap();
+        };
+        write_auth(&home.join(".codex"), "home", 1_792_368_000);
+        write_auth(&profile.join(".codex"), "profile", 1_792_368_000);
+        write_auth(&codex, "profile", 1_792_368_001);
+        let _home = crate::EnvGuard::set("HOME", &home);
+        let profile_guard = crate::EnvGuard::remove("USERPROFILE");
+        let codex_guard = crate::EnvGuard::remove("CODEX_HOME");
+        let result = read_local_subscriptions();
+        assert!(result.error.is_none());
+        assert_eq!(result.accounts.keys().map(String::as_str).collect::<Vec<_>>(), ["account:home"]);
+        drop(profile_guard);
+        let _profile = crate::EnvGuard::set("USERPROFILE", &profile);
+        let result = read_local_subscriptions();
+        assert_eq!(result.accounts.keys().map(String::as_str).collect::<Vec<_>>(), ["account:profile"]);
+        drop(codex_guard);
+        let _codex = crate::EnvGuard::set("CODEX_HOME", &codex);
+        assert_eq!(read_local_subscriptions().accounts["account:profile"].checked_at_ms, Some(1_792_368_001_000));
+        write_auth(&codex, "profile", 1_792_367_999);
+        assert_eq!(read_local_subscriptions().accounts["account:profile"].checked_at_ms, Some(1_792_368_000_000));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

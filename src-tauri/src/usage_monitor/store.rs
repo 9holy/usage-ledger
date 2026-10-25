@@ -1936,7 +1936,7 @@ mod completeness_tests {
         assert_eq!(rates[0].recent_request.as_ref().unwrap().id, "good");
     }
     #[test]
-    fn unpriced_reason_counts_include_scenarios_but_the_unpriced_filter_stays_quote_free() {
+    fn unpriced_reason_counts_and_filter_follow_automatic_quote_coverage() {
         let mut conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
         let mut scenario = record("scenario", "codex", 50);
@@ -1973,8 +1973,10 @@ mod completeness_tests {
             &MonitorPeriod::default(),
         )
         .unwrap();
-        assert_eq!(detail.request_count, 1);
-        assert_eq!(detail.requests[0].usage.id, "missing");
+        assert_eq!(detail.request_count, 2);
+        let mut ids = detail.requests.iter().map(|request| request.usage.id.as_str()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["missing", "scenario"]);
         let analysis = super::super::analysis::read(
             &conn,
             None,

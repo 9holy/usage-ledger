@@ -357,7 +357,7 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        assert!(parse_observation(
+        assert_eq!(parse_observation(
             9,
             100,
             0,
@@ -365,7 +365,7 @@ mod tests {
             &body("thread", "turn", r#"{"service_tier":null}"#)
         )
         .unwrap()
-        .is_none());
+        .unwrap().mode, "unknown");
         assert!(
             parse_observation(9, 100, 0, "thread", &body("thread", "turn", "bad-json")).is_err()
         );

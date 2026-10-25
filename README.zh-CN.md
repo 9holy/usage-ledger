@@ -8,6 +8,15 @@
 
 源码仓库：[9holy/usage-ledger](https://github.com/9holy/usage-ledger)。访问要求取决于仓库可见性。源码快照不包含 Git 历史；准备快照本身不会发布安装包，也不会更改仓库可见性。
 
+## 平台状态
+
+| 平台 | 状态 |
+| --- | --- |
+| Windows | 现有且已验证的 Windows 目标；NSIS 配置保持不变。 |
+| macOS | 源码已适配 Apple Silicon（`arm64`）和 Intel（`x86_64`）通用 app/DMG，最低 macOS 13.0。原生构建与运行验证仍待完成。 |
+
+本文档不提供或声称已有 macOS `.app` 或 `.dmg`，目前也未配置或运行云端 CI。请查看 [macOS 构建与验证指南](docs/platforms/macos.md)。本次文档更新不声称新增的 Windows 回归检查结果。
+
 ## 工作区
 
 | 工作区 | 内容 |
@@ -32,7 +41,7 @@
 | --- | --- |
 | ![上游账号成本，虚构 DEMO 数据](docs/screenshots/cost-upstreams.png) | ![渠道成本，虚构 DEMO 数据](docs/screenshots/cost-oauth.png) |
 
-可在[截图索引](docs/screenshots/README.md)查看全部 28 个视图，每种语言各 14 个。截图展示 0.2.24 当前 Vue 组件与虚构 DEMO 数据，于 2026-10-26（Asia/Taipei）生成；演示时钟固定在 2026-10-18。截图不代表真实账号或账目核验，也不构成对费用趋势或请求质量效果的视觉验收。私人及原生应用验证截图不公开。
+可在[截图索引](docs/screenshots/README.md)查看全部 28 个视图，每种语言各 14 个。截图展示 0.2.24 当前 Vue 组件与虚构 DEMO 数据，于 2026-10-26（Asia/Taipei）生成；演示时钟固定在 2026-10-18。截图不代表真实账号或账目核验，也不构成对费用趋势或请求质量效果的视觉验收。现有 Windows DEMO 配图不是 macOS 应用截图或运行验证证据。私人及原生应用验证截图不公开。
 
 ## 构建与运行
 

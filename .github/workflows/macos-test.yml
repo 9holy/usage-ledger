@@ -1,0 +1,74 @@
+name: Mac test packages
+
+on:
+  push:
+    branches: ['test/macos-*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    if: github.repository == '9holy/usage-ledger' && github.event.repository.private == false
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+          - name: Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+    env:
+      CARGO_BUILD_JOBS: '2'
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Prepare native toolchain
+        run: |
+          test "$(uname -m)" = '${{ matrix.arch }}'
+          xcode-select -p
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add '${{ matrix.target }}'
+          pnpm install --frozen-lockfile
+      - name: Test native code and desktop bindings
+        run: |
+          node --test scripts/__tests__/macos-build-contract.test.mjs
+          pnpm desktop:test:mac
+      - name: Build and verify test installer
+        run: pnpm desktop:build:mac --target '${{ matrix.target }}'
+      - name: Launch packaged application with an empty test profile
+        run: node scripts/smoke-macos.mjs src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+      - name: Prepare download and checksum
+        run: |
+          mkdir -p mac-test-package
+          cp src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg mac-test-package/
+          cd mac-test-package
+          shasum -a 256 *.dmg > SHA256SUMS.txt
+          printf 'Commit: %s\nArchitecture: %s\nSigning: ad-hoc (not notarized)\nNative tests and packaged background startup passed.\nInteractive Finder/Dock and real-account checks remain pending.\n' "$GITHUB_SHA" '${{ matrix.arch }}' > TEST-RESULT.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: usage-ledger-0.2.24-macos-${{ matrix.arch }}-test
+          path: mac-test-package/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0

@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "version": "0.2.24",
   "repository": "9holy/usage-ledger",
-  "freeze": "0.2.24-bilingual-docs",
-  "createdAt": "2026-10-25T18:42:30.397Z",
+  "freeze": "0.2.24-macos-ci-candidate",
+  "createdAt": "2026-10-25T20:26:14.681Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.24",
@@ -22,6 +22,7 @@
       ".gitattributes",
       ".gitignore",
       ".npmrc",
+      ".github/workflows/macos-test.yml",
       "ALGORITHM_VERSION",
       "CORE_CAPABILITIES",
       "CORE_EXTENSION_VERSION",
@@ -46,6 +47,9 @@
       "src-tauri/README.md",
       "src-tauri/tauri.conf.json",
       "src-tauri/tauri.local.conf.json",
+      "src-tauri/tauri.macos.conf.json",
+      "src-tauri/tauri.macos.test.conf.json",
+      "src-tauri/Info.macos.plist",
       "scripts/build-desktop.sh",
       "scripts/desktop-command.mjs",
       "scripts/prepare-desktop-release.mjs",
@@ -53,6 +57,11 @@
       "scripts/test-deepseek-headless.py",
       "scripts/export-source-release.mjs",
       "scripts/source-release-policy.json",
+      "scripts/build-macos.mjs",
+      "scripts/test-macos.mjs",
+      "scripts/smoke-macos.mjs",
+      "scripts/__tests__/macos-build-contract.test.mjs",
+      "docs/platforms/macos.md",
       "docs/PRIVACY.md",
       "docs/release/0.2.24.md",
       "docs/integrations/deepseek-harness.md",
@@ -140,6 +149,11 @@
       "sha256": "bd9d5f7de56d535e060feedbb5e5a50cbe054d5843a0ceddd60eaf854f2ecb58"
     },
     {
+      "path": ".github/workflows/macos-test.yml",
+      "bytes": 2724,
+      "sha256": "90eca086b4378a62de144d95f6761a5abbcb5a425f8c15fa92915a7c17842f79"
+    },
+    {
       "path": ".gitignore",
       "bytes": 2093,
       "sha256": "e7f201e4068d0d3782b35e8097944f3719b70d26704ea18dee6572936c70f770"
@@ -196,13 +210,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 5075,
-      "sha256": "b61f9c60203f814f3070c0f9b102dbec45870ad11920705782b91bea5c90fe39"
+      "bytes": 5715,
+      "sha256": "4d7f90c3a7d65b7f9e5b8920c3b9e0ee47d4635bc9d314f28b76b4b9bc9ee039"
     },
     {
       "path": "README.zh-CN.md",
-      "bytes": 4730,
-      "sha256": "3867876e1a56cba40fc47f940e3b1afff02ebff21104b15004a0be7b58da329f"
+      "bytes": 5328,
+      "sha256": "d81e1aa9989239c7ed9482347dcde7c45ebfec6624eb6e313f44a6d60e85dfc3"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -238,6 +252,11 @@
       "path": "docs/legal/admin-compliance.zh.md",
       "bytes": 5807,
       "sha256": "6f1264892678e2da3e42e40c94a0dc9857ce1eeb53bb58fa53faa958310f622f"
+    },
+    {
+      "path": "docs/platforms/macos.md",
+      "bytes": 11388,
+      "sha256": "471b7394e501b52e546191cfac410b499e7ac9700456358df3210203a51fe18c"
     },
     {
       "path": "docs/release/0.2.24.md",
@@ -401,8 +420,8 @@
     },
     {
       "path": "package.json",
-      "bytes": 2495,
-      "sha256": "071e0c8050bff8e2e471ae01fcefe96e789b925bd1a0cad41ce3acb196a0f69d"
+      "bytes": 2607,
+      "sha256": "1ae1783f780881834ba6021725d3758278ed6da57dc0c774d0ea1801a46e06d1"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -440,9 +459,19 @@
       "sha256": "cdd3a895e12206c46aa6fa1ed20defa8569b216f0b739dcc4fc9fb9af38c2a0d"
     },
     {
+      "path": "scripts/__tests__/macos-build-contract.test.mjs",
+      "bytes": 2135,
+      "sha256": "588dff8e3f02e77468cbaf66a104700c80fa0447f90d53e62991c67ed3bdd967"
+    },
+    {
       "path": "scripts/build-desktop.sh",
       "bytes": 660,
       "sha256": "3fba212b20e77442dc19185e6b021091d26edbe798394b75168303d32101eadd"
+    },
+    {
+      "path": "scripts/build-macos.mjs",
+      "bytes": 3825,
+      "sha256": "0be39ecfa826a21493bf7d3ef79c60763c5f5cf0b7aca46db1ccf92d9520d265"
     },
     {
       "path": "scripts/capture-readme-screenshots.mjs",
@@ -465,9 +494,14 @@
       "sha256": "9795aa850f58c32c61b57666aae2b1cc760db1716f7c77eda2d1a2d4965c9695"
     },
     {
+      "path": "scripts/smoke-macos.mjs",
+      "bytes": 4317,
+      "sha256": "5f5a168edbbd40db3174e0bb08f1bb4b3eadd3905ae69547485a2e48bc065d2e"
+    },
+    {
       "path": "scripts/source-release-policy.json",
-      "bytes": 3881,
-      "sha256": "bb6da1060b38bfebba14d3369b9918a2f4b5b31533a2d1738051496af9322cb1"
+      "bytes": 4200,
+      "sha256": "3abce15e8cc9eaefb4a88aa423cbf06e768f3c098be5c04f279694ffc86188af"
     },
     {
       "path": "scripts/test-deepseek-headless.py",
@@ -475,19 +509,29 @@
       "sha256": "b8d2d71f9e8581306bcbbb5c3a69f9c578bfe15ef3ea210a7e3c9c9406e6f15f"
     },
     {
+      "path": "scripts/test-macos.mjs",
+      "bytes": 2055,
+      "sha256": "6d6f84dbcff8e37f52e7b058d3fdcf4e99c5f5b89c827f0e9829e8b8150a7f50"
+    },
+    {
       "path": "src-tauri/Cargo.lock",
-      "bytes": 143978,
-      "sha256": "8ccf2330d54b6f5e3b99dae9abddae8560d281bc6bced1d6644fc286fdd12b31"
+      "bytes": 143987,
+      "sha256": "3200a24caa3ff4b02b32b6b9060c718d5b797db3cc3ecdd9c33cd6ada140f041"
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "bytes": 2092,
-      "sha256": "465c73f4f4eb5a607b331fd9054d9b233bf6ceb9ca3d855626cff3b7a805c57b"
+      "bytes": 2159,
+      "sha256": "3a5eeaf72f4dcfd6f68f95ef3565dfaf6c2b0ad6eafd71dff8ee26f9e1180a74"
+    },
+    {
+      "path": "src-tauri/Info.macos.plist",
+      "bytes": 660,
+      "sha256": "fea7230dfaf35935dfe73674d0293c780e2a80346cf2d169ebdd0fa8ac71ea75"
     },
     {
       "path": "src-tauri/README.md",
-      "bytes": 784,
-      "sha256": "c275af50db8b835d38df43466d06808bd5b8ce9861aaadca449a10548dd9f2f5"
+      "bytes": 5537,
+      "sha256": "11d8e9436e3522a799c80dafb01551e715ea641767958c6c462d62bcc2d8c477"
     },
     {
       "path": "src-tauri/build.rs",
@@ -760,6 +804,11 @@
       "sha256": "db6ad282f69c186b6fefc1c4518a221a495da539000fdaf5b028082fdd527a23"
     },
     {
+      "path": "src-tauri/src/cliproxy_usage_db.rs",
+      "bytes": 13458,
+      "sha256": "1d8194eee7fa1b0de30699d6fb8809470bff537da0f1c6c63c41d597e270cbf4"
+    },
+    {
       "path": "src-tauri/src/cockpit_logs_db.rs",
       "bytes": 75458,
       "sha256": "a5096677473733ea0ed21490caf747c109fb5a949a862bd7d2b3e78f3fe951d9"
@@ -781,8 +830,8 @@
     },
     {
       "path": "src-tauri/src/ledger_db.rs",
-      "bytes": 78204,
-      "sha256": "d53e1c4132e083456dcb2c9258f37db39deb2aa0e54ea565e94cd5a1c8f4f177"
+      "bytes": 78203,
+      "sha256": "67097617d9f31c5f40b11a6b93d39a6d28e1228318c2c6d18166c5e48d36a793"
     },
     {
       "path": "src-tauri/src/ledger_ingest.rs",
@@ -801,8 +850,8 @@
     },
     {
       "path": "src-tauri/src/main.rs",
-      "bytes": 77879,
-      "sha256": "fa8d64dd07b7944e76b6790c9e9a95bbc17be2080f3d1f08dff7e23678868da5"
+      "bytes": 72397,
+      "sha256": "28009b4dfd49c7f6d7494ecec0928e8dbac85b362d6fb5b93a0e31d389447c3c"
     },
     {
       "path": "src-tauri/src/model_catalog.rs",
@@ -816,8 +865,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/accounts.rs",
-      "bytes": 104192,
-      "sha256": "5ba84e3467c2068f22130c659788cc1cf133afc94295280be0043970f97c2116"
+      "bytes": 106659,
+      "sha256": "4555c08139f68b84b3edb8e97948096e2c1bbfc4b9b7380c99f22e216c9f0fb2"
     },
     {
       "path": "src-tauri/src/usage_monitor/analysis.rs",
@@ -826,13 +875,18 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/antigravity.rs",
-      "bytes": 28472,
-      "sha256": "85ca0f9d4a9e58b224e0daab44a37091aaa1434b340521683f7026c3f65e6db3"
+      "bytes": 28696,
+      "sha256": "cc35b46666b3e567c64fd1e65bf5b476f16bafdf0735dbe54df865fc3f130aa8"
+    },
+    {
+      "path": "src-tauri/src/usage_monitor/antigravity_macos.rs",
+      "bytes": 19685,
+      "sha256": "75d921007b6e6521ca8f7ecbf3c542a971db408dceb719c6f6da310b2b94efd0"
     },
     {
       "path": "src-tauri/src/usage_monitor/codex_mode_logs.rs",
-      "bytes": 18763,
-      "sha256": "a132e96b64b3dde04ca4f92827523d5daebbf4d82738fb06d10c4e64d287f40a"
+      "bytes": 18781,
+      "sha256": "59736f629f91aaef41d81141d1dbe2bf3d100416aad9763a881a9e40672c497b"
     },
     {
       "path": "src-tauri/src/usage_monitor/collector.rs",
@@ -881,8 +935,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/store.rs",
-      "bytes": 180212,
-      "sha256": "91d2f720cd835da1d29ee5ee35c269f4d3f985e21e9b59ee46f3a55d4aaa5d44"
+      "bytes": 180324,
+      "sha256": "5a2ba1ccd4f548f7ffbd2b69efc0ef28a6e2ef163ec31164f2f37d23739205e0"
     },
     {
       "path": "src-tauri/src/usage_monitor/tests.rs",
@@ -915,9 +969,19 @@
       "sha256": "045e55901593915f744feabfb9a952abeeaa02d23342681e2bbe236a0da221e3"
     },
     {
+      "path": "src-tauri/tauri.macos.conf.json",
+      "bytes": 664,
+      "sha256": "2bc0bd9a8be8958d86e19876583664545092bc2628bd96740b6f1d0a2986e4ba"
+    },
+    {
+      "path": "src-tauri/tauri.macos.test.conf.json",
+      "bytes": 109,
+      "sha256": "092fd87682741df3b851ad1d04eb7862588879efeb7e169e9769ac4e63e0f6ee"
+    },
+    {
       "path": "src/App.vue",
-      "bytes": 6890,
-      "sha256": "b92bf22e150f8f9e0574ff32a37be59f8c70d924f4e0cb76b03b39cefce3c1a6"
+      "bytes": 7301,
+      "sha256": "92f6609bfe245b53e47a84de3458546fce9641ad8d042100fbac99411da70d58"
     },
     {
       "path": "src/__tests__/integration/data-import.spec.ts",
@@ -1291,8 +1355,8 @@
     },
     {
       "path": "src/api/cliproxy/__tests__/cpaData.spec.ts",
-      "bytes": 4579,
-      "sha256": "1e727456bcfac41765491c488d571c2621157d47d5c7162970d211509b337a4a"
+      "bytes": 2202,
+      "sha256": "afa3ec65480462b4da85a9c8b7d0e7e3e492008aaeae7813151c5a42f539c083"
     },
     {
       "path": "src/api/cliproxy/__tests__/cpaTokenSemantics.spec.ts",
@@ -4118,6 +4182,11 @@
       "path": "src/features/desktop/UsageValueChart.vue",
       "bytes": 14367,
       "sha256": "8cc3d65d60c84967ec259c741309687ed05f23aee5294e231d610aea6ce441bc"
+    },
+    {
+      "path": "src/features/desktop/__tests__/AppNativeChrome.spec.ts",
+      "bytes": 5398,
+      "sha256": "4f3d54e126b2e08d8e47fed4c60f8b8f60eeb33079b24420afa0fe35355c3052"
     },
     {
       "path": "src/features/desktop/__tests__/ConsoleWorkspaceHeader.spec.ts",

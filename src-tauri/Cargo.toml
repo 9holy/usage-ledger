@@ -42,3 +42,6 @@ notify = "8"
 
 # Official DeepSeek Harness defaults to concatenated Zstandard JSONL frames.
 zstd = "0.13"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"

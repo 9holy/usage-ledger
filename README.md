@@ -8,6 +8,15 @@ Usage Ledger is a Windows desktop workspace for local AI-tool usage, sessions an
 
 Source repository: [9holy/usage-ledger](https://github.com/9holy/usage-ledger). Access requirements follow the repository's visibility. A source snapshot excludes Git history; preparing it does not publish an installer or change repository visibility.
 
+## Platform status
+
+| Platform | Status |
+| --- | --- |
+| Windows | Existing verified Windows target; its NSIS configuration is unchanged. |
+| macOS | Source-adapted for a universal Apple Silicon (`arm64`) and Intel (`x86_64`) app/DMG, minimum macOS 13.0. Native build and runtime verification are pending. |
+
+No macOS `.app` or `.dmg` is provided or claimed here, and no cloud CI workflow is configured or has been run. See the [macOS build and verification guide](docs/platforms/macos.md). This documentation update claims no new Windows regression counts.
+
 ## Workspaces
 
 | Workspace | Contents |
@@ -32,7 +41,7 @@ The monitor reads supported local record formats from Codex, Claude Code, Antigr
 | --- | --- |
 | ![Upstream account costs with synthetic DEMO data](docs/screenshots/cost-upstreams-en.png) | ![Channel costs with synthetic DEMO data](docs/screenshots/cost-oauth-en.png) |
 
-Browse all 28 views, 14 per language, in the [screenshot index](docs/screenshots/README.md). Screenshots show the current 0.2.24 Vue components and fictional DEMO data, captured on 2026-10-26 (Asia/Taipei); the fixture clock is fixed at 2026-10-18. They are not real-account or accounting checks and do not establish visual approval of cost trends or request quality. Private and native validation captures are excluded.
+Browse all 28 views, 14 per language, in the [screenshot index](docs/screenshots/README.md). Screenshots show the current 0.2.24 Vue components and fictional DEMO data, captured on 2026-10-26 (Asia/Taipei); the fixture clock is fixed at 2026-10-18. They are not real-account or accounting checks and do not establish visual approval of cost trends or request quality. The existing Windows DEMO gallery is not macOS app screenshot or runtime proof. Private and native validation captures are excluded.
 
 ## Build and run
 
