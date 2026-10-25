@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "version": "0.2.24",
   "repository": "9holy/usage-ledger",
-  "freeze": "0.2.24-bilingual-docs",
-  "createdAt": "2026-10-25T18:42:30.397Z",
+  "freeze": "0.2.24-user-guide",
+  "createdAt": "2026-10-25T21:09:47.930Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.24",
@@ -196,13 +196,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 5075,
-      "sha256": "b61f9c60203f814f3070c0f9b102dbec45870ad11920705782b91bea5c90fe39"
+      "bytes": 18890,
+      "sha256": "7281778576cd6f99f18ed4b2ce4849235f3c413f000059c7940040718d513301"
     },
     {
       "path": "README.zh-CN.md",
-      "bytes": 4730,
-      "sha256": "3867876e1a56cba40fc47f940e3b1afff02ebff21104b15004a0be7b58da329f"
+      "bytes": 17270,
+      "sha256": "38e89db9e70e7c5ea085d1d6eabb12afe75bf15c83e7cabd375df4aecd5d537d"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
