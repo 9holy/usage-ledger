@@ -1,0 +1,1297 @@
+/**
+ * Admin Accounts API endpoints
+ * Handles AI platform account management for administrators
+ */
+
+import { apiClient } from '../client'
+import { getCostServiceBaseURL } from '../url'
+import type {
+  Account,
+  CreateAccountRequest,
+  UpdateAccountRequest,
+  PaginatedResponse,
+  AccountUsageInfo,
+  WindowStats,
+  ClaudeModel,
+  AccountUsageStatsResponse,
+  TempUnschedulableStatus,
+  AdminDataPayload,
+  AdminDataImportResult,
+  CodexSessionImportRequest,
+  CodexSessionImportResult,
+  OpenAICodexPATCreateRequest,
+  CheckMixedChannelRequest,
+  CheckMixedChannelResponse,
+  UpstreamBillingProbeResult,
+  UpstreamBillingProbeSettings,
+  OllamaCloudUsageSettings,
+  OllamaCloudUsageState
+} from '@/types'
+
+export interface AccountCostLossState {
+  account_id: number
+  account_name: string
+  platform: string
+  account_type: string
+  terminal_event_id: number
+  occurred_at: string
+  currency: 'USD' | 'CNY'
+  accrued_cost: number
+  gross_loss: number
+  refund_amount: number
+  reversal_amount: number
+  net_loss: number
+  recognized_cost: number
+  cost_profile: {
+    amount: number
+    currency: 'USD' | 'CNY'
+    billing_cycle: 'hourly' | 'daily' | 'weekly' | 'monthly' | 'one_time'
+    started_at: string
+    source: 'default' | 'custom'
+    algorithm_version: string
+  }
+  active: boolean
+  account_deleted: boolean
+}
+
+export interface AccountCostLossStatesResponse {
+  algorithm_version: string
+  states: AccountCostLossState[]
+}
+
+export interface AccountEconomicsSnapshot {
+  algorithm_version: string
+  projection_version: string
+  sampled_at: string
+  scope: { platform?: string }
+  cny_per_usd: number
+  health: {
+    account_count: number
+    normal_count: number
+    rate_limited_count: number
+    error_count: number
+    healthy_ratio: number
+    membership_hash: string
+  }
+  actual: {
+    /** 用户计费(营收)合计。`null` = 该源的 billed 口径算不出来 —— 本地引擎(cockpit/cliproxy)
+     *  在"窗口内全部模型无单价、数据源也无估算"时只能给 null,填 0 会宣称"确实没有产出"。
+     *  2026-09-21 由 `number` 放宽(同本结构体 `month_one_time_*` 的先例)。消费方须按 `number | null` 处理。 */
+    billed_usd: number | null
+    /** 上游账号成本合计。`null` 语义同 billed_usd。 */
+    account_cost_usd: number | null
+    procurement_accrued_cny: number
+    impairment_loss_cny: number
+    economic_cost_cny: number | null
+    /**
+     * 「窗口内新增采购 / 封禁损失 / 经济成本」这一组只有 sub2api 后端**按窗口**提供。
+     * cockpit / cliproxy 的本地经济快照由 `costEngine.buildLocalEconomicsSnapshot` 构造,
+     * 那边只有 `accruedCost(profile, now)`(开通至今的**生命周期累计**),没有窗口切分能力
+     * —— 一律填 `null`(绝不回填那个生命周期累计:界面会把累计数谎称「窗口新增」,
+     * 且同格 note 的「生命周期累计」与它同值,自相矛盾;也绝不填 0,0 会短路消费方的
+     * `??` 兜底,把本地已按窗口算出的真实值整段丢弃)。
+     * 消费方必须按 `number | null` 处理。2026-09-23 由 `number` 放宽。
+     */
+    window_procurement_cny: number | null
+    window_impairment_loss_cny: number | null
+    window_economic_cost_cny: number | null
+    /**
+     * 「本月一次性采购 / 已删除账号」这一组**只有 sub2api 后端**提供。
+     * cockpit / cliproxy 的本地经济快照由 `costEngine.buildLocalEconomicsSnapshot` 构造,
+     * 不掌握这些字段 —— 那边一律填 `null`(绝不填 0,0 会短路消费方的 `??` 兜底,
+     * 把本地已算出的真实值整段丢弃,并让 note 谎称「含 0 个已删除账号快照」)。
+     * 消费方必须按 `number | null` 处理。2026-09-20 由 `number` 放宽。
+     */
+    month_one_time_procurement_cny: number | null
+    month_one_time_purchase_count: number | null
+    month_deleted_one_time_purchase_count: number | null
+    month_deleted_recurring_procurement_cny: number | null
+    month_deleted_recurring_purchase_count: number | null
+    /** 贡献毛利 = billed × 汇率 − 经济成本。`null` = billed 不可知 ⇒ 算不出毛利,不得回退成 0。 */
+    contribution_margin_cny: number | null
+    cny_per_billed_usd: number | null
+    payback_ratio: number | null
+    projected_contribution_cny_per_hour: number | null
+    estimated_payback_hours: number | null
+  }
+  projection: {
+    version: string
+    confidence: 'unavailable' | 'low' | 'medium' | 'high'
+    warning?: string
+    valid_intervals: number
+    reset_intervals: number
+    coverage_hours: number
+    billed_usd_per_hour: number | null
+    account_cost_usd_per_hour: number | null
+    capacity_adjusted_billed_usd_per_hour: number | null
+    capacity_adjusted_account_cost_usd_per_hour: number | null
+    capacity_adjustment: number
+    healthy_capacity_ratio: number
+  }
+  data_quality: {
+    status: 'complete' | 'partial' | 'estimated' | 'unavailable'
+    sample_count: number
+    invalid_cost_profile_count: number
+    exchange_rate_source: string
+    unknown_plan_count?: number
+  }
+  series: Array<{
+    sampled_at: string
+    normal_count: number
+    rate_limited_count: number
+    error_count: number
+    billed_usd_per_hour: number | null
+    account_cost_usd_per_hour: number | null
+    stable: boolean
+  }>
+  events: Array<{
+    occurred_at: string
+    kind: 'core_started' | 'pool_membership_changed' | 'counter_regression' | 'sampling_gap' | 'impairment_confirmed' | string
+    label: string
+    severity: 'info' | 'warning' | string
+  }>
+}
+
+export async function getEconomicsSnapshot(input: {
+  scope?: string
+  platform?: string
+  account_ids?: string
+  cny_per_usd: number
+  exchange_rate_source?: string
+  window_hours?: number
+}): Promise<AccountEconomicsSnapshot> {
+  const { data } = await apiClient.get<AccountEconomicsSnapshot>('/admin/accounts/economics/snapshot', { params: input, baseURL: getCostServiceBaseURL(), _explicitBaseURL: true })
+  return data
+}
+
+export interface AccountCostLossEvent {
+  id: number
+  account_id?: number
+  account_id_snapshot: number
+  account_name: string
+  platform: string
+  account_type: string
+  event_type: 'terminal_loss' | 'refund' | 'reversal'
+  reason: string
+  occurred_at: string
+  currency: 'USD' | 'CNY'
+  amount: number
+  accrued_cost: number
+  recognized_cost: number
+  source_event_id?: number
+  idempotency_key: string
+  algorithm_version: string
+}
+
+export async function listCostLossStates(): Promise<AccountCostLossStatesResponse> {
+  const { data } = await apiClient.get<AccountCostLossStatesResponse>('/admin/accounts/cost-loss-states', { baseURL: getCostServiceBaseURL(), _explicitBaseURL: true })
+  return data
+}
+
+export async function confirmCostLoss(id: number, input: {
+  message?: string
+  status_code?: number
+  upstream_code?: string
+  occurred_at?: string
+  idempotency_key?: string
+} = {}): Promise<{ event: AccountCostLossEvent; created: boolean }> {
+  const { data } = await apiClient.post<{ event: AccountCostLossEvent; created: boolean }>(`/admin/accounts/${id}/cost-loss/confirm`, input, { baseURL: getCostServiceBaseURL(), _explicitBaseURL: true })
+  return data
+}
+
+export async function recordCostLossRefund(eventId: number, input: {
+  amount: number
+  message?: string
+  occurred_at?: string
+  idempotency_key: string
+}): Promise<{ event: AccountCostLossEvent; created: boolean }> {
+  const { data } = await apiClient.post<{ event: AccountCostLossEvent; created: boolean }>(`/admin/accounts/cost-loss-events/${eventId}/refund`, input, { baseURL: getCostServiceBaseURL(), _explicitBaseURL: true })
+  return data
+}
+
+export async function reverseCostLoss(id: number): Promise<{ reversed: number }> {
+  const { data } = await apiClient.post<{ reversed: number }>(`/admin/accounts/${id}/cost-loss/reverse`, undefined, { baseURL: getCostServiceBaseURL(), _explicitBaseURL: true })
+  return data
+}
+
+/**
+ * List all accounts with pagination
+ * @param page - Page number (default: 1)
+ * @param pageSize - Items per page (default: 20)
+ * @param filters - Optional filters
+ * @returns Paginated list of accounts
+ */
+export async function list(
+  page: number = 1,
+  pageSize: number = 20,
+  filters?: {
+    platform?: string
+    type?: string
+    status?: string
+    group?: string
+    search?: string
+    privacy_mode?: string
+    lite?: string
+    include_scheduler_score?: string
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  },
+  options?: {
+    signal?: AbortSignal
+  }
+): Promise<PaginatedResponse<Account>> {
+  const { data } = await apiClient.get<PaginatedResponse<Account>>('/admin/accounts', {
+    params: {
+      page,
+      page_size: pageSize,
+      ...filters
+    },
+    signal: options?.signal
+  })
+  return data
+}
+
+export interface AccountListWithEtagResult {
+  notModified: boolean
+  etag: string | null
+  data: PaginatedResponse<Account> | null
+}
+
+export async function listWithEtag(
+  page: number = 1,
+  pageSize: number = 20,
+  filters?: {
+    platform?: string
+    type?: string
+    status?: string
+    group?: string
+    search?: string
+    privacy_mode?: string
+    lite?: string
+    include_scheduler_score?: string
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  },
+  options?: {
+    signal?: AbortSignal
+    etag?: string | null
+  }
+): Promise<AccountListWithEtagResult> {
+  const headers: Record<string, string> = {}
+  if (options?.etag) {
+    headers['If-None-Match'] = options.etag
+  }
+
+  const response = await apiClient.get<PaginatedResponse<Account>>('/admin/accounts', {
+    params: {
+      page,
+      page_size: pageSize,
+      ...filters
+    },
+    headers,
+    signal: options?.signal,
+    validateStatus: (status) => (status >= 200 && status < 300) || status === 304
+  })
+
+  const etagHeader = typeof response.headers?.etag === 'string' ? response.headers.etag : null
+  if (response.status === 304) {
+    return {
+      notModified: true,
+      etag: etagHeader,
+      data: null
+    }
+  }
+
+  return {
+    notModified: false,
+    etag: etagHeader,
+    data: response.data
+  }
+}
+
+/**
+ * Get account by ID
+ * @param id - Account ID
+ * @returns Account details
+ */
+export async function getById(id: number): Promise<Account> {
+  const { data } = await apiClient.get<Account>(`/admin/accounts/${id}`)
+  return data
+}
+
+/**
+ * Create new account
+ * @param accountData - Account data
+ * @returns Created account
+ */
+export async function create(accountData: CreateAccountRequest): Promise<Account> {
+  const { data } = await apiClient.post<Account>('/admin/accounts', accountData)
+  return data
+}
+
+/**
+ * Duplicate an account while keeping credentials on the server.
+ * @param id - Source account ID
+ * @returns Newly created account
+ */
+const duplicateOperationKeys = new Map<number, string>()
+
+function duplicateOperationStorageKey(id: number): string {
+  return `sub2api:admin:account-duplicate:${id}`
+}
+
+function getStoredDuplicateOperationKey(id: number): string | null {
+  try {
+    return globalThis.sessionStorage?.getItem(duplicateOperationStorageKey(id)) ?? null
+  } catch {
+    return null
+  }
+}
+
+function storeDuplicateOperationKey(id: number, key: string | null): void {
+  try {
+    if (key) globalThis.sessionStorage?.setItem(duplicateOperationStorageKey(id), key)
+    else globalThis.sessionStorage?.removeItem(duplicateOperationStorageKey(id))
+  } catch {
+    // In-memory retry protection still works when browser storage is unavailable.
+  }
+}
+
+export async function duplicate(id: number): Promise<Account> {
+  let idempotencyKey = duplicateOperationKeys.get(id) ?? getStoredDuplicateOperationKey(id)
+  if (!idempotencyKey) {
+    const requestID = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    idempotencyKey = `account-duplicate-${id}-${requestID}`
+  }
+  duplicateOperationKeys.set(id, idempotencyKey)
+  storeDuplicateOperationKey(id, idempotencyKey)
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/duplicate`, undefined, {
+    headers: { 'Idempotency-Key': idempotencyKey }
+  })
+  duplicateOperationKeys.delete(id)
+  storeDuplicateOperationKey(id, null)
+  return data
+}
+
+/**
+ * Update account
+ * @param id - Account ID
+ * @param updates - Fields to update
+ * @returns Updated account
+ */
+export async function update(id: number, updates: UpdateAccountRequest): Promise<Account> {
+  const { data } = await apiClient.put<Account>(`/admin/accounts/${id}`, updates)
+  return data
+}
+
+/**
+ * Check mixed-channel risk for account-group binding.
+ */
+export async function checkMixedChannelRisk(
+  payload: CheckMixedChannelRequest
+): Promise<CheckMixedChannelResponse> {
+  const { data } = await apiClient.post<CheckMixedChannelResponse>('/admin/accounts/check-mixed-channel', payload)
+  return data
+}
+
+/**
+ * Delete account
+ * @param id - Account ID
+ * @returns Success confirmation
+ */
+export async function deleteAccount(id: number): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(`/admin/accounts/${id}`)
+  return data
+}
+
+/**
+ * Toggle account status
+ * @param id - Account ID
+ * @param status - New status
+ * @returns Updated account
+ */
+export async function toggleStatus(id: number, status: 'active' | 'inactive'): Promise<Account> {
+  return update(id, { status })
+}
+
+export interface AccountTestResult {
+  success: boolean
+  message: string
+  latency_ms?: number
+}
+
+interface AccountTestEvent {
+  type?: string
+  text?: string
+  status?: string
+  success?: boolean
+  error?: string
+}
+
+/**
+ * The account test endpoint intentionally streams SSE events so the native
+ * account test dialog can show progress. The cost console only needs the
+ * terminal result, so normalize the stream into the small result shape used
+ * by the latency table.
+ */
+export function parseAccountTestSse(payload: unknown, elapsedMs: number): AccountTestResult {
+  if (payload && typeof payload === 'object' && 'success' in payload) {
+    const result = payload as Partial<AccountTestResult>
+    return {
+      success: Boolean(result.success),
+      message: String(result.message || (result.success ? '连接成功' : '连接测试失败')),
+      latency_ms: result.latency_ms ?? Math.max(1, Math.round(elapsedMs)),
+    }
+  }
+
+  const events: AccountTestEvent[] = []
+  const text = String(payload || '')
+  for (const block of text.split(/\r?\n\r?\n/)) {
+    const data = block
+      .split(/\r?\n/)
+      .filter((line) => line.trimStart().startsWith('data:'))
+      .map((line) => line.replace(/^\s*data:\s?/, ''))
+      .join('\n')
+      .trim()
+    if (!data) continue
+    try {
+      const event = JSON.parse(data) as AccountTestEvent
+      events.push(event)
+    } catch {
+      // Ignore keep-alive or non-JSON SSE frames and use the terminal event.
+    }
+  }
+
+  const error = [...events].reverse().find((event) => event.type === 'error')
+  const complete = [...events].reverse().find((event) => event.type === 'test_complete')
+  const success = Boolean(complete?.success) && !error
+  const message = error?.error || (success
+    ? [...events].reverse().find((event) => event.type === 'status' || event.type === 'content')?.text || '连接成功'
+    : '连接测试失败：未收到有效的完成事件')
+
+  return {
+    success,
+    message,
+    latency_ms: Math.max(1, Math.round(elapsedMs)),
+  }
+}
+
+/** Test account connectivity and normalize the backend SSE response. */
+export async function testAccount(id: number): Promise<AccountTestResult> {
+  const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  const { data } = await apiClient.post<string>(`/admin/accounts/${id}/test`, undefined, {
+    responseType: 'text',
+    timeout: 60000,
+  })
+  const finishedAt = typeof performance !== 'undefined' ? performance.now() : Date.now()
+  return parseAccountTestSse(data, finishedAt - startedAt)
+}
+
+/**
+ * Refresh account credentials
+ * @param id - Account ID
+ * @returns Updated account
+ */
+export async function refreshCredentials(id: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/refresh`)
+  return data
+}
+
+/**
+ * Apply OAuth credentials after re-authorization.
+ *
+ * Unlike `update()`, this endpoint:
+ * - never overwrites the whole `extra` JSONB (merges incrementally instead),
+ *   so persistent settings like `base_rpm`, `window_cost_limit`, `max_sessions`,
+ *   `quota_*` and `privacy_mode` are preserved
+ * - clears the account error and invalidates the token cache server-side
+ */
+export async function applyOAuthCredentials(
+  id: number,
+  payload: {
+    type: 'oauth' | 'setup-token'
+    credentials: Record<string, unknown>
+    extra?: Record<string, unknown>
+  }
+): Promise<Account> {
+  const { data } = await apiClient.post<Account>(
+    `/admin/accounts/${id}/apply-oauth-credentials`,
+    payload
+  )
+  return data
+}
+
+/**
+ * Get account usage statistics
+ * @param id - Account ID
+ * @param days - Number of days (default: 30)
+ * @returns Account usage statistics with history, summary, and models
+ */
+export async function getStats(id: number, days: number = 30): Promise<AccountUsageStatsResponse> {
+  const { data } = await apiClient.get<AccountUsageStatsResponse>(`/admin/accounts/${id}/stats`, {
+    params: { days }
+  })
+  return data
+}
+
+/**
+ * Clear account error
+ * @param id - Account ID
+ * @returns Updated account
+ */
+export async function clearError(id: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/clear-error`)
+  return data
+}
+
+/**
+ * Get account usage information (5h/7d window)
+ * @param id - Account ID
+ * @returns Account usage info
+ */
+export async function getUsage(id: number, source?: 'passive' | 'active', force?: boolean): Promise<AccountUsageInfo> {
+  const params: Record<string, string> = {}
+  if (source) params.source = source
+  if (force) params.force = 'true'
+  const { data } = await apiClient.get<AccountUsageInfo>(`/admin/accounts/${id}/usage`, {
+    params: Object.keys(params).length > 0 ? params : undefined
+  })
+  return data
+}
+
+export interface BatchAccountUsageResponse {
+  usage: Record<string, AccountUsageInfo>
+  errors: Record<string, string>
+}
+
+export async function getBatchUsage(accountIds: number[], force?: boolean): Promise<BatchAccountUsageResponse> {
+  const { data } = await apiClient.post<BatchAccountUsageResponse>('/admin/accounts/usage/batch', {
+    account_ids: accountIds,
+    force: force === true
+  })
+  return data
+}
+
+/**
+ * Clear account rate limit status
+ * @param id - Account ID
+ * @returns Updated account
+ */
+export async function clearRateLimit(id: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(
+    `/admin/accounts/${id}/clear-rate-limit`
+  )
+  return data
+}
+
+/**
+ * Recover account runtime state in one call
+ * @param id - Account ID
+ * @returns Updated account
+ */
+export async function recoverState(id: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/recover-state`)
+  return data
+}
+
+/**
+ * Reset account quota usage
+ * @param id - Account ID
+ * @returns Updated account
+ */
+export async function resetAccountQuota(id: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(
+    `/admin/accounts/${id}/reset-quota`
+  )
+  return data
+}
+
+/**
+ * Get temporary unschedulable status
+ * @param id - Account ID
+ * @returns Status with detail state if active
+ */
+export async function getTempUnschedulableStatus(id: number): Promise<TempUnschedulableStatus> {
+  const { data } = await apiClient.get<TempUnschedulableStatus>(
+    `/admin/accounts/${id}/temp-unschedulable`
+  )
+  return data
+}
+
+/**
+ * Reset temporary unschedulable status
+ * @param id - Account ID
+ * @returns Success confirmation
+ */
+export async function resetTempUnschedulable(id: number): Promise<{ message: string }> {
+  const { data } = await apiClient.delete<{ message: string }>(
+    `/admin/accounts/${id}/temp-unschedulable`
+  )
+  return data
+}
+
+/**
+ * Generate OAuth authorization URL
+ * @param endpoint - API endpoint path
+ * @param config - Proxy configuration
+ * @returns Auth URL and session ID
+ */
+export async function generateAuthUrl(
+  endpoint: string,
+  config: { proxy_id?: number }
+): Promise<{ auth_url: string; session_id: string }> {
+  const { data } = await apiClient.post<{ auth_url: string; session_id: string }>(endpoint, config)
+  return data
+}
+
+/**
+ * Exchange authorization code for tokens
+ * @param endpoint - API endpoint path
+ * @param exchangeData - Session ID, code, and optional proxy config
+ * @returns Token information
+ */
+export async function exchangeCode(
+  endpoint: string,
+  exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number }
+): Promise<Record<string, unknown>> {
+  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, exchangeData)
+  return data
+}
+
+/**
+ * Batch create accounts
+ * @param accounts - Array of account data
+ * @returns Results of batch creation
+ */
+export async function batchCreate(accounts: CreateAccountRequest[]): Promise<{
+  success: number
+  failed: number
+  results: Array<{ success: boolean; account?: Account; error?: string }>
+}> {
+  const { data } = await apiClient.post<{
+    success: number
+    failed: number
+    results: Array<{ success: boolean; account?: Account; error?: string }>
+  }>('/admin/accounts/batch', { accounts })
+  return data
+}
+
+/**
+ * Batch update credentials fields for multiple accounts
+ * @param request - Batch update request containing account IDs, field name, and value
+ * @returns Results of batch update
+ */
+export async function batchUpdateCredentials(request: {
+  account_ids: number[]
+  field: string
+  value: any
+}): Promise<{
+  success: number
+  failed: number
+  results: Array<{ account_id: number; success: boolean; error?: string }>
+}> {
+  const { data } = await apiClient.post<{
+    success: number
+    failed: number
+    results: Array<{ account_id: number; success: boolean; error?: string }>
+  }>('/admin/accounts/batch-update-credentials', request)
+  return data
+}
+
+/**
+ * Bulk update multiple accounts
+ * @param accountIds - Array of account IDs
+ * @param updates - Fields to update
+ * @returns Success confirmation
+ */
+export async function bulkUpdate(
+  accountIdsOrPayload: number[] | Record<string, unknown>,
+  updates?: Record<string, unknown>
+): Promise<{
+  success: number
+  failed: number
+  success_ids?: number[]
+  failed_ids?: number[]
+  results: Array<{ account_id: number; success: boolean; error?: string }>
+  }> {
+  const payload = Array.isArray(accountIdsOrPayload)
+    ? {
+        account_ids: accountIdsOrPayload,
+        ...(updates ?? {})
+      }
+    : accountIdsOrPayload
+  const { data } = await apiClient.post<{
+    success: number
+    failed: number
+    success_ids?: number[]
+    failed_ids?: number[]
+    results: Array<{ account_id: number; success: boolean; error?: string }>
+  }>('/admin/accounts/bulk-update', payload)
+  return data
+}
+
+/**
+ * Get account today statistics
+ * @param id - Account ID
+ * @returns Today's stats (requests, tokens, cost)
+ */
+export async function getTodayStats(id: number): Promise<WindowStats> {
+  const { data } = await apiClient.get<WindowStats>(`/admin/accounts/${id}/today-stats`)
+  return data
+}
+
+export interface BatchTodayStatsResponse {
+  stats: Record<string, WindowStats>
+}
+
+/**
+ * 批量获取多个账号的今日统计
+ * @param accountIds - 账号 ID 列表
+ * @returns 以账号 ID（字符串）为键的统计映射
+ */
+export async function getBatchTodayStats(accountIds: number[], startTime?: string): Promise<BatchTodayStatsResponse> {
+  const { data } = await apiClient.post<BatchTodayStatsResponse>('/admin/accounts/today-stats/batch', {
+    account_ids: accountIds,
+    start_time: startTime
+  })
+  return data
+}
+
+/**
+ * Set account schedulable status
+ * @param id - Account ID
+ * @param schedulable - Whether the account should participate in scheduling
+ * @returns Updated account
+ */
+export async function setSchedulable(id: number, schedulable: boolean): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/schedulable`, {
+    schedulable
+  })
+  return data
+}
+
+/**
+ * Get available models for an account
+ * @param id - Account ID
+ * @returns List of available models for this account
+ */
+export async function getAvailableModels(id: number): Promise<ClaudeModel[]> {
+  const { data } = await apiClient.get<ClaudeModel[]>(`/admin/accounts/${id}/models`)
+  return data
+}
+
+export interface SyncUpstreamModelsResult {
+  models: string[]
+}
+
+/**
+ * Sync live supported models from the account's upstream model-list endpoint
+ * @param id - Account ID
+ * @returns List of model IDs returned by the upstream
+ */
+export async function syncUpstreamModels(id: number): Promise<SyncUpstreamModelsResult> {
+  const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`)
+  return data
+}
+
+export interface SyncUpstreamPreviewParams {
+  platform: string
+  type: string
+  base_url?: string
+  api_key: string
+}
+
+/**
+ * Preview upstream models without a saved account (create-flow)
+ * @param params - Connection credentials
+ * @returns List of model IDs returned by the upstream
+ */
+export async function syncUpstreamModelsPreview(params: SyncUpstreamPreviewParams): Promise<SyncUpstreamModelsResult> {
+  const { data } = await apiClient.post<SyncUpstreamModelsResult>('/admin/accounts/models/sync-upstream-preview', params)
+  return data
+}
+
+export interface CRSPreviewAccount {
+  crs_account_id: string
+  kind: string
+  name: string
+  platform: string
+  type: string
+}
+
+export interface PreviewFromCRSResult {
+  new_accounts: CRSPreviewAccount[]
+  existing_accounts: CRSPreviewAccount[]
+}
+
+export async function previewFromCrs(params: {
+  base_url: string
+  username: string
+  password: string
+}): Promise<PreviewFromCRSResult> {
+  const { data } = await apiClient.post<PreviewFromCRSResult>('/admin/accounts/sync/crs/preview', params)
+  return data
+}
+
+export async function syncFromCrs(params: {
+  base_url: string
+  username: string
+  password: string
+  sync_proxies?: boolean
+  selected_account_ids?: string[]
+}): Promise<{
+  created: number
+  updated: number
+  skipped: number
+  failed: number
+  items: Array<{
+    crs_account_id: string
+    kind: string
+    name: string
+    action: string
+    error?: string
+  }>
+}> {
+  const { data } = await apiClient.post<{
+    created: number
+    updated: number
+    skipped: number
+    failed: number
+    items: Array<{
+      crs_account_id: string
+      kind: string
+      name: string
+      action: string
+      error?: string
+    }>
+  }>('/admin/accounts/sync/crs', params, {
+    timeout: 180000 // 180s timeout: sync refreshes each existing account's OAuth token serially
+  })
+  return data
+}
+
+export async function exportData(options?: {
+  ids?: number[]
+  filters?: {
+    platform?: string
+    type?: string
+    status?: string
+    group?: string
+    privacy_mode?: string
+    search?: string
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  }
+  includeProxies?: boolean
+}): Promise<AdminDataPayload> {
+  const params: Record<string, string> = {}
+  if (options?.ids && options.ids.length > 0) {
+    params.ids = options.ids.join(',')
+  } else if (options?.filters) {
+    const { platform, type, status, group, privacy_mode, search, sort_by, sort_order } = options.filters
+    if (platform) params.platform = platform
+    if (type) params.type = type
+    if (status) params.status = status
+    if (group) params.group = group
+    if (privacy_mode) params.privacy_mode = privacy_mode
+    if (search) params.search = search
+    if (sort_by) params.sort_by = sort_by
+    if (sort_order) params.sort_order = sort_order
+  }
+  if (options?.includeProxies === false) {
+    params.include_proxies = 'false'
+  }
+  const { data } = await apiClient.get<AdminDataPayload>('/admin/accounts/data', { params })
+  return data
+}
+
+export async function importData(payload: {
+  data: AdminDataPayload
+  skip_default_group_bind?: boolean
+}): Promise<AdminDataImportResult> {
+  const { data } = await apiClient.post<AdminDataImportResult>('/admin/accounts/data', {
+    data: payload.data,
+    skip_default_group_bind: payload.skip_default_group_bind
+  })
+  return data
+}
+
+export async function importCodexSession(payload: CodexSessionImportRequest): Promise<CodexSessionImportResult> {
+  const { data } = await apiClient.post<CodexSessionImportResult>('/admin/accounts/import/codex-session', payload, {
+    timeout: 120000 // 120s timeout for large session imports
+  })
+  return data
+}
+
+export async function createOpenAICodexPAT(payload: OpenAICodexPATCreateRequest): Promise<Account> {
+  const { data } = await apiClient.post<Account>('/admin/openai/create-from-codex-pat', payload)
+  return data
+}
+
+/**
+ * Get Antigravity default model mapping from backend
+ * @returns Default model mapping (from -> to)
+ */
+export async function getAntigravityDefaultModelMapping(): Promise<Record<string, string>> {
+  const { data } = await apiClient.get<Record<string, string>>(
+    '/admin/accounts/antigravity/default-model-mapping'
+  )
+  return data
+}
+
+/**
+ * Refresh OpenAI token using refresh token
+ * @param refreshToken - The refresh token
+ * @param proxyId - Optional proxy ID
+ * @returns Token information including access_token, email, etc.
+ */
+export async function refreshOpenAIToken(
+  refreshToken: string,
+  proxyId?: number | null,
+  endpoint: string = '/admin/openai/refresh-token',
+  clientId?: string
+): Promise<Record<string, unknown>> {
+  const payload: { refresh_token: string; proxy_id?: number; client_id?: string } = {
+    refresh_token: refreshToken
+  }
+  if (proxyId) {
+    payload.proxy_id = proxyId
+  }
+  if (clientId) {
+    payload.client_id = clientId
+  }
+  const { data } = await apiClient.post<Record<string, unknown>>(endpoint, payload)
+  return data
+}
+
+/**
+ * Batch operation result type
+ */
+export interface BatchOperationResult {
+  total: number
+  success: number
+  failed: number
+  success_ids?: number[]
+  failed_ids?: number[]
+  errors?: Array<{ account_id: number; error: string }>
+  warnings?: Array<{ account_id: number; warning: string }>
+}
+
+/**
+ * Revert account proxy to original before fallback
+ * @param id - Account ID
+ * @returns Success confirmation
+ */
+export async function revertProxyFallback(id: number): Promise<{ message: string }> {
+  const { data } = await apiClient.post<{ message: string }>(`/admin/accounts/${id}/revert-proxy-fallback`)
+  return data
+}
+
+/**
+ * Delete multiple accounts with bounded server-side concurrency.
+ */
+export async function batchDelete(accountIds: number[]): Promise<BatchOperationResult> {
+  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-delete', {
+    account_ids: accountIds
+  })
+  return data
+}
+
+/**
+ * Batch clear account errors
+ * @param accountIds - Array of account IDs
+ * @returns Batch operation result
+ */
+export async function batchClearError(accountIds: number[]): Promise<BatchOperationResult> {
+  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-clear-error', {
+    account_ids: accountIds
+  })
+  return data
+}
+
+/**
+ * Batch refresh account credentials
+ * @param accountIds - Array of account IDs
+ * @returns Batch operation result
+ */
+export async function batchRefresh(accountIds: number[]): Promise<BatchOperationResult> {
+  const { data } = await apiClient.post<BatchOperationResult>('/admin/accounts/batch-refresh', {
+    account_ids: accountIds,
+  }, {
+    timeout: 120000  // 120s timeout for large batch refreshes
+  })
+  return data
+}
+
+/**
+ * Set privacy for an Antigravity OAuth account
+ * @param id - Account ID
+ * @returns Updated account
+ */
+export async function setPrivacy(id: number): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/set-privacy`)
+  return data
+}
+
+/**
+ * OpenAI / Codex rate-limit reset feature: query and reset upstream usage.
+ */
+export interface OpenAIRateLimitWindow {
+  used_percent: number
+  limit_window_seconds: number
+  reset_after_seconds: number
+  reset_at: number
+}
+
+export interface OpenAIRateLimit {
+  allowed: boolean
+  limit_reached: boolean
+  primary_window?: OpenAIRateLimitWindow | null
+  secondary_window?: OpenAIRateLimitWindow | null
+}
+
+export interface OpenAIAdditionalRateLimit {
+  limit_name: string
+  metered_feature: string
+  rate_limit?: OpenAIRateLimit | null
+}
+
+export interface OpenAIRateLimitResetCreditDetail {
+  expires_at?: string
+}
+
+export interface OpenAIRateLimitResetCredits {
+  available_count: number
+  credits?: OpenAIRateLimitResetCreditDetail[]
+}
+
+export interface OpenAIQuotaUsage {
+  user_id?: string
+  account_id?: string
+  email?: string
+  plan_type?: string
+  rate_limit?: OpenAIRateLimit | null
+  additional_rate_limits?: OpenAIAdditionalRateLimit[]
+  rate_limit_reset_credits?: OpenAIRateLimitResetCredits | null
+  fetched_at: number
+}
+
+export interface OpenAIQuotaResetCredit {
+  id?: string
+  reset_type?: string
+  status?: string
+  granted_at?: string
+  expires_at?: string
+  redeem_started_at?: string
+  redeemed_at?: string
+}
+
+export interface OpenAIQuotaResetResult {
+  code: string
+  credit?: OpenAIQuotaResetCredit | null
+  windows_reset: number
+  quota?: OpenAIQuotaUsage | null
+  account?: Account | null
+  cache_refreshed: boolean
+  account_state_recovered: boolean
+  warning_code?:
+    | 'reset_credit_cache_refresh_failed'
+    | 'account_state_recovery_failed'
+    | 'account_state_refresh_failed'
+}
+
+/** Usage payload plus whether the reset-credit snapshot was persisted. */
+export interface OpenAIQuotaRefreshResult extends OpenAIQuotaUsage {
+  cache_persisted: boolean
+}
+
+/**
+ * Query the upstream quota AND persist the reset-credit snapshot on the account
+ * so the card can be rehydrated without an upstream round-trip. It is a POST
+ * because it writes account state (and must therefore be audited).
+ *
+ * The read-only `GET /admin/openai/accounts/:id/quota` endpoint still exists for
+ * API consumers; the panel always wants the snapshot persisted, so it has no
+ * client binding here.
+ */
+export async function refreshOpenAIQuota(id: number): Promise<OpenAIQuotaRefreshResult> {
+  const { data } = await apiClient.post<OpenAIQuotaRefreshResult>(
+    `/admin/openai/accounts/${id}/quota/refresh`
+  )
+  return data
+}
+
+/**
+ * Consume one rate-limit-reset credit for an OpenAI/Codex OAuth account.
+ *
+ * The credit is non-refundable and the endpoint chains an upstream reset with an
+ * upstream re-query, so it needs a larger budget than the default client
+ * timeout: aborting locally would report a successful consumption as a failure
+ * and invite a retry that spends a second credit.
+ */
+export async function resetOpenAIQuota(id: number): Promise<OpenAIQuotaResetResult> {
+  const { data } = await apiClient.post<OpenAIQuotaResetResult>(
+    `/admin/openai/accounts/${id}/reset-quota`,
+    undefined,
+    { timeout: 90_000 }
+  )
+  return data
+}
+
+export interface SparkShadowCreatePayload {
+  name?: string
+  priority?: number
+  concurrency?: number
+  group_ids?: number[]
+}
+
+export async function createSparkShadow(parentId: number, payload: SparkShadowCreatePayload): Promise<Account> {
+  const { data } = await apiClient.post<Account>(`/admin/accounts/${parentId}/shadow`, payload)
+  return data
+}
+
+export async function getUpstreamBillingProbeSettings(): Promise<UpstreamBillingProbeSettings> {
+  const { data } = await apiClient.get<UpstreamBillingProbeSettings>('/admin/accounts/upstream-billing-probe/settings')
+  return data
+}
+
+export async function updateUpstreamBillingProbeSettings(
+  settings: UpstreamBillingProbeSettings
+): Promise<UpstreamBillingProbeSettings> {
+  const { data } = await apiClient.put<UpstreamBillingProbeSettings>(
+    '/admin/accounts/upstream-billing-probe/settings',
+    settings
+  )
+  return data
+}
+
+export async function setUpstreamBillingProbeEnabled(id: number, enabled: boolean): Promise<void> {
+  await apiClient.put(`/admin/accounts/${id}/upstream-billing-probe`, { enabled })
+}
+
+export async function probeUpstreamBilling(id: number): Promise<UpstreamBillingProbeResult> {
+  const { data } = await apiClient.post<UpstreamBillingProbeResult>(`/admin/accounts/${id}/upstream-billing-probe`)
+  return data
+}
+
+export async function probeUpstreamBillingBatch(accountIds: number[]): Promise<UpstreamBillingProbeResult[]> {
+  const { data } = await apiClient.post<{ results: UpstreamBillingProbeResult[] }>(
+    '/admin/accounts/upstream-billing-probe/batch',
+    { account_ids: accountIds }
+  )
+  return data.results
+}
+
+export async function getOllamaCloudUsageSettings(): Promise<OllamaCloudUsageSettings> {
+  const { data } = await apiClient.get<OllamaCloudUsageSettings>('/admin/accounts/ollama-cloud-usage/settings')
+  return data
+}
+
+export async function updateOllamaCloudUsageSettings(
+  settings: OllamaCloudUsageSettings
+): Promise<OllamaCloudUsageSettings> {
+  const { data } = await apiClient.put<OllamaCloudUsageSettings>(
+    '/admin/accounts/ollama-cloud-usage/settings',
+    settings
+  )
+  return data
+}
+
+export async function getOllamaCloudUsage(id: number): Promise<OllamaCloudUsageState> {
+  const { data } = await apiClient.get<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage`)
+  return data
+}
+
+export async function saveOllamaCloudUsageSession(id: number, session: string): Promise<OllamaCloudUsageState> {
+  const { data } = await apiClient.put<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/session`, {
+    session
+  })
+  return data
+}
+
+export async function deleteOllamaCloudUsageSession(id: number): Promise<OllamaCloudUsageState> {
+  const { data } = await apiClient.delete<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/session`)
+  return data
+}
+
+export async function setOllamaCloudUsageAutoRefresh(id: number, enabled: boolean): Promise<OllamaCloudUsageState> {
+  const { data } = await apiClient.put<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/auto-refresh`, {
+    enabled
+  })
+  return data
+}
+
+export async function refreshOllamaCloudUsage(id: number): Promise<OllamaCloudUsageState> {
+  const { data } = await apiClient.post<OllamaCloudUsageState>(`/admin/accounts/${id}/ollama-cloud-usage/refresh`)
+  return data
+}
+
+export const accountsAPI = {
+  list,
+  listWithEtag,
+  getById,
+  create,
+  duplicate,
+  update,
+  checkMixedChannelRisk,
+  delete: deleteAccount,
+  toggleStatus,
+  testAccount,
+  refreshCredentials,
+  applyOAuthCredentials,
+  getStats,
+  clearError,
+  getUsage,
+  getBatchUsage,
+  getTodayStats,
+  getBatchTodayStats,
+  clearRateLimit,
+  recoverState,
+  resetAccountQuota,
+  getTempUnschedulableStatus,
+  resetTempUnschedulable,
+  setSchedulable,
+  getAvailableModels,
+  syncUpstreamModels,
+  syncUpstreamModelsPreview,
+  generateAuthUrl,
+  exchangeCode,
+  refreshOpenAIToken,
+  batchCreate,
+  batchUpdateCredentials,
+  bulkUpdate,
+  previewFromCrs,
+  syncFromCrs,
+  exportData,
+  importData,
+  importCodexSession,
+  createOpenAICodexPAT,
+  getAntigravityDefaultModelMapping,
+  batchDelete,
+  batchClearError,
+  batchRefresh,
+  setPrivacy,
+  revertProxyFallback,
+  refreshOpenAIQuota,
+  resetOpenAIQuota,
+  createSparkShadow,
+  getUpstreamBillingProbeSettings,
+  updateUpstreamBillingProbeSettings,
+  setUpstreamBillingProbeEnabled,
+  probeUpstreamBilling,
+  probeUpstreamBillingBatch,
+  getOllamaCloudUsageSettings,
+  updateOllamaCloudUsageSettings,
+  getOllamaCloudUsage,
+  saveOllamaCloudUsageSession,
+  deleteOllamaCloudUsageSession,
+  setOllamaCloudUsageAutoRefresh,
+  refreshOllamaCloudUsage,
+  listCostLossStates,
+  confirmCostLoss,
+  recordCostLossRefund,
+  reverseCostLoss,
+  getEconomicsSnapshot
+}
+
+export default accountsAPI

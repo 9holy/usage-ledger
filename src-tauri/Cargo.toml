@@ -1,0 +1,44 @@
+[package]
+name = "console2api"  # ponytail: cargo 包名禁数字开头,改 console2api;产物名由 tauri.conf.json productName 定,不受影响
+version = "0.2.24"
+description = "用量账本 - AI 用量监控与多源成本管理"
+authors = ["2API Console"]
+edition = "2021"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# cockpit apikey accountId 哈希:codex_apikey_<md5(apiKey)>。纯 Rust 零 transitive 依赖,
+# 比手写 90 行 MD5 可靠(手写多轮调试仍错)。仅用于 accountId 匹配,非安全用途。
+md5 = "0.7"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-process = "2"
+tauri-plugin-opener = "2.5.4"
+tauri-plugin-shell = "2"
+tauri-plugin-updater = "2.10.1"
+# 本地反代:绕过 WebView2 跨域 CORS(远程 sub2api 不响应 OPTIONS 预检)。
+# reqwest/hyper/tower-http/tokio 已被 updater 间接拉入依赖树,这里提为直接依赖并锁 features。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+axum = "0.7"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "blocking"] }
+tower-http = { version = "0.6", features = ["cors"] }
+# cockpit 单请求用量库(%USERPROFILE%\.antigravity_cockpit\codex_local_access_logs.sqlite):
+# 唯一带"单请求 input/output/cached token"的数据源。长上下文档位价按**单请求**
+# input_tokens > 272_000 判定(已用 179k 行实测:与 cockpit 落库单价档 100% 一致),
+# 而 stats JSON 是日历累计快照、codex-api 日志干脆没有 token 字段——没有它就算不准成本。
+# bundled:自带 SQLite C 源码,不依赖系统库(MSVC cl.exe 已在装,可编译)。
+rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+notify = "8"
+
+
+# Official DeepSeek Harness defaults to concatenated Zstandard JSONL frames.
+zstd = "0.13"

@@ -1,0 +1,577 @@
+{
+  "version": "0.2.24",
+  "capturedAt": "2026-10-25T18:39:40.692Z",
+  "captureDateTaipei": "2026-10-26",
+  "defaultLocale": "en",
+  "localeCounts": {
+    "en": 14,
+    "zh": 14
+  },
+  "source": "Current production Vue components; synthetic DEMO only, not production data or visual acceptance",
+  "fixtureClock": "2026-10-18T08:00:00Z",
+  "viewport": {
+    "width": 1600,
+    "height": 1080
+  },
+  "pages": [
+    {
+      "name": "monitor-overview-en",
+      "view": "monitor-overview",
+      "locale": "en",
+      "expectedLabel": "Live Overview",
+      "width": 1600,
+      "height": 2906,
+      "nonblankSamples": 50183,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-analysis-en",
+      "view": "monitor-analysis",
+      "locale": "en",
+      "expectedLabel": "Usage Analysis",
+      "width": 1600,
+      "height": 2447,
+      "nonblankSamples": 81301,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-sessions-en",
+      "view": "monitor-sessions",
+      "locale": "en",
+      "expectedLabel": "Session Details",
+      "width": 1600,
+      "height": 2051,
+      "nonblankSamples": 27087,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-sources-en",
+      "view": "monitor-sources",
+      "locale": "en",
+      "expectedLabel": "Collection & Pricing",
+      "width": 1600,
+      "height": 2372,
+      "nonblankSamples": 97577,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-session-family-en",
+      "view": "monitor-session-family",
+      "locale": "en",
+      "expectedLabel": "Full identifiers & source",
+      "width": 1600,
+      "height": 2141,
+      "nonblankSamples": 27363,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "connect-saved-en",
+      "view": "connect-saved",
+      "locale": "en",
+      "expectedLabel": "Data sources",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 10168,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": [
+          "console.example.invalid"
+        ]
+      }
+    },
+    {
+      "name": "connect-new-en",
+      "view": "connect-new",
+      "locale": "en",
+      "expectedLabel": "Connection name",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 16993,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": [
+          "console.example.invalid"
+        ]
+      }
+    },
+    {
+      "name": "cost-overview-en",
+      "view": "cost-overview",
+      "locale": "en",
+      "expectedLabel": "Upstream Assets & Live Costs",
+      "width": 1600,
+      "height": 3398,
+      "nonblankSamples": 88725,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "Upstream Assets & Live Costs",
+        "title": "Upstream Assets & Live Costs",
+        "right": 195,
+        "backLeft": 207,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-upstreams-en",
+      "view": "cost-upstreams",
+      "locale": "en",
+      "expectedLabel": "Account Operations",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 13131,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "Account Operations",
+        "title": "Account Operations",
+        "right": 195,
+        "backLeft": 207,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-oauth-en",
+      "view": "cost-oauth",
+      "locale": "en",
+      "expectedLabel": "OAuth Live Costs",
+      "width": 1600,
+      "height": 1426,
+      "nonblankSamples": 27089,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "OAuth Live Costs",
+        "title": "OAuth Live Costs",
+        "right": 195,
+        "backLeft": 207,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-api-en",
+      "view": "cost-api",
+      "locale": "en",
+      "expectedLabel": "API access center",
+      "width": 1600,
+      "height": 1271,
+      "nonblankSamples": 18549,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": [
+          "console.example.invalid"
+        ]
+      },
+      "toolbarHeading": {
+        "text": "API access center",
+        "title": "API access center",
+        "right": 195,
+        "backLeft": 207,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-unified-en",
+      "view": "cost-unified",
+      "locale": "en",
+      "expectedLabel": "Unified Cost Summary",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 13243,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "Unified Cost Summary",
+        "title": "Unified Cost Summary",
+        "right": 195,
+        "backLeft": 207,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-finance-en",
+      "view": "cost-finance",
+      "locale": "en",
+      "expectedLabel": "Cost Ledger",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 9386,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "Cost Ledger",
+        "title": "Cost Ledger",
+        "right": 195,
+        "backLeft": 207,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-governance-en",
+      "view": "cost-governance",
+      "locale": "en",
+      "expectedLabel": "Data sources and history controls",
+      "width": 1600,
+      "height": 1312,
+      "nonblankSamples": 17751,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "Data sources and history controls",
+        "title": "Data sources and history controls",
+        "right": 195,
+        "backLeft": 207,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "monitor-overview",
+      "view": "monitor-overview",
+      "locale": "zh",
+      "expectedLabel": "实时总览",
+      "width": 1600,
+      "height": 2784,
+      "nonblankSamples": 49295,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-analysis",
+      "view": "monitor-analysis",
+      "locale": "zh",
+      "expectedLabel": "用量分析",
+      "width": 1600,
+      "height": 2480,
+      "nonblankSamples": 85236,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-sessions",
+      "view": "monitor-sessions",
+      "locale": "zh",
+      "expectedLabel": "会话明细",
+      "width": 1600,
+      "height": 2013,
+      "nonblankSamples": 26793,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-sources",
+      "view": "monitor-sources",
+      "locale": "zh",
+      "expectedLabel": "采集与价格",
+      "width": 1600,
+      "height": 2372,
+      "nonblankSamples": 95423,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "monitor-session-family",
+      "view": "monitor-session-family",
+      "locale": "zh",
+      "expectedLabel": "完整标识与来源",
+      "width": 1600,
+      "height": 2103,
+      "nonblankSamples": 27077,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      }
+    },
+    {
+      "name": "connect-saved",
+      "view": "connect-saved",
+      "locale": "zh",
+      "expectedLabel": "数据来源",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 9873,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": [
+          "console.example.invalid"
+        ]
+      }
+    },
+    {
+      "name": "connect-new",
+      "view": "connect-new",
+      "locale": "zh",
+      "expectedLabel": "连接名称",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 16924,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": [
+          "console.example.invalid"
+        ]
+      }
+    },
+    {
+      "name": "cost-overview",
+      "view": "cost-overview",
+      "locale": "zh",
+      "expectedLabel": "上游资产与实时成本",
+      "width": 1600,
+      "height": 3177,
+      "nonblankSamples": 83203,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "上游资产与实时成本",
+        "title": "上游资产与实时成本",
+        "right": 399.03125,
+        "backLeft": 411.03125,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-upstreams",
+      "view": "cost-upstreams",
+      "locale": "zh",
+      "expectedLabel": "账号运行情况",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 11467,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "账号运行情况",
+        "title": "账号运行情况",
+        "right": 399.03125,
+        "backLeft": 411.03125,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-oauth",
+      "view": "cost-oauth",
+      "locale": "zh",
+      "expectedLabel": "OAuth 实时成本",
+      "width": 1600,
+      "height": 1231,
+      "nonblankSamples": 22678,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "OAuth 实时成本",
+        "title": "OAuth 实时成本",
+        "right": 399.03125,
+        "backLeft": 411.03125,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-api",
+      "view": "cost-api",
+      "locale": "zh",
+      "expectedLabel": "API 接入中心",
+      "width": 1600,
+      "height": 1254,
+      "nonblankSamples": 16778,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": [
+          "console.example.invalid"
+        ]
+      },
+      "toolbarHeading": {
+        "text": "API 接入中心",
+        "title": "API 接入中心",
+        "right": 397.53125,
+        "backLeft": 409.53125,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-unified",
+      "view": "cost-unified",
+      "locale": "zh",
+      "expectedLabel": "三端成本汇总",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 11684,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "三端成本汇总",
+        "title": "三端成本汇总",
+        "right": 399.03125,
+        "backLeft": 411.03125,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-finance",
+      "view": "cost-finance",
+      "locale": "zh",
+      "expectedLabel": "成本账本",
+      "width": 1600,
+      "height": 1080,
+      "nonblankSamples": 8591,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "成本账本",
+        "title": "成本账本",
+        "right": 399.03125,
+        "backLeft": 411.03125,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    },
+    {
+      "name": "cost-governance",
+      "view": "cost-governance",
+      "locale": "zh",
+      "expectedLabel": "数据来源与历史控制",
+      "width": 1600,
+      "height": 1276,
+      "nonblankSamples": 16672,
+      "privacy": {
+        "emailCount": 0,
+        "tokenCount": 0,
+        "secretInputs": 0,
+        "hosts": []
+      },
+      "toolbarHeading": {
+        "text": "数据来源与历史控制",
+        "title": "数据来源与历史控制",
+        "right": 399.03125,
+        "backLeft": 411.03125,
+        "overflow": "hidden",
+        "textOverflow": "ellipsis"
+      }
+    }
+  ],
+  "canvasChecks": [
+    {
+      "locale": "en",
+      "view": "monitor-analysis",
+      "coloredPixels": 57266
+    },
+    {
+      "locale": "zh",
+      "view": "monitor-analysis",
+      "coloredPixels": 57362
+    }
+  ],
+  "errors": [],
+  "escapes": [],
+  "unknownIPC": []
+}

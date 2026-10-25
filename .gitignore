@@ -1,0 +1,80 @@
+# 2026-09-12 补:此前本仓库**没有 .gitignore**,导致根目录长期堆积
+# 调试日志(b1.log / b2.log / build-fe.log …)与临时文件(tmp_* / zz_* / .tmp_*),
+# 全部处于"未忽略"状态,每次提交都要靠人肉挑。这里只忽略**明确产物**,
+# 不碰任何源码/文档/配置。
+
+# 依赖与构建产物
+node_modules/
+dist/
+dist-ssr/
+target/
+*.tsbuildinfo
+
+# 日志
+*.log
+
+# 调试/排障临时文件(根目录常见形态)
+tmp_*
+.tmp_*
+# 带连字符的形态(.tmp-mem / .tmp-fix / .tmp-build / .tmp-c2.txt …)—— 上面那条
+# `.tmp_*` 要求第 5 个字符是**下划线**,匹配不到连字符。
+# ⚠️ 原来只写了 `.tmp-*/`(带斜杠 = **只匹配目录**),**文件**形态仍然漏网 ⇒
+#    2026-09-25 两次把 `.tmp-commit.txt` / `.tmp-c2.txt` 误提交进去。
+#    这里必须补不带斜杠的那条,才同时覆盖文件与目录。
+.tmp-*
+.tmp-*/
+zz_*
+
+# 编辑器备份(本仓库 src/ 下大量 .bak-YYYYMMDD-HHMM)
+*.bak
+*.bak-*
+
+# 历史遗留的自动备份(2026-09-12 补):
+# 本仓库长期堆积 `*-backup-YYYYMMDD-HHMMSS` 文件与 `backup-YYYYMMDD-HHMM/` 目录,
+# 形态如 `src-tauri/tauri.conf.json-backup-20260815-040000`、`src/router/backup-20260817-1250/`。
+# 这些是每次改动前由脚本/人肉拷出来的快照,**不是源码**,一律忽略。
+*-backup-[0-9]*
+*_backup-[0-9]*
+backup-*/
+
+# vite/vitest 用 esbuild 编译 `*.ts` 配置时甩在仓库根的临时产物
+*.timestamp-*.mjs
+vite.config.js
+vite.config.d.ts
+
+# 一次性构建输出目录(dist_next/ dist_v3/ …)
+dist_*/
+
+# 工具自动生成的中间目录
+.omc/
+
+# vitest 在受限沙箱下需要把临时目录指到仓库内(TMPDIR/TEMP)时产生的缓存。
+# 无沙箱的普通环境不需要它,可随时整目录删除。
+.tmp-vitest/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# 本地环境
+.env
+.env.local
+.env.*.local
+*.local
+
+# Runtime data and credentials never belong in a source publication.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.pem
+*.key
+*.p12
+*.pfx
+release-assets/

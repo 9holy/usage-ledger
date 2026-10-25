@@ -1,0 +1,49 @@
+{
+  "version": "0.2.24",
+  "repository": "9holy/usage-ledger",
+  "directories": ["src", "public", "LICENSES", "src-tauri/src", "src-tauri/icons", "src-tauri/capabilities"],
+  "files": [
+    ".eslintignore", ".eslintrc.cjs", ".gitattributes", ".gitignore", ".npmrc",
+    "ALGORITHM_VERSION", "CORE_CAPABILITIES", "CORE_EXTENSION_VERSION", "CORE_VERSION", "UPSTREAM_SUB2API_COMMIT",
+    "README.md", "README.zh-CN.md", "THIRD_PARTY_NOTICES.md", "DESKTOP_RELEASE_NOTES.md", "index.html",
+    "package.json", "pnpm-lock.yaml", "postcss.config.js", "tailwind.config.js",
+    "tsconfig.json", "tsconfig.node.json", "vite.config.ts", "vitest.config.ts",
+    "src-tauri/build.rs", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/README.md",
+    "src-tauri/tauri.conf.json", "src-tauri/tauri.local.conf.json",
+    "scripts/build-desktop.sh", "scripts/desktop-command.mjs", "scripts/prepare-desktop-release.mjs",
+    "scripts/capture-readme-screenshots.mjs", "scripts/test-deepseek-headless.py",
+    "scripts/export-source-release.mjs", "scripts/source-release-policy.json",
+    "docs/PRIVACY.md", "docs/release/0.2.24.md", "docs/integrations/deepseek-harness.md",
+    "docs/legal/admin-compliance.zh.md", "docs/legal/admin-compliance.en.md",
+    "docs/demo/readme-fixtures.js", "docs/screenshots/README.md", "docs/screenshots/capture-manifest.json",
+    "docs/screenshots/connect-new.png", "docs/screenshots/connect-saved.png",
+    "docs/screenshots/cost-api.png", "docs/screenshots/cost-finance.png", "docs/screenshots/cost-governance.png",
+    "docs/screenshots/cost-oauth.png", "docs/screenshots/cost-overview.png", "docs/screenshots/cost-overview-en.png", "docs/screenshots/cost-unified.png", "docs/screenshots/cost-upstreams.png",
+    "docs/screenshots/monitor-analysis.png", "docs/screenshots/monitor-overview.png", "docs/screenshots/monitor-session-family.png",
+    "docs/screenshots/monitor-sessions.png", "docs/screenshots/monitor-sources.png",
+    "docs/screenshots/connect-new-en.png", "docs/screenshots/connect-saved-en.png",
+    "docs/screenshots/cost-api-en.png", "docs/screenshots/cost-finance-en.png", "docs/screenshots/cost-governance-en.png",
+    "docs/screenshots/cost-oauth-en.png", "docs/screenshots/cost-unified-en.png", "docs/screenshots/cost-upstreams-en.png",
+    "docs/screenshots/monitor-analysis-en.png", "docs/screenshots/monitor-overview-en.png", "docs/screenshots/monitor-session-family-en.png",
+    "docs/screenshots/monitor-sessions-en.png", "docs/screenshots/monitor-sources-en.png"
+  ],
+  "required": [
+    "README.md", "README.zh-CN.md", "docs/screenshots/monitor-overview-en.png", "docs/screenshots/cost-overview-en.png",
+    "src/features/cost-center/accountIdentity.ts", "src/features/cost-center/sourceTypes.ts", "src/features/cost-center/costDataText.ts",
+    "src/i18n/locales/en/costComponents.ts", "src/i18n/locales/zh/costComponents.ts",
+    "src/i18n/locales/en/costData.ts", "src/i18n/locales/zh/costData.ts",
+    "src/i18n/locales/en/usageMonitor.ts", "src/i18n/locales/zh/usageMonitor.ts",
+    "src/features/cost-center/components/AssetCostOverview.vue", "src/views/UsageMonitorView.vue",
+    "docs/legal/admin-compliance.zh.md", "docs/legal/admin-compliance.en.md",
+    "src-tauri/src/usage_monitor/deepseek.rs", "src-tauri/src/usage_monitor/deepseek_parser.rs",
+    "LICENSES/Sub2API-LGPL-3.0.txt", "LICENSES/GPL-3.0.txt", "LICENSES/CC-BY-NC-SA-4.0.txt"
+  ],
+  "excludedCategories": [
+    "Git history/refs and developer identity metadata",
+    "Internal audit/handoff/plans and private validation harnesses/captures",
+    "Machine runtime configuration, accounts, credentials and signing private keys",
+    "Databases, logs, backups, caches and temporary build metadata",
+    "node_modules, target, dist and external application/plugin binaries",
+    "Unused original design-reference PNGs (runtime assets are retained)"
+  ]
+}

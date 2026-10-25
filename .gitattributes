@@ -1,0 +1,5 @@
+# 补丁文件必须保持 LF 原样。
+# 本仓 core.autocrlf=true，若不声明，git 会在检出时把 .patch 的行尾改成 CRLF，
+# 而补丁的上下文行必须与被改文件（此处是 sub2api-cost-console-main 的 .go 源码，LF）逐字节一致，
+# 行尾一变就贴不上。见 docs/audit/2026-09-16-三源数据源对齐与窗口取数全量审计.md §15.4。
+docs/audit/patches/** -text

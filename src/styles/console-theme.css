@@ -1,0 +1,53 @@
+.console-theme,
+.console-surface,
+body:has(.console-theme) .modal-overlay,
+body:has(.console-surface) .modal-overlay {
+  --cost-bg: #0d110e;
+  --cost-panel: #141915;
+  --cost-panel-2: #1b211b;
+  --cost-line: #303830;
+  --cost-line-strong: #424d43;
+  --cost-text: #e9ede6;
+  --cost-muted: #7f8b81;
+  --cost-lime: #b9e55a;
+  --cost-gold: #dfbc4c;
+  --cost-blue: #7eb6d8;
+  color-scheme: dark;
+  color: var(--cost-text);
+  background: var(--cost-bg);
+  font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+  font-size: 13px;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.console-surface *, .console-surface *::before, .console-surface *::after { letter-spacing: 0; }
+.console-surface button, .console-surface input, .console-surface select { font: inherit; }
+.console-surface button, .console-surface a, .console-surface input, .console-surface select, .console-surface summary { transition: background-color .15s, border-color .15s, color .15s; }
+.console-surface :is(button, a, input, select, summary):focus-visible { outline: 2px solid var(--cost-lime); outline-offset: 3px; }
+.console-surface button:disabled { opacity: .45; cursor: default; }
+.console-icon-button { display: inline-flex; width: 36px; height: 36px; flex: 0 0 36px; align-items: center; justify-content: center; border: 1px solid var(--cost-line-strong); border-radius: 4px; color: var(--cost-muted); background: var(--cost-panel); }
+.console-icon-button:hover:not(:disabled) { color: var(--cost-text); background: var(--cost-panel-2); }
+.console-auth .input { min-height: 40px; border: 1px solid var(--cost-line-strong); border-radius: 4px; background: var(--cost-bg); color: var(--cost-text); box-shadow: none; font-size: 13px; }
+.console-auth .input::placeholder { color: #68736b; }
+.console-auth .input-label { margin-bottom: 7px; color: #b6bfb7; font-size: 12px; font-weight: 500; }
+.console-auth .input-hint { margin-top: 7px; color: var(--cost-muted); font-size: 11px; line-height: 1.7; }
+.console-auth .btn { min-height: 40px; border-radius: 4px; box-shadow: none; font-size: 13px; }
+.console-auth .btn-primary { color: #13170e; background: var(--cost-lime); border: 1px solid var(--cost-lime); font-weight: 650; }
+.console-auth .btn-primary:hover:not(:disabled) { background: #caeb87; }
+.console-auth .btn-secondary { color: var(--cost-text); background: var(--cost-panel); border: 1px solid var(--cost-line-strong); }
+.console-auth input[type='checkbox'] { accent-color: var(--cost-lime); }
+.console-auth .input-error { border-color: #ce8374; }
+
+body:has(.console-theme) .modal-overlay,
+body:has(.console-surface) .modal-overlay { background: rgb(0 0 0 / 55%); }
+body:has(.console-theme) .modal-content,
+body:has(.console-surface) .modal-content { color: var(--cost-text); background: var(--cost-panel); border-color: var(--cost-line-strong); border-radius: 8px; }
+body:has(.console-theme) :is(.modal-header, .modal-footer),
+body:has(.console-surface) :is(.modal-header, .modal-footer) { border-color: var(--cost-line); }
+body:has(.console-theme) .modal-title,
+body:has(.console-surface) .modal-title { color: var(--cost-text); }
+body:has(.console-theme) .confirm-dialog__message,
+body:has(.console-surface) .confirm-dialog__message { color: var(--cost-muted); }
+body:has(.console-theme) .confirm-dialog__cancel,
+body:has(.console-surface) .confirm-dialog__cancel { color: var(--cost-text); background: var(--cost-panel-2); border-color: var(--cost-line-strong); }
+:root.desktop-runtime body.modal-open .app-window__content { overflow: hidden; }
