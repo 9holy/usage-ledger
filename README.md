@@ -20,16 +20,22 @@ Amounts calculated by Usage Ledger are estimates based on available usage, prici
 
 ## Get the App
 
-Windows can be built from source using the instructions below. Mac test packages are provided through [Mac test builds](https://github.com/9holy/usage-ledger/actions?query=branch%3Atest%2Fmacos-free-20261026): open a successful run and download the artifact for your Mac's processor. GitHub may require sign-in to download artifacts. There are currently no stable installers on the [Releases page](https://github.com/9holy/usage-ledger/releases).
+Download the v0.2.24 installers from the [Usage Ledger release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.24):
+
+- Windows x64 installer: [Usage-Ledger_0.2.24_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_windows_x64-setup.exe).
+- macOS Apple Silicon preview: [Usage-Ledger_0.2.24_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_arm64.dmg).
+- macOS Intel preview: [Usage-Ledger_0.2.24_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_x64.dmg).
+
+Both native Mac CI jobs passed for source commit `9c5fdda9e05bfca8f2a459de887ab1dca7a78aca` in [run 40251431372](https://github.com/9holy/usage-ledger/actions/runs/40251431372). The two macOS DMGs are preview packages; manual desktop testing is still incomplete. Downloads are manual only: no automatic updates are provided by this release, and no portable executable is offered.
 
 | Platform | Availability |
 | --- | --- |
-| Windows 10/11, x64 | Primary desktop target, using WebView2 and an NSIS installer build. |
-| macOS 13+, Apple Silicon | Experimental build/test channel, separate from the Windows baseline. |
-| macOS 13+, Intel | Experimental build/test channel, separate from the Windows baseline. |
+| Windows 10/11, x64 | NSIS installer; requires WebView2. |
+| macOS 13+, Apple Silicon | Preview; separate native `arm64` DMG. macOS 13 is configured as the minimum; CI runs on macOS 15. |
+| macOS 13+, Intel | Preview; separate native `x86_64` DMG. macOS 13 is configured as the minimum; CI runs on macOS 15. |
 | Linux | No supported desktop packaging instructions are provided here. |
 
-The default branch includes the Mac build path while keeping the Windows target separate. Earlier Mac test packages remain associated with [`test/macos-free-20261026`](https://github.com/9holy/usage-ledger/tree/test/macos-free-20261026); their successful CI run validates commit `90f1a43`, not the subsequent performance changes. Follow the [macOS guide](docs/platforms/macos.md) for package selection and building instructions. Test packages use free ad-hoc signing, not Developer ID signing or notarization, so macOS may warn about their origin. Do not disable system security to bypass a warning. Some native window interactions and real-service workflows still need testing; back up important data before trying a test version.
+The macOS target remains a preview. Packages use ad-hoc signing, without Developer ID signing or notarization; the default universal build is not validated. Finder/Dock and full GUI behavior, macOS 13 behavior, and real-account workflows remain pending. See the [macOS guide](docs/platforms/macos.md) for installation and build details. Back up important data before first launch.
 
 ## First Run
 
@@ -239,7 +245,7 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. The previously tested single-architecture packages do not validate this default universal target or subsequent performance changes. Do not interpret a successful source build as validation of real accounts or every native UI flow.
+The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. CI runs on macOS 15 and validates separate native architectures; the default universal target is not validated. macOS 13 behavior, Finder/Dock and full GUI flows, and real-account use remain unverified. Build workflows do not publish GitHub Releases; this release provides manual downloads only, with no automatic updates.
 
 ## Documentation and Licensing
 

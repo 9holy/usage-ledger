@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "version": "0.2.24",
   "repository": "9holy/usage-ledger",
-  "freeze": "verified-performance-desktop-20261026-git-source",
-  "createdAt": "2026-10-26T00:41:40.728Z",
+  "freeze": "desktop-release-download-docs-20261026-git-source",
+  "createdAt": "2026-10-26T01:20:48.967Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.24",
@@ -210,13 +210,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 19061,
-      "sha256": "858d73523f00bfa1f2d602fe80e1d640859419688c386844960faac6ac43bd2c"
+      "bytes": 19400,
+      "sha256": "79ab57695358f70271919ecce5b9f0825443a7022aceeb2a460189f71f738254"
     },
     {
       "path": "README.zh-CN.md",
-      "bytes": 17389,
-      "sha256": "66849af469055e3944d7d33749bae1c8f1ae7064dbd11d3bbdcf84d329f25d05"
+      "bytes": 17735,
+      "sha256": "9f94a7a2e5919674898466202d156bb0f7c16ccb123f716d983088abd0acb02f"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -255,13 +255,13 @@
     },
     {
       "path": "docs/platforms/macos.md",
-      "bytes": 15014,
-      "sha256": "b9e0a2e45f29d01101a106a9da05b638abc69dbe46eda6e9bf475dd5a2abe794"
+      "bytes": 15452,
+      "sha256": "54f02c8174508af3d8e7897bc150c24477cbd2ae3e637e472a4f09b637047c0c"
     },
     {
       "path": "docs/release/0.2.24.md",
-      "bytes": 7805,
-      "sha256": "8396a367c20b7a585762474a2450f411fff11519231a4e6f91d704e7d3d3d8a9"
+      "bytes": 10076,
+      "sha256": "ae500a46563756d2e34421cdaa4d4c8ff2fb8e5626e702f7be7d33909673273e"
     },
     {
       "path": "docs/screenshots/README.md",
@@ -530,8 +530,8 @@
     },
     {
       "path": "src-tauri/README.md",
-      "bytes": 5941,
-      "sha256": "fe23d71b097904e200f661a67dee9f7864ee213ac872939580e3af54cf21102e"
+      "bytes": 6672,
+      "sha256": "0e4fc637b4cf84373a374e32290e88f7e03eca2df3fa0b083e86dab5273d8201"
     },
     {
       "path": "src-tauri/build.rs",

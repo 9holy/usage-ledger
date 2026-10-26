@@ -20,16 +20,22 @@
 
 ## 获取应用
 
-Windows 可按下方步骤从源码构建。Mac 测试包可在 [Mac 测试构建页面](https://github.com/9holy/usage-ledger/actions?query=branch%3Atest%2Fmacos-free-20261026)获取：打开成功的构建记录，在 Artifacts 中下载适合自己处理器的包；下载时可能需要登录 GitHub。目前 [Releases 页面](https://github.com/9holy/usage-ledger/releases)尚未提供正式安装包。
+可从[用量账本 v0.2.24 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.24)下载安装包：
+
+- Windows x64 安装包：[Usage-Ledger_0.2.24_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_windows_x64-setup.exe)。
+- macOS Apple Silicon 预览：[Usage-Ledger_0.2.24_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_arm64.dmg)。
+- macOS Intel 预览：[Usage-Ledger_0.2.24_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_x64.dmg)。
+
+源码提交 `9c5fdda9e05bfca8f2a459de887ab1dca7a78aca` 在 [CI 运行 40251431372](https://github.com/9holy/usage-ledger/actions/runs/40251431372) 中的两个原生 Mac 任务均已通过。两个 macOS DMG 均为预览包，人工桌面测试仍未完成。仅提供手动下载：本版不提供应用内自动更新，也不提供便携 EXE。
 
 | 平台 | 支持状态 |
 | --- | --- |
-| Windows 10/11，x64 | 当前主要桌面目标，使用 WebView2，可构建 NSIS 安装包。|
-| macOS 13+，Apple Silicon | 独立于 Windows 基线的实验性构建与测试通道。|
-| macOS 13+，Intel | 独立于 Windows 基线的实验性构建与测试通道。|
+| Windows 10/11，x64 | NSIS 安装包；需要 WebView2。|
+| macOS 13+，Apple Silicon | 预览版；独立的原生 `arm64` DMG。macOS 13 是配置的最低版本，CI 使用 macOS 15。|
+| macOS 13+，Intel | 预览版；独立的原生 `x86_64` DMG。macOS 13 是配置的最低版本，CI 使用 macOS 15。|
 | Linux | 本文不提供受支持的桌面打包流程。|
 
-默认分支已包含 Mac 构建路径，Windows 目标仍使用独立配置。此前的 Mac 测试包对应 [`test/macos-free-20261026` 分支](https://github.com/9holy/usage-ledger/tree/test/macos-free-20261026)；成功的 CI 运行验证的是提交 `90f1a43`，不代表此后的性能优化已经通过 Mac 验证。请参阅 [macOS 指南](docs/platforms/macos.md)了解安装包选择与构建方法。测试包使用免费的本地签名（ad-hoc），没有 Developer ID 签名或 Apple 公证，macOS 可能提示来源风险；不要关闭系统安全功能来绕过提示。部分原生窗口操作和真实服务使用流程仍待验证，试用前请备份重要数据。
+macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer ID 签名或公证；默认通用构建尚未验证。Finder/Dock 和完整 GUI 行为、macOS 13 行为及真实账号流程仍待验证。安装与构建详情请见 [macOS 指南](docs/platforms/macos.md)。首次启动前请备份重要数据。
 
 ## 首次使用
 
@@ -234,7 +240,7 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-构建脚本默认生成通用 app/DMG。[macOS 指南](docs/platforms/macos.md)还介绍单架构目标与签名限制。此前通过测试的单架构包不能证明默认通用目标或此后的性能优化已经通过验证。源码构建成功不能代替真实账号及所有原生交互流程的验证。
+构建脚本默认生成通用 app/DMG。[macOS 指南](docs/platforms/macos.md)还介绍单架构目标与签名限制。CI 在 macOS 15 上验证独立原生架构；默认通用目标尚未验证。macOS 13 行为、Finder/Dock 与完整 GUI 流程、真实账号使用均未验证。构建工作流不会发布 GitHub Release；本版仅提供手动下载，不提供应用内自动更新。
 
 ## 文档与许可
 
