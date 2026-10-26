@@ -1,5 +1,5 @@
 {
-  "version": "0.2.24",
+  "version": "0.2.25",
   "repository": "9holy/usage-ledger",
   "directories": ["src", "public", "LICENSES", "src-tauri/src", "src-tauri/icons", "src-tauri/capabilities"],
   "files": [
@@ -18,7 +18,7 @@
     "scripts/export-source-release.mjs", "scripts/source-release-policy.json",
     "scripts/build-macos.mjs", "scripts/test-macos.mjs", "scripts/smoke-macos.mjs", "scripts/__tests__/macos-build-contract.test.mjs",
     "docs/platforms/macos.md",
-    "docs/PRIVACY.md", "docs/release/0.2.24.md", "docs/integrations/deepseek-harness.md",
+    "docs/PRIVACY.md", "docs/release/0.2.24.md", "docs/release/0.2.25.md", "docs/integrations/deepseek-harness.md",
     "docs/legal/admin-compliance.zh.md", "docs/legal/admin-compliance.en.md",
     "docs/demo/readme-fixtures.js", "docs/screenshots/README.md", "docs/screenshots/capture-manifest.json",
     "docs/screenshots/connect-new.png", "docs/screenshots/connect-saved.png",

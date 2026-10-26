@@ -305,6 +305,8 @@ const liveAccountQuotaPrediction = computed(() => {
     context: undefined as { accountLabel: string; usedPercent: number } | undefined,
     quotes: [] as Array<{ currency: string; observedSubtotal: number; additionalSubtotal: number; projectedSubtotal: number }>,
     partial: false,
+    coveredRequests: 0,
+    requestCount: 0,
     message: '',
   }
   if (accountUsageError.value || quotaError.value) { result.message = t('usageMonitor.text.accountQuotaUpdateFailedWaitingForNewData'); return result }
@@ -316,7 +318,13 @@ const liveAccountQuotaPrediction = computed(() => {
   if (used == null || used <= 0) { result.message = t('usageMonitor.text.waitingForUsageRecordsInThisCycle'); return result }
   if (used >= 100 || cycle.exhaustionUnknown || cycle.exhaustedAtMs != null) { result.message = t('usageMonitor.text.cycleQuotaExhaustedExtraUsageCannotDetermineTheTotal'); return result }
   if (quota.observedAtMs !== cycle.quotaObservedAtMs || quota.usedPercent !== used) { result.message = t('usageMonitor.text.synchronizingQuotaReadings'); return result }
-  const summary = monitorAutomaticPriceSummary(cycle.totals)
+  const snapshot = cycle.quotaSnapshot
+  const quotaCutoffMs = cycle.quotaObservedAtMs + 1
+  if (!snapshot || snapshot.startMs !== cycle.startMs || snapshot.endMs !== cycle.endMs
+    || cycle.observedEndMs < quotaCutoffMs || snapshot.observedEndMs !== quotaCutoffMs) {
+    result.message = t('usageMonitor.text.synchronizingQuotaReadings'); return result
+  }
+  const summary = monitorAutomaticPriceSummary(snapshot.totals)
   result.quotes = summary.currencies.filter(row => row.identifiedSubtotal != null).map(row => {
     const observedSubtotal = row.identifiedSubtotal!
     const projectedSubtotal = observedSubtotal * 100 / used
@@ -325,6 +333,8 @@ const liveAccountQuotaPrediction = computed(() => {
   if (!result.quotes.length) { result.message = t('usageMonitor.text.noIdentifiedBillableUsageYet'); return result }
   result.context = { accountLabel: result.label, usedPercent: used }
   result.partial = !summary.complete
+  result.coveredRequests = summary.coveredRequests
+  result.requestCount = snapshot.totals.requestCount
   return result
 })
 function captureQuotaSnapshot() {
@@ -339,6 +349,7 @@ function captureQuotaSnapshot() {
     cycleStartMs: live.cycle.startMs, cycleResetAtMs: live.cycle.resetAtMs,
     quotaObservedAtMs: quota.observedAtMs, updatedAtMs: Date.now(), usedPercent: live.context.usedPercent,
     quotes: live.quotes.map(quote => ({ ...quote })), partial: live.partial,
+    coveredRequests: live.coveredRequests, requestCount: live.requestCount,
   }
   if (!validAccountQuotaSnapshot(saved)) return
   quotaSnapshots.value = [...quotaSnapshots.value.filter(row => row.accountKey !== saved.accountKey), saved].slice(-20)
@@ -358,13 +369,15 @@ const accountQuotaPrediction = computed(() => {
     return { ...live, updatedAtMs: undefined }
   }
   const waiting = !!live.message || quota.observedAtMs !== saved.quotaObservedAtMs || used !== saved.usedPercent
+    || live.coveredRequests !== saved.coveredRequests || live.requestCount !== saved.requestCount
     || live.partial !== saved.partial || live.quotes.length !== saved.quotes.length
     || live.quotes.some((quote, i) => quote.currency !== saved.quotes[i]?.currency || quote.observedSubtotal !== saved.quotes[i]?.observedSubtotal
       || quote.additionalSubtotal !== saved.quotes[i]?.additionalSubtotal || quote.projectedSubtotal !== saved.quotes[i]?.projectedSubtotal)
   return {
-    label: saved.accountLabel, cycle: { startMs: saved.cycleStartMs, resetAtMs: saved.cycleResetAtMs },
-    context: { accountLabel: saved.accountLabel, usedPercent: saved.usedPercent }, quotes: saved.quotes,
-    partial: saved.partial, message: waiting ? t('usageMonitor.text.quotaAwaitingUpdateLastValidEstimateShown') : '', updatedAtMs: saved.updatedAtMs,
+    label: live.label, cycle: { startMs: saved.cycleStartMs, resetAtMs: saved.cycleResetAtMs },
+    context: { accountLabel: live.label, usedPercent: saved.usedPercent }, quotes: saved.quotes,
+    partial: saved.partial, coveredRequests: saved.coveredRequests, requestCount: saved.requestCount,
+    message: waiting ? t('usageMonitor.text.quotaAwaitingUpdateLastValidEstimateShown') : '', updatedAtMs: saved.updatedAtMs,
   }
 })
 const displayQuotas = computed(() => {
@@ -544,14 +557,15 @@ function toolName(value: string): string { return tools.value.find((item) => ite
 function status(value: string): string { return ({ active: t('usageMonitor.text.active'), running: t('usageMonitor.text.running'), recent: t('usageMonitor.text.recentOutputRuntimeStatusUnconfirmed'), stale: t('usageMonitor.text.waitingForRecordsRuntimeStatusUnconfirmed'), idle: t('usageMonitor.text.idle'), completed: t('usageMonitor.text.completed'), historical: t('usageMonitor.text.historical'), unknown: t('usageMonitor.text.unknown') } as Record<string, string>)[value] ?? value }
 function priceLink(value: string): string | undefined { return /^https?:\/\//i.test(value) ? value : undefined }
 function pricingReason(value: string, model?: string | null): string {
+  const reason = value.split(';', 1)[0].trim()
   const reasons: Record<string, string> = { actual_mode_unknown: t('usageMonitor.text.actualBillingModeNotReported'), time_band_unknown: t('usageMonitor.text.pricingTimeBandUnconfirmed'), multiple_price_scenarios: t('usageMonitor.text.multiplePossiblePrices'), unspecified_pricing_gap: t('usageMonitor.text.pricingEvidenceIncomplete') }
-  if (reasons[value]) return reasons[value]
-  if (value === 'subscription_routing_alias_needs_model' || /qianfan|千帆/i.test(model ?? '')) return t('usageMonitor.text.planRoutingAliasUnderlyingModelOrProcurementProfileRequired')
+  if (reasons[reason]) return reasons[reason]
+  if (reason === 'subscription_routing_alias_needs_model' || /qianfan|千帆/i.test(model ?? '')) return t('usageMonitor.text.planRoutingAliasUnderlyingModelOrProcurementProfileRequired')
   if (value.startsWith('current_official_price_equivalent')) return value.includes('requested_model_not_response_confirmed') ? t('usageMonitor.text.estimatedFromAnOfficialPriceSnapshotModelIsRequest') : t('usageMonitor.text.estimatedFromASavedOfficialPriceSnapshotNotHistorical')
   if (value.startsWith('current_catalog_price_equivalent')) return t('usageMonitor.text.estimatedFromTheSavedCatalogAndOfficialSupplementaryRules', { value0: value.includes('actual_provider_unknown') ? t('usageMonitor.text.actualProviderUnconfirmedNamedVendorSReferencePriceUsed') : '', value1: value.includes('official_public_preview') ? t('usageMonitor.text.officialBetaPricingDoesNotImplyThirdPartyUsage') : '' })
   const catalogReason: Record<string, string> = { unknown_catalog_model: t('usageMonitor.text.modelNotFoundInThePriceCatalog'), ambiguous_model_provider: t('usageMonitor.text.multipleProviderPricesExistTheActualProviderIsUnconfirmed'), missing_catalog_token_prices: t('usageMonitor.text.tokenUnitPriceNotYetInTheCatalog'), missing_input_or_output_price: t('usageMonitor.text.aRequiredInputOrOutputUnitPriceIsMissing'), missing_cache_read_price: t('usageMonitor.text.cacheReadsOccurredButTheMatchingUnitPriceIs'), missing_cache_write_price: t('usageMonitor.text.cacheWritesOccurredButTheMatchingUnitPriceIs'), unknown_aggregate_context_range: t('usageMonitor.text.aggregateRecordsLackActualPerRequestContextSize'), unknown_aggregate_time_band: t('usageMonitor.text.aggregateRecordsSpanPeakOffPeakBandsWithoutUsage'), unverified_mode_context_price: t('usageMonitor.text.noVerifiedPriceForThisModeAndContextCombination'), unverified_context_price: t('usageMonitor.text.noVerifiedPriceForThisContextTier') }
-  if (catalogReason[value]) return catalogReason[value]
-  return ({ unknown_model: t('usageMonitor.text.modelNotRecorded'), unknown_actual_mode: t('usageMonitor.text.actualFastOrStandardModeNotRecorded'), actual_mode_not_reported: t('usageMonitor.text.onlyRequestedModeAvailableExecutionModeUnconfirmed'), unverified_model_or_mode_price: t('usageMonitor.text.noVerifiedOfficialPriceForThisModelOrMode'), incomplete_token_breakdown: t('usageMonitor.text.tokenDetailsRequiredForPricingAreIncomplete'), unknown_per_request_context: t('usageMonitor.text.requestContextUsageMissing'), unknown_cache_write_ttl: t('usageMonitor.text.cacheWriteLifetimeNotRecorded'), unsupported_pricing_modifier: t('usageMonitor.text.includesUnsupportedPricingConditions') } as Record<string, string>)[value] ?? value
+  if (catalogReason[reason]) return catalogReason[reason]
+  return ({ unknown_model: t('usageMonitor.text.modelNotRecorded'), unknown_actual_mode: t('usageMonitor.text.actualFastOrStandardModeNotRecorded'), actual_mode_not_reported: t('usageMonitor.text.onlyRequestedModeAvailableExecutionModeUnconfirmed'), unverified_model_or_mode_price: t('usageMonitor.text.noVerifiedOfficialPriceForThisModelOrMode'), incomplete_token_breakdown: t('usageMonitor.text.tokenDetailsRequiredForPricingAreIncomplete'), unknown_per_request_context: t('usageMonitor.text.requestContextUsageMissing'), unknown_cache_write_ttl: t('usageMonitor.text.cacheWriteLifetimeNotRecorded'), unsupported_pricing_modifier: t('usageMonitor.text.includesUnsupportedPricingConditions') } as Record<string, string>)[reason] ?? value
 }
 function pricingOptions(cost: MonitorCostEstimate) {
   const options: Array<{ label: string; amount: number | null; evidence: PriceEvidence }> = cost.scenarios?.map(scenario => ({ label: t('usageMonitor.text.estimateNotAPaidBill', { value0: monitorScenarioLabel(scenario) }), amount: scenario.amount, evidence: scenario.evidence })) ?? []
@@ -870,15 +884,15 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
             <div class="weekly-value">
               <div class="week-figures">
                 <div><span>{{ t('usageMonitor.text.estimatedIdentifiedUsageThisWeek') }}</span><strong>{{ conciseCost(weeklyTotals) }}</strong><small>{{ costBasis(weeklyTotals) }}</small><small>{{ t('usageMonitor.text.pricesFollowEachRecordSModeNotSubscriptionPayments') }}</small></div>
-                <div class="account-quota-forecast"><span>{{ t('usageMonitor.text.estimatedCurrentAccountWeeklyQuotaTotal') }}</span><strong v-for="quote in accountQuotaPrediction.quotes" :key="quote.currency">≈ {{ summaryMoney(quote.projectedSubtotal, quote.currency, true) }}</strong><strong v-if="!accountQuotaPrediction.quotes.length" class="quota-blocked">{{ t('usageMonitor.text.estimateUnavailable') }}</strong><small v-if="accountQuotaPrediction.label">{{ accountQuotaPrediction.label }}<template v-if="accountQuotaPrediction.context"> {{ t('usageMonitor.text.usedThisCycle') }} {{ accountQuotaPrediction.context.usedPercent.toFixed(1) }}%</template></small><small v-if="accountQuotaPrediction.message">{{ accountQuotaPrediction.message }}</small><small v-else>{{ t('usageMonitor.text.extrapolatesIdentifiedBillableUsageInThisCycleTo100') }}</small><small v-if="accountQuotaPrediction.partial">{{ t('usageMonitor.text.billablePortionOnlyUnidentifiedOrUnpricedUsageExcluded') }}</small><small v-if="accountQuotaPrediction.updatedAtMs" class="quota-prediction-updated">{{ t('usageMonitor.text.estimateUpdated') }} {{ time(accountQuotaPrediction.updatedAtMs) }}</small></div>
+                <div class="account-quota-forecast"><span>{{ t(accountQuotaPrediction.partial ? 'usageMonitor.text.pricedPortionProjection' : 'usageMonitor.text.estimatedCurrentAccountWeeklyQuotaTotal') }}</span><strong v-for="quote in accountQuotaPrediction.quotes" :key="quote.currency">≈ {{ summaryMoney(quote.projectedSubtotal, quote.currency, true) }}</strong><strong v-if="!accountQuotaPrediction.quotes.length" class="quota-blocked">{{ t('usageMonitor.text.estimateUnavailable') }}</strong><small v-if="accountQuotaPrediction.label">{{ accountQuotaPrediction.label }}<template v-if="accountQuotaPrediction.context"> {{ t('usageMonitor.text.usedThisCycle') }} {{ accountQuotaPrediction.context.usedPercent.toFixed(1) }}%</template></small><small v-if="accountQuotaPrediction.message">{{ accountQuotaPrediction.message }}</small><small v-else>{{ t('usageMonitor.text.extrapolatesIdentifiedBillableUsageInThisCycleTo100') }}</small><small v-if="accountQuotaPrediction.partial">{{ t('usageMonitor.text.billablePortionOnlyUnidentifiedOrUnpricedUsageExcluded') }} · {{ t('usageMonitor.text.pricedPortionCoverage', { priced: accountQuotaPrediction.coveredRequests, total: accountQuotaPrediction.requestCount }) }}</small><small v-if="accountQuotaPrediction.updatedAtMs" class="quota-prediction-updated">{{ t('usageMonitor.text.estimateUpdated') }} {{ time(accountQuotaPrediction.updatedAtMs) }}</small></div>
               </div>
-              <UsageValueChart v-for="quote in accountQuotaPrediction.quotes.filter(row => row.projectedSubtotal > 0)" :key="'composition-' + quote.currency" :forecast="quote" :quota="accountQuotaPrediction.context" />
+              <UsageValueChart v-for="quote in accountQuotaPrediction.quotes.filter(row => row.projectedSubtotal > 0)" :key="'composition-' + quote.currency" :forecast="quote" :quota="accountQuotaPrediction.context" :partial="accountQuotaPrediction.partial" />
               <p class="page-note">{{ t('usageMonitor.text.referenceValueNotAPaidBillUncollectedUsageIs') }}</p>
               <dl class="weekly-token-strip"><div><dt>{{ t('usageMonitor.text.requests') }}</dt><dd>{{ number(weeklyTotals?.requestCount) }}</dd></div><div><dt>{{ t('usageMonitor.text.inputTokens') }}</dt><dd>{{ compactNumber(weeklyTotals?.inputTokens) }}</dd></div><div><dt>{{ t('usageMonitor.text.outputTokens') }}</dt><dd>{{ compactNumber(weeklyTotals?.outputTokens) }}</dd></div><div><dt>{{ t('usageMonitor.text.cacheHit') }}</dt><dd>{{ monitorCacheRatio(weeklyTotals) }}</dd></div></dl>
               <p v-if="monitorCacheCoverage(weeklyTotals)" class="page-note">{{ monitorCacheCoverage(weeklyTotals) }}</p>
               <details class="week-evidence">
                 <summary>{{ t('usageMonitor.text.pricingEstimationEvidence') }}</summary>
-                <p v-if="accountQuotaPrediction.context && accountQuotaPrediction.cycle" class="page-note">{{ accountQuotaPrediction.label }}{{ t('usageMonitor.text.label') }}{{ time(accountQuotaPrediction.cycle.startMs) }} {{ t('usageMonitor.text.to') }} {{ time(accountQuotaPrediction.cycle.resetAtMs) }}{{ t('usageMonitor.text.identifiedAmountThisCycleQuotaUsed') }} {{ accountQuotaPrediction.context.usedPercent.toFixed(1) }}{{ t('usageMonitor.text.estimatedWeeklyQuotaTotalAssumingTheModelAndCache') }}<template v-if="accountQuotaPrediction.updatedAtMs">{{ t('usageMonitor.text.estimateUpdated') }} {{ time(accountQuotaPrediction.updatedAtMs) }}{{ t('usageMonitor.text.label2') }}</template></p>
+                <p v-if="accountQuotaPrediction.context && accountQuotaPrediction.cycle" class="page-note">{{ accountQuotaPrediction.label }}{{ t('usageMonitor.text.label') }}{{ time(accountQuotaPrediction.cycle.startMs) }} {{ t('usageMonitor.text.to') }} {{ time(accountQuotaPrediction.cycle.resetAtMs) }}{{ t('usageMonitor.text.identifiedAmountThisCycleQuotaUsed') }} {{ accountQuotaPrediction.context.usedPercent.toFixed(1) }}{{ t(accountQuotaPrediction.partial ? 'usageMonitor.text.pricedPortionProjectionAssumingUnchangedMix' : 'usageMonitor.text.estimatedWeeklyQuotaTotalAssumingTheModelAndCache') }}<template v-if="accountQuotaPrediction.updatedAtMs">{{ t('usageMonitor.text.estimateUpdated') }} {{ time(accountQuotaPrediction.updatedAtMs) }}{{ t('usageMonitor.text.label2') }}</template></p>
                 <p class="page-note">{{ t('usageMonitor.text.belowGlobalCalendarWeekComparisonAtStandardPricesAnd') }}</p>
                 <div v-if="exhaustedQuotas.length" class="forecast-paused" role="status"><Clock3 :size="22" /><div><strong>{{ t('usageMonitor.text.recordedUsageContinuesAccumulatingRemainingUsageIsNotPredicted') }}</strong><p v-for="item in exhaustedQuotas" :key="item.id">{{ toolName(item.tool) }} · {{ quotaAccountLabel(item) }} · {{ quotaWindow(item) }}{{ t('usageMonitor.text.exhausted') }}<br />{{ item.resetsAtMs ? t('usageMonitor.text.planReset') + time(item.resetsAtMs) : t('usageMonitor.text.waitingForTheSourceToProvideResetTime') }}</p><small>{{ hasExtraCredits ? t('usageMonitor.text.extraCreditsAreAvailableButTheirRemainingDurationCannot') : t('usageMonitor.text.availableCreditsHaveNotBeenConfirmed') }}{{ t('usageMonitor.text.actualUsageWillContinueToBeRecorded') }}</small></div></div>
                 <p v-for="quote in weeklyReference" :key="'uniform-' + quote.currency" class="page-note">{{ t('usageMonitor.text.comparisonNormalizedToStandardMode') }}{{ summaryMoney(quote.amount ?? quote.knownSubtotal, quote.currency) }}{{ t('usageMonitor.text.aComparisonUnderTheSameBillingAssumptionNotA') }}</p>

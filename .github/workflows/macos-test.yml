@@ -69,7 +69,7 @@ jobs:
           printf 'Commit: %s\nArchitecture: %s\nSigning: ad-hoc (not notarized)\nNative tests and packaged background startup passed.\nInteractive Finder/Dock and real-account checks remain pending.\n' "$GITHUB_SHA" '${{ matrix.arch }}' > TEST-RESULT.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: usage-ledger-0.2.24-macos-${{ matrix.arch }}-test
+          name: usage-ledger-0.2.25-macos-${{ matrix.arch }}-test
           path: mac-test-package/
           if-no-files-found: error
           retention-days: 3

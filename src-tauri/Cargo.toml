@@ -1,6 +1,6 @@
 [package]
 name = "console2api"  # ponytail: cargo 包名禁数字开头,改 console2api;产物名由 tauri.conf.json productName 定,不受影响
-version = "0.2.24"
+version = "0.2.25"
 description = "用量账本 - AI 用量监控与多源成本管理"
 authors = ["2API Console"]
 edition = "2021"

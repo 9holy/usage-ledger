@@ -26,11 +26,12 @@ export async function invoke(command, args = {}) {
     usage_monitor_session: () => ({ session: sessions[0], members: sessions.slice(0, 2), includeDescendants: true, unlinkedChildRequests: 0, requests, requestCount: requests.length, filteredTotals: totals(.5), turns: [{ id: 'demo-turn-1', startedAtMs: now - 42000, updatedAtMs: now - 2000, totals: totals(.5), timing: timing('demo-turn-1') }], selectedCompletedTurn: sessions[0].latestCompletedTurn }),
     usage_monitor_weekly: () => ({ startMs: args.startMs, endMs: args.endMs, firstRecordAtMs: now - 3 * 86400000, lastRecordAtMs: now, totals: totals(4), byTool: ['codex', 'claude'].map(tool => ({ tool, model: null, totals: totals(2) })) }),
     usage_monitor_accounts: () => ({
-      collectedAtMs: now, weekStartMs: args.weekStartMs, currentAccountKey: 'demo-codex',
+      collectedAtMs: now, weekStartMs: args.weekStartMs, currentAccountKey: 'codex:1',
       accounts: ['codex', 'claude'].map((tool, i) => {
-        const cycle = { startMs: now - 6 * 86400000, endMs: now + 86400000, observedEndMs: now, resetAtMs: now + 86400000, quotaObservedAtMs: now, exhaustedAtMs: null, exhaustionUnknown: false, usedPercent: 38 + i * 12, current: true, totals: totals(2) }
+        const cycle = { startMs: now - 6 * 86400000, endMs: now + 86400000, observedEndMs: now, resetAtMs: now + 86400000, quotaObservedAtMs: now - 1, exhaustedAtMs: null, exhaustionUnknown: false, usedPercent: 38 + i * 12, current: true, totals: totals(2) }
+        cycle.quotaSnapshot = { startMs: cycle.startMs, endMs: cycle.endMs, observedEndMs: now, totals: totals(2) }
         return {
-          accountKey: `demo-${tool}`, accountLabel: `DEMO ${tool}`, tool, attribution: 'session_creator',
+          accountKey: `${tool}:${i + 1}`, accountLabel: `DEMO ${tool}`, tool, attribution: 'session_creator',
           subscription: { startMs: now - 9 * 86400000, endMs: now + 22 * 86400000, checkedAtMs: now, source: 'local_auth', error: null },
           calendarWeek: { startMs: args.weekStartMs, endMs: now, observedEndMs: now, totals: totals(2) },
           subscriptionMonth: { startMs: now - 9 * 86400000, endMs: now + 22 * 86400000, observedEndMs: now, totals: totals(3) },
@@ -39,7 +40,7 @@ export async function invoke(command, args = {}) {
       }),
       unassignedWeek: totals(0),
     }),
-    usage_monitor_quotas: () => ({ collectedAtMs: now, quotas: ['codex', 'claude'].map((tool, i) => ({ id: i + 1, tool, accountKey: `demo-${tool}`, accountLabel: `DEMO ${tool}`, attribution: 'reported', limitId: 'weekly', slot: 'weekly', windowMinutes: 10080, plan: 'DEMO Plus', modelId: null, poolLabel: null, observedAtMs: now, resetsAtMs: now + 86400000, usedPercent: 38 + i * 12, remainingPercent: 62 - i * 12, source: 'DEMO fixture', stale: false, expired: false, sourceError: null })), sources: [] }),
+    usage_monitor_quotas: () => ({ collectedAtMs: now, quotas: ['codex', 'claude'].map((tool, i) => ({ id: i + 1, tool, accountKey: `${tool}:${i + 1}`, accountLabel: `DEMO ${tool}`, attribution: 'account', limitId: tool === 'codex' ? 'codex' : 'seven_day', slot: 'primary', windowMinutes: 10080, plan: 'DEMO Plus', modelId: null, poolLabel: null, observedAtMs: now - 1, resetsAtMs: now + 86400000, usedPercent: 38 + i * 12, remainingPercent: 62 - i * 12, source: 'DEMO fixture', stale: false, expired: false, sourceError: null })), sources: [] }),
     model_catalog_status: () => catalog,
     model_catalog_refresh: () => catalog,
     model_catalog_quote_batch: () => (args.items || []).map(item => ({ id: item.id, cost: { usd: .0321, reason: null, evidence: evidence(item.model) } })),

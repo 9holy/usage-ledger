@@ -15,7 +15,11 @@ pub struct ParserState {
     root_turn_id: Option<String>,
     requested_model: Option<String>,
     requested_mode: Option<String>,
+    #[serde(default = "legacy_requested_mode_seen")]
+    requested_mode_seen: bool,
     requested_mode_turn_id: Option<String>,
+    // Unlike recent, this survives late responses evicting this turn's usage.
+    requested_mode_turn_has_usage: bool,
     requested_mode_ambiguous: bool,
     rerouted_model: Option<String>,
     fork: bool,
@@ -25,6 +29,11 @@ pub struct ParserState {
     canonical_total: Option<Tokens>,
     pending_usage: Option<UsageOccurrence>,
     recent: VecDeque<UsageRecord>,
+}
+
+fn legacy_requested_mode_seen() -> bool {
+    // A saved cursor without this marker cannot prove its mode setting is still initial.
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,6 +55,32 @@ pub struct ParsedLine {
 }
 
 impl ParserState {
+    pub(super) fn has_ambiguous_requested_mode(&self) -> bool {
+        self.requested_mode_ambiguous
+    }
+
+    pub(super) fn recent_usage(&self) -> impl Iterator<Item = &UsageRecord> {
+        self.recent.iter()
+    }
+
+    pub(super) fn restore_requested_mode_from(&mut self, replayed: &Self) {
+        self.requested_mode.clone_from(&replayed.requested_mode);
+        self.requested_mode_seen = replayed.requested_mode_seen;
+        self.requested_mode_turn_id.clone_from(&replayed.requested_mode_turn_id);
+        self.requested_mode_turn_has_usage = replayed.requested_mode_turn_has_usage;
+        self.requested_mode_ambiguous = replayed.requested_mode_ambiguous;
+    }
+
+    pub(super) fn restore_request_mode(&mut self, replayed: &UsageRecord) {
+        if let Some(cached) = self.recent.iter_mut().find(|cached| {
+            cached.tool == replayed.tool && cached.id == replayed.id
+                && cached.session_id == replayed.session_id && cached.turn_id == replayed.turn_id
+        }) {
+            cached.requested_mode.clone_from(&replayed.requested_mode);
+            cached.unknown_fields.retain(|field| field != "requested_mode_ambiguous");
+        }
+    }
+
     fn remember(&mut self, record: UsageRecord) {
         self.recent.retain(|r| r.id != record.id);
         self.recent.push_back(record);
@@ -247,9 +282,15 @@ fn set_turn(state: &mut ParserState, id: String) {
 
 fn set_requested_mode(state: &mut ParserState, value: Option<String>, turn_context: bool) {
     let next = mode(value);
+    let has_usage = state.requested_mode_turn_has_usage
+        || state.recent.iter().any(|row| row.turn_id == state.turn_id)
+        || state
+            .pending_usage
+            .as_ref()
+            .is_some_and(|usage| usage.turn_id == state.turn_id);
     if state.requested_mode != next
         && !state.turn_id.is_empty()
-        && (!turn_context || state.recent.iter().any(|row| row.turn_id == state.turn_id))
+        && (has_usage || !turn_context && state.requested_mode_seen)
     {
         // A settings event has no response ID; an outstanding request may use the old value.
         state.requested_mode_ambiguous = true;
@@ -258,6 +299,7 @@ fn set_requested_mode(state: &mut ParserState, value: Option<String>, turn_conte
             .get_or_insert_with(|| state.turn_id.clone());
     }
     state.requested_mode = next;
+    state.requested_mode_seen = true;
 }
 
 fn record(state: &ParserState, tool: &str, id: String, time: i64, time_known: bool) -> UsageRecord {
@@ -361,7 +403,9 @@ fn codex(
         state.quota_identity_loaded = true;
         state.quota_identity_error = None;
         state.requested_mode = None;
+        state.requested_mode_seen = false;
         state.requested_mode_turn_id = None;
+        state.requested_mode_turn_has_usage = false;
         state.requested_mode_ambiguous = false;
         state.session = Some(SessionMeta {
             tool: "codex".into(),
@@ -410,6 +454,7 @@ fn codex(
             if let Some(id) = string(payload, "turn_id") {
                 if state.requested_mode_turn_id.as_ref() != Some(&id) {
                     state.requested_mode_turn_id = Some(id.clone());
+                    state.requested_mode_turn_has_usage = false;
                     state.requested_mode_ambiguous = false;
                 }
                 set_turn(state, id);
@@ -681,6 +726,11 @@ fn codex(
             result.usage.push(usage);
         }
         _ => {}
+    }
+    if result.usage.iter().any(|usage| {
+        state.requested_mode_turn_id.as_deref() == Some(usage.turn_id.as_str())
+    }) {
+        state.requested_mode_turn_has_usage = true;
     }
     if let Some(meta) = &mut state.session {
         meta.model = state.requested_model.clone().or(meta.model.clone());
@@ -1100,6 +1150,91 @@ mod tests {
     }
 
     #[test]
+    fn initial_thread_setting_after_turn_start_establishes_mode_across_batches() {
+        let mut s = ParserState::default();
+        feed(&mut s, json!({"type":"session_meta","payload":{"id":"thread"}}));
+        feed(&mut s, json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"turn"}}));
+        feed(&mut s, json!({"type":"turn_context","payload":{"turn_id":"turn","model":"gpt-6.1-sol"}}));
+        s = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        feed(&mut s, json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+            "thread_id":"thread","thread_settings":{"service_tier":"default"}}}));
+        let first = scoped_response(&mut s, "first", "turn");
+        assert_eq!(first.requested_mode.as_deref(), Some("standard"));
+        assert!(!first.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous"));
+        assert!(first.mode.is_none());
+        assert_eq!(first.mode_basis, "unknown");
+        feed(&mut s, json!({"type":"task_started","payload":{"turn_id":"next"}}));
+        let next = scoped_response(&mut s, "next", "next");
+        assert_eq!(next.requested_mode.as_deref(), Some("standard"));
+        assert!(!next.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous"));
+    }
+
+    #[test]
+    fn initial_setting_after_same_turn_usage_remains_ambiguous() {
+        for legacy_usage in [false, true] {
+            let mut s = ParserState::default();
+            meta(&mut s);
+            if legacy_usage {
+                assert_eq!(legacy(&mut s, 100, 20).usage.len(), 1);
+            } else {
+                assert!(scoped_response(&mut s, "before", "turn").requested_mode.is_none());
+            }
+            feed(&mut s, json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+                "thread_id":"thread","thread_settings":{"service_tier":"default"}}}));
+            let after = scoped_response(&mut s, "after", "turn");
+            assert!(after.requested_mode.is_none());
+            assert!(after.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous"));
+        }
+    }
+
+    #[test]
+    fn late_old_responses_cannot_erase_initial_turn_usage_evidence() {
+        let mut s = ParserState::default();
+        meta(&mut s);
+        scoped_response(&mut s, "before", "turn");
+        for id in 0..9 {
+            scoped_response(&mut s, &format!("late-{id}"), "old-turn");
+        }
+        feed(&mut s, json!({"type":"turn_context","payload":{"turn_id":"turn"}}));
+        s = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        feed(&mut s, json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+            "thread_id":"thread","thread_settings":{"service_tier":"default"}}}));
+        let usage = scoped_response(&mut s, "after", "turn");
+        assert!(usage.requested_mode.is_none());
+        assert!(usage.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous"));
+    }
+
+    #[test]
+    fn explicit_null_or_unknown_setting_is_not_an_unseen_initial_mode() {
+        for initial in [Value::Null, json!("auto")] {
+            let mut s = ParserState::default();
+            meta(&mut s);
+            for tier in [initial, json!("default")] {
+                feed(&mut s, json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+                    "thread_id":"thread","thread_settings":{"service_tier":tier}}}));
+            }
+            let usage = scoped_response(&mut s, "after", "turn");
+            assert!(usage.requested_mode.is_none());
+            assert!(usage.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous"));
+        }
+    }
+
+    #[test]
+    fn legacy_cursor_cannot_claim_its_next_setting_is_initial() {
+        let mut s = ParserState::default();
+        meta(&mut s);
+        let mut saved = serde_json::to_value(&s).unwrap();
+        saved.as_object_mut().unwrap().remove("requested_mode_seen");
+        saved.as_object_mut().unwrap().remove("requested_mode_turn_has_usage");
+        let mut s: ParserState = serde_json::from_value(saved).unwrap();
+        feed(&mut s, json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+            "thread_id":"thread","thread_settings":{"service_tier":"default"}}}));
+        let usage = scoped_response(&mut s, "legacy", "turn");
+        assert!(usage.requested_mode.is_none());
+        assert!(usage.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous"));
+    }
+
+    #[test]
     fn requested_mode_changes_are_ambiguous_until_explicit_next_turn() {
         let mut s = ParserState::default();
         feed(
@@ -1204,6 +1339,14 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("requested_mode_ambiguous");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("requested_mode_seen");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("requested_mode_turn_has_usage");
         let mut s: ParserState = serde_json::from_value(legacy).unwrap();
         assert_eq!(
             scoped_response(&mut s, "legacy-setting", "turn")

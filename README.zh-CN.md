@@ -2,7 +2,7 @@
 
 # 用量账本
 
-**版本 0.2.24 · AI 用量监控与成本工作台 · English / 中文**
+**版本 0.2.25 · AI 用量监控与成本工作台 · English / 中文**
 
 用量账本是一款桌面应用，用于了解 AI 工具的使用情况，以及背后账号和服务的成本。它把本地用量监控与 Sub2API、CLIProxyAPI、Cockpit 的成本工作台放在同一应用中。
 
@@ -20,22 +20,22 @@
 
 ## 获取应用
 
-可从[用量账本 v0.2.24 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.24)下载安装包：
+可从[用量账本 v0.2.25 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.25)下载：
 
-- Windows x64 安装包：[Usage-Ledger_0.2.24_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_windows_x64-setup.exe)。
-- macOS Apple Silicon 预览：[Usage-Ledger_0.2.24_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_arm64.dmg)。
-- macOS Intel 预览：[Usage-Ledger_0.2.24_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_x64.dmg)。
+- Windows x64 安装包：[Usage-Ledger_0.2.25_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_windows_x64-setup.exe)。
+- macOS Apple Silicon 预览：[Usage-Ledger_0.2.25_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_macos_arm64.dmg)。
+- macOS Intel 预览：[Usage-Ledger_0.2.25_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_macos_x64.dmg)。
 
-源码提交 `9c5fdda9e05bfca8f2a459de887ab1dca7a78aca` 在 [CI 运行 40251431372](https://github.com/9holy/usage-ledger/actions/runs/40251431372) 中的两个原生 Mac 任务均已通过。两个 macOS DMG 均为预览包，人工桌面测试仍未完成。仅提供手动下载：本版不提供应用内自动更新，也不提供便携 EXE。
+源码和构建来源见 Release 附带的 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/BUILD-INFO.json)。仅提供手动下载；本版不提供应用内自动更新或便携 EXE。
 
 | 平台 | 支持状态 |
 | --- | --- |
 | Windows 10/11，x64 | NSIS 安装包；需要 WebView2。|
-| macOS 13+，Apple Silicon | 预览版；独立的原生 `arm64` DMG。macOS 13 是配置的最低版本，CI 使用 macOS 15。|
-| macOS 13+，Intel | 预览版；独立的原生 `x86_64` DMG。macOS 13 是配置的最低版本，CI 使用 macOS 15。|
+| macOS 13+，Apple Silicon | 预览版；独立的原生 `arm64` DMG。macOS 13 是配置的最低版本；CI 使用 macOS 15。|
+| macOS 13+，Intel | 预览版；独立的原生 `x86_64` DMG。macOS 13 是配置的最低版本；CI 使用 macOS 15。|
 | Linux | 本文不提供受支持的桌面打包流程。|
 
-macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer ID 签名或公证；默认通用构建尚未验证。Finder/Dock 和完整 GUI 行为、macOS 13 行为及真实账号流程仍待验证。安装与构建详情请见 [macOS 指南](docs/platforms/macos.md)。首次启动前请备份重要数据。
+macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer ID 签名或公证；默认通用构建尚未验证。macOS 13 运行行为、Finder/Dock 与完整 GUI 流程、真实账号使用尚未检查。安装与构建详情请见 [macOS 指南](docs/platforms/macos.md)。首次启动前请备份重要数据。
 
 ## 首次使用
 
@@ -144,6 +144,7 @@ macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer I
 - 输出速率是记录观察窗口内的平均值，不一定等于模型瞬时流式生成速度。
 - 请求指定的模型/模式与响应确认的模型/模式是不同证据。
   缺少模式确认可能导致无法确定报价。
+- Codex 会话首次设置模式属于初始化，不作为轮次中途的模式切换。只有原始已提交 JSONL 前缀或已登记的 `.zst` 记录能证明初始模式时，才修正历史误分类；原始证据缺失或存在真实冲突时仍保持未知。此修正保留请求/Token 记录、已保存单价与额度周期事实。
 - 请查看价格覆盖与价格来源。未匹配单价的请求仍可能有有效 Token 数；
   已报价部分的汇总不是完整账单。
 
@@ -153,7 +154,7 @@ macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer I
 
 百分比归零本身不能证明新轮次开始。在已确认达到 100% 的额度边界之后，额外积分用量与该轮包含额度的金额分开统计，但仍计入适用的月累计。
 
-预测需要同一账号、同一轮次的额度百分比和累计金额来自**同一次额度记录**。暂时没有匹配的新记录时，应用可能保留上次有效估值并标明更新时间，或等待新的读数。预测不是最终费用承诺。
+预测会按**同一时间戳**配对同一账号、同一周期的额度百分比与累计额度。较旧但仍有效的配对会连同时间戳保留。部分已定价金额会明确标注并计数；未定价部分显示可读原因。预测不是最终费用承诺。
 
 ### 采购成本与费率
 
@@ -240,7 +241,7 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-构建脚本默认生成通用 app/DMG。[macOS 指南](docs/platforms/macos.md)还介绍单架构目标与签名限制。CI 在 macOS 15 上验证独立原生架构；默认通用目标尚未验证。macOS 13 行为、Finder/Dock 与完整 GUI 流程、真实账号使用均未验证。构建工作流不会发布 GitHub Release；本版仅提供手动下载，不提供应用内自动更新。
+构建脚本默认生成通用 app/DMG。[macOS 指南](docs/platforms/macos.md)还介绍单架构目标与签名限制。默认通用目标尚未验证。macOS 13 运行行为、Finder/Dock 与完整 GUI 流程、真实账号使用尚未检查。源码和构建来源见 Release 附带的 `BUILD-INFO.json`。构建工作流不会发布 GitHub Release；本版仅提供手动下载。
 
 ## 文档与许可
 
@@ -248,7 +249,7 @@ pnpm desktop:build:mac
   全部为虚构 DEMO 数据，不是真实账号账单。
 - [DeepSeek Harness 接入说明](docs/integrations/deepseek-harness.md)。
 - [macOS 构建与测试指南](docs/platforms/macos.md)。
-- [0.2.24 发布说明](docs/release/0.2.24.md)。
+- [0.2.25 发布说明](docs/release/0.2.25.md)。
 - [隐私说明](docs/PRIVACY.md)。
 - [第三方来源与许可](THIRD_PARTY_NOTICES.md)及[许可文本](LICENSES/)。
 

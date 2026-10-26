@@ -1,4 +1,4 @@
-export const ACCOUNT_QUOTA_SNAPSHOTS_KEY = 'usage-monitor:account-quota-snapshots:v1'
+export const ACCOUNT_QUOTA_SNAPSHOTS_KEY = 'usage-monitor:account-quota-snapshots:v2'
 
 export interface AccountQuotaSnapshot {
   accountKey: string
@@ -11,6 +11,8 @@ export interface AccountQuotaSnapshot {
   usedPercent: number
   quotes: Array<{ currency: string; observedSubtotal: number; additionalSubtotal: number; projectedSubtotal: number }>
   partial: boolean
+  coveredRequests: number
+  requestCount: number
 }
 
 const object = (value: unknown): value is Record<string, unknown> => value != null && typeof value === 'object'
@@ -26,6 +28,7 @@ export function validAccountQuotaSnapshot(value: unknown): value is AccountQuota
     || value.cycleStartMs > value.quotaObservedAtMs || value.quotaObservedAtMs >= value.cycleResetAtMs
     || value.updatedAtMs < value.quotaObservedAtMs || value.updatedAtMs >= value.cycleResetAtMs
     || !amount(value.usedPercent) || value.usedPercent <= 0 || value.usedPercent >= 100
+    || !timestamp(value.coveredRequests) || !timestamp(value.requestCount) || value.coveredRequests > value.requestCount
     || typeof value.partial !== 'boolean' || !Array.isArray(value.quotes) || !value.quotes.length) return false
   const usedPercent = value.usedPercent
   return value.quotes.every(quote => object(quote) && typeof quote.currency === 'string' && /^[A-Z]{3}$/.test(quote.currency)
@@ -42,8 +45,9 @@ export function loadAccountQuotaSnapshots(): AccountQuotaSnapshot[] {
     const saved: unknown = JSON.parse(raw)
     if (!Array.isArray(saved) || saved.length > 20 || !saved.every(validAccountQuotaSnapshot)
       || new Set(saved.map(row => row.accountKey)).size !== saved.length) throw new Error('Invalid account quota snapshots')
-    return saved.map(({ accountKey, tool, accountLabel, cycleStartMs, cycleResetAtMs, quotaObservedAtMs, updatedAtMs, usedPercent, quotes, partial }) => ({
+    return saved.map(({ accountKey, tool, accountLabel, cycleStartMs, cycleResetAtMs, quotaObservedAtMs, updatedAtMs, usedPercent, quotes, partial, coveredRequests, requestCount }) => ({
       accountKey, tool, accountLabel, cycleStartMs, cycleResetAtMs, quotaObservedAtMs, updatedAtMs, usedPercent, partial,
+      coveredRequests, requestCount,
       quotes: quotes.map(({ currency, observedSubtotal, additionalSubtotal, projectedSubtotal }) => ({ currency, observedSubtotal, additionalSubtotal, projectedSubtotal })),
     }))
   } catch (error) {

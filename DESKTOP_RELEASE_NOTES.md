@@ -1,8 +1,8 @@
 # Usage Ledger Desktop Release Notes
 
-Current version: **0.2.24**. See the [latest bilingual release notes](docs/release/0.2.24.md), [English README](README.md), and [Chinese README](README.zh-CN.md) for current installation, features, screenshots, and verification boundaries.
+Current version: **0.2.25**. See the [latest bilingual release notes](docs/release/0.2.25.md), [English README](README.md), and [Chinese README](README.zh-CN.md) for current installation, features, and verification boundaries.
 
-当前版本为 **0.2.24**。最新安装方式、功能、配图和验证范围见上述中英文说明。下文保留的是 0.2.22 历史技术记录，不代表当前发布状态或本版重复执行的验证。
+当前版本为 **0.2.25**。最新安装方式、功能和验证范围见上述中英文说明。下文保留的是 0.2.22 历史技术记录，不代表当前发布状态或本版重复执行的验证。
 
 ## Historical Technical Notes: v0.2.22 / 历史技术记录
 

@@ -15,6 +15,7 @@ const props = defineProps<{
   > &
     Partial<MonitorForecastSummary>
   quota?: { accountLabel: string; usedPercent: number }
+  partial?: boolean
 }>()
 const money = (value: number) =>
   new Intl.NumberFormat(usageLocale(), {
@@ -67,7 +68,9 @@ const shortLabels = computed(() =>
 )
 const labels = computed(() =>
   props.quota
-    ? [t('usageMonitor.text.usedThisCycle2'), t('usageMonitor.text.estimatedRemainingQuota'), t('usageMonitor.text.weeklyQuotaTotal')]
+    ? props.partial
+      ? [t('usageMonitor.text.pricedThisCycle'), t('usageMonitor.text.remainingPricedPortionProjection'), t('usageMonitor.text.pricedPortionAtFullQuota')]
+      : [t('usageMonitor.text.usedThisCycle2'), t('usageMonitor.text.estimatedRemainingQuota'), t('usageMonitor.text.weeklyQuotaTotal')]
     : [t('usageMonitor.text.recordedStandardPrice'), t('usageMonitor.text.expectedLaterStandardPrice'), t('usageMonitor.text.fullWeekComparison')],
 )
 </script>
@@ -76,14 +79,14 @@ const labels = computed(() =>
     class="value-bridge"
     :aria-label="
       quota
-        ? t('usageMonitor.text.usedThisCycleEstimatedValueAt100WeeklyQuota', { value0: quota.accountLabel, value1: quota.usedPercent })
+        ? partial ? quota.accountLabel + ' · ' + t('usageMonitor.text.pricedPortionProjection') : t('usageMonitor.text.usedThisCycleEstimatedValueAt100WeeklyQuota', { value0: quota.accountLabel, value1: quota.usedPercent })
         : t('usageMonitor.text.recordedAndProjectedWeeklyUsageValueNotAccountQuota')
     "
   >
     <div class="value-bridge-heading">
       <span>{{
         quota
-          ? quota.accountLabel + t('usageMonitor.text.estimatedWeeklyQuotaValue')
+          ? partial ? quota.accountLabel + ' · ' + t('usageMonitor.text.pricedPortionProjection') : quota.accountLabel + t('usageMonitor.text.estimatedWeeklyQuotaValue')
           : t('usageMonitor.text.trendNormalizedToStandardPrices')
       }}</span
       ><small
@@ -111,7 +114,7 @@ const labels = computed(() =>
         role="img"
         :aria-label="
           quota
-            ? t('usageMonitor.text.usedThisCycleUsedAmountEstimatedRemainingQuotaTotal', { value0: quota.accountLabel, value1: quota.usedPercent, value2: money(values[0]!), value3: money(values[1]!), value4: money(values[2]!) })
+            ? t(partial ? 'usageMonitor.text.usedThisCyclePricedPortionProjection' : 'usageMonitor.text.usedThisCycleUsedAmountEstimatedRemainingQuotaTotal', { value0: quota.accountLabel, value1: quota.usedPercent, value2: money(values[0]!), value3: money(values[1]!), value4: money(values[2]!) })
             : t('usageMonitor.text.recordedExpectedAdditionFullWeekTotal', { value0: money(values[0]!), value1: money(values[1]!), value2: money(values[2]!) })
         "
       >

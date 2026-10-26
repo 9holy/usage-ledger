@@ -1043,6 +1043,62 @@ fn same_pricing_inputs(left: &UsageRecord, right: &UsageRecord) -> bool {
                 .filter(|s| s.starts_with("unsupported_pricing_modifier:")))
 }
 
+pub(super) fn repair_initial_requested_mode(
+    tx: &Transaction<'_>,
+    replayed: &UsageRecord,
+) -> Result<bool, String> {
+    if replayed.tool != "codex"
+        || recognized_mode(replayed.requested_mode.as_deref()).is_none()
+        || replayed.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous")
+    {
+        return Ok(false);
+    }
+    let Some((stored, cost)) = previous(tx, &replayed.tool, &replayed.id)? else {
+        return Ok(false);
+    };
+    if stored.tool != replayed.tool
+        || stored.id != replayed.id
+        || stored.session_id != replayed.session_id
+        || stored.turn_id != replayed.turn_id
+        || !same_pricing_inputs(&stored, replayed)
+    {
+        return Ok(false);
+    }
+    if !stored.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous") {
+        return Ok(stored.requested_mode == replayed.requested_mode);
+    }
+    let mut next = stored.clone();
+    next.requested_mode.clone_from(&replayed.requested_mode);
+    next.unknown_fields.retain(|field| field != "requested_mode_ambiguous");
+    adjust(tx, &stored, &cost, -1)?;
+    tx.prepare_cached("UPDATE monitor_requests SET usage=json_set(usage,'$.requestedMode',?3,'$.unknownFields',json(?4)) WHERE tool=?1 AND id=?2")
+        .map_err(|error| error.to_string())?
+        .execute(params![next.tool, next.id, next.requested_mode, serde_json::to_string(&next.unknown_fields).map_err(|error| error.to_string())?])
+        .map_err(|error| error.to_string())?;
+    adjust(tx, &next, &cost, 1)?;
+    Ok(true)
+}
+
+pub(super) fn stored_requested_mode_for_cursor(
+    conn: &Connection,
+    cached: &UsageRecord,
+) -> Result<Option<UsageRecord>, String> {
+    if cached.tool != "codex"
+        || !cached.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous")
+    {
+        return Ok(None);
+    }
+    let Some((stored, _)) = previous(conn, &cached.tool, &cached.id)? else {
+        return Ok(None);
+    };
+    Ok((stored.tool == cached.tool && stored.id == cached.id
+        && stored.session_id == cached.session_id && stored.turn_id == cached.turn_id
+        && same_pricing_inputs(&stored, cached)
+        && recognized_mode(stored.requested_mode.as_deref()).is_some()
+        && !stored.unknown_fields.iter().any(|field| field == "requested_mode_ambiguous"))
+        .then_some(stored))
+}
+
 pub fn delete_request(tx: &Transaction<'_>, tool: &str, id: &str) -> Result<(), String> {
     // Canonical response records permanently supersede legacy aliases, including later archive replays.
     tx.execute(

@@ -18,6 +18,7 @@ export interface AccountUsagePeriod {
 }
 
 export interface AccountUsageCycle extends AccountUsagePeriod {
+  quotaSnapshot?: AccountUsagePeriod | null
   resetAtMs: number
   quotaObservedAtMs: number
   exhaustedAtMs: number | null

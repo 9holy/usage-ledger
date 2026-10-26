@@ -2,7 +2,7 @@
 
 # Usage Ledger
 
-**Version 0.2.24 · AI usage monitoring and cost workspace · English / 中文**
+**Version 0.2.25 · AI usage monitoring and cost workspace · English / 中文**
 
 Usage Ledger is a desktop app for understanding AI-tool activity and the cost of the accounts and services behind it. It combines a local usage monitor with a cost workspace for Sub2API, CLIProxyAPI, and Cockpit.
 
@@ -20,22 +20,22 @@ Amounts calculated by Usage Ledger are estimates based on available usage, prici
 
 ## Get the App
 
-Download the v0.2.24 installers from the [Usage Ledger release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.24):
+Download v0.2.25 from the [Usage Ledger release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.25):
 
-- Windows x64 installer: [Usage-Ledger_0.2.24_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_windows_x64-setup.exe).
-- macOS Apple Silicon preview: [Usage-Ledger_0.2.24_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_arm64.dmg).
-- macOS Intel preview: [Usage-Ledger_0.2.24_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.24/Usage-Ledger_0.2.24_macos_x64.dmg).
+- Windows x64 installer: [Usage-Ledger_0.2.25_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_windows_x64-setup.exe).
+- macOS Apple Silicon preview: [Usage-Ledger_0.2.25_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_macos_arm64.dmg).
+- macOS Intel preview: [Usage-Ledger_0.2.25_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_macos_x64.dmg).
 
-Both native Mac CI jobs passed for source commit `9c5fdda9e05bfca8f2a459de887ab1dca7a78aca` in [run 40251431372](https://github.com/9holy/usage-ledger/actions/runs/40251431372). The two macOS DMGs are preview packages; manual desktop testing is still incomplete. Downloads are manual only: no automatic updates are provided by this release, and no portable executable is offered.
+See the release's [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/BUILD-INFO.json) for source/build provenance. Downloads are manual only; this release does not provide automatic updates or a portable executable.
 
 | Platform | Availability |
 | --- | --- |
 | Windows 10/11, x64 | NSIS installer; requires WebView2. |
-| macOS 13+, Apple Silicon | Preview; separate native `arm64` DMG. macOS 13 is configured as the minimum; CI runs on macOS 15. |
-| macOS 13+, Intel | Preview; separate native `x86_64` DMG. macOS 13 is configured as the minimum; CI runs on macOS 15. |
+| macOS 13+, Apple Silicon | Preview; separate native `arm64` DMG. macOS 13 is configured as the minimum; CI validation uses macOS 15. |
+| macOS 13+, Intel | Preview; separate native `x86_64` DMG. macOS 13 is configured as the minimum; CI validation uses macOS 15. |
 | Linux | No supported desktop packaging instructions are provided here. |
 
-The macOS target remains a preview. Packages use ad-hoc signing, without Developer ID signing or notarization; the default universal build is not validated. Finder/Dock and full GUI behavior, macOS 13 behavior, and real-account workflows remain pending. See the [macOS guide](docs/platforms/macos.md) for installation and build details. Back up important data before first launch.
+The macOS target remains a preview. Packages use ad-hoc signing, without Developer ID signing or notarization; the default universal build is not validated. macOS 13 runtime behavior, Finder/Dock and full GUI flows, and real-account workflows have not been checked. See the [macOS guide](docs/platforms/macos.md) for installation and build details. Back up important data before first launch.
 
 ## First Run
 
@@ -148,6 +148,11 @@ Set supported environment variables **before launching Usage Ledger**, then rest
   equal the model's instantaneous streaming-generation speed.
 - Requested model/mode and response-confirmed model/mode are separate evidence.
   Missing mode confirmation can prevent a definitive price estimate.
+- Codex's first session-mode initialization is not treated as a mid-turn mode
+  change. A stored misclassification is corrected only when the original
+  committed JSONL prefix or a registered `.zst` record proves the initial mode;
+  missing raw evidence and genuine conflicts remain unknown. This correction
+  preserves request/token records, saved prices, and quota-cycle facts.
 - Inspect the pricing coverage and price source. An unpriced request can still
   have valid token counts; a partial quoted total is not a complete bill.
 
@@ -157,7 +162,7 @@ Calendar-week usage, subscription-month usage, and a provider's weekly quota cyc
 
 A zero percentage alone does not prove that a new cycle started. At a confirmed 100% quota boundary, later extra-credit usage is kept separate from the included quota-cycle amount, while still contributing to the applicable month total.
 
-Forecasts need the quota percentage and accumulated amount from the **same quota reading**, for the same account and cycle. When a matching reading is unavailable, the app may show the last valid estimate with its update time, or wait for a new reading. A forecast is not a promised final charge.
+Forecasts pair the quota percentage with the accumulated quota amount from the **same timestamp**, for the same account and cycle. A stale but valid pair remains available with its timestamp. Partial priced amounts are labeled and counted; unpriced portions show a human-readable reason. A forecast is not a promised final charge.
 
 ### Purchase Costs and Rates
 
@@ -245,7 +250,7 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. CI runs on macOS 15 and validates separate native architectures; the default universal target is not validated. macOS 13 behavior, Finder/Dock and full GUI flows, and real-account use remain unverified. Build workflows do not publish GitHub Releases; this release provides manual downloads only, with no automatic updates.
+The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. The default universal target is not validated. macOS 13 runtime behavior, Finder/Dock and full GUI flows, and real-account use have not been checked. See the release's `BUILD-INFO.json` for source/build provenance. Build workflows do not publish GitHub Releases; downloads are manual only.
 
 ## Documentation and Licensing
 
@@ -253,7 +258,7 @@ The build command creates a universal app/DMG by default; the [macOS guide](docs
   all screenshots use fictional DEMO data, not real account statements.
 - [DeepSeek Harness integration](docs/integrations/deepseek-harness.md).
 - [macOS build and test guide](docs/platforms/macos.md).
-- [0.2.24 release notes](docs/release/0.2.24.md).
+- [0.2.25 release notes](docs/release/0.2.25.md).
 - [Privacy notes](docs/PRIVACY.md).
 - [Third-party notices](THIRD_PARTY_NOTICES.md) and [license texts](LICENSES/).
 

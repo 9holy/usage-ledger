@@ -61,6 +61,8 @@ impl AccountUsagePeriod {
 struct AccountUsageCycle {
     #[serde(flatten)]
     period: AccountUsagePeriod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quota_snapshot: Option<AccountUsagePeriod>,
     reset_at_ms: i64,
     quota_observed_at_ms: i64,
     exhausted_at_ms: Option<i64>,
@@ -128,6 +130,7 @@ impl Cycle {
     fn report(&self, start: i64, end: i64, now: i64) -> AccountUsageCycle {
         AccountUsageCycle {
             period: AccountUsagePeriod::new(start, end, now),
+            quota_snapshot: None,
             reset_at_ms: self.reset,
             quota_observed_at_ms: self.observed,
             exhausted_at_ms: self.exhausted.filter(|time| *time > 0),
@@ -148,6 +151,11 @@ impl Cycle {
                 .observed_end_ms
                 .min(exhausted.saturating_add(1));
         }
+        let mut snapshot = cycle.period.clone();
+        snapshot.observed_end_ms = snapshot
+            .observed_end_ms
+            .min(self.observed.saturating_add(1));
+        cycle.quota_snapshot = Some(snapshot);
         cycle
     }
 }
@@ -765,6 +773,13 @@ fn read(
             .find(|cycle| cycle.period.contains(time))
         {
             store::merge_totals(&mut cycle.period.totals, &totals);
+            if let Some(snapshot) = cycle
+                .quota_snapshot
+                .as_mut()
+                .filter(|snapshot| snapshot.contains(time))
+            {
+                store::merge_totals(&mut snapshot.totals, &totals);
+            }
         }
         if let Some(month) = account
             .subscription_month
@@ -790,6 +805,9 @@ fn read(
         }
         for cycle in &mut account.quota_cycles {
             store::finish_totals(&mut cycle.period.totals);
+            if let Some(snapshot) = &mut cycle.quota_snapshot {
+                store::finish_totals(&mut snapshot.totals);
+            }
         }
         account.current_cycle = account
             .quota_cycles
@@ -1714,6 +1732,88 @@ mod tests {
     }
 
     #[test]
+    fn quota_snapshot_pairs_amount_with_inclusive_observation_without_freezing_live_totals() {
+        let conn = database();
+        account(&conn, 1, "a");
+        session(&conn, "a", "a", Some("a"), None);
+        let start = time("2026-10-01T00:00:00Z");
+        let observed = start + DAY;
+        observe(&conn, observed, start + WEEK, 20.);
+        for (id, stamp, amount) in [
+            ("before", observed - 1, 1.),
+            ("at-quota", observed, 2.),
+            ("after-quota", observed + 1, 4.),
+            ("at-now", observed + 10, 8.),
+        ] {
+            request(&conn, id, "a", stamp, json!({"usd":amount}));
+        }
+        let report = read(&conn, start, observed + 10, &subscriptions(start, None)).unwrap();
+        let account = &report.accounts[0];
+        let cycle = account.current_cycle.as_ref().unwrap();
+        let snapshot = cycle.quota_snapshot.as_ref().unwrap();
+        assert_eq!(
+            (snapshot.start_ms, snapshot.end_ms, snapshot.observed_end_ms),
+            (start, start + WEEK, observed + 1)
+        );
+        assert_eq!(
+            (
+                snapshot.totals.request_count,
+                snapshot.totals.priced_cost_usd
+            ),
+            (2, 3.)
+        );
+        assert_eq!(
+            (
+                cycle.period.totals.request_count,
+                cycle.period.totals.priced_cost_usd
+            ),
+            (3, 7.)
+        );
+        assert_eq!(account.calendar_week.totals.priced_cost_usd, 7.);
+        assert_eq!(
+            account
+                .subscription_month
+                .as_ref()
+                .unwrap()
+                .totals
+                .priced_cost_usd,
+            7.
+        );
+        assert_eq!(account.month_cycles[0].period.totals.priced_cost_usd, 7.);
+        assert!(account.month_cycles[0].quota_snapshot.is_none());
+        let json = serde_json::to_value(cycle).unwrap();
+        assert_eq!(json["quotaSnapshot"]["observedEndMs"], observed + 1);
+        assert_eq!(json["quotaSnapshot"]["totals"]["requestCount"], 2);
+
+        let capped = read(&conn, start, observed, &subscriptions(start, None)).unwrap();
+        let snapshot = capped.accounts[0]
+            .current_cycle
+            .as_ref()
+            .unwrap()
+            .quota_snapshot
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (snapshot.observed_end_ms, snapshot.totals.priced_cost_usd),
+            (observed, 1.)
+        );
+
+        observe(&conn, observed + 5, start + WEEK, 20.);
+        let newer = read(&conn, start, observed + 10, &subscriptions(start, None)).unwrap();
+        let snapshot = newer.accounts[0]
+            .current_cycle
+            .as_ref()
+            .unwrap()
+            .quota_snapshot
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (snapshot.observed_end_ms, snapshot.totals.priced_cost_usd),
+            (observed + 6, 7.)
+        );
+    }
+
+    #[test]
     fn first_exhausted_request_is_included_but_later_credits_only_remain_in_the_month() {
         let conn = database();
         account(&conn, 1, "a");
@@ -1758,6 +1858,11 @@ mod tests {
             31.
         );
         assert_eq!(account.month_cycles[0].period.totals.priced_cost_usd, 31.);
+        let snapshot = cycle.quota_snapshot.as_ref().unwrap();
+        assert_eq!(
+            (snapshot.observed_end_ms, snapshot.totals.priced_cost_usd),
+            (exhausted + 1, 3.)
+        );
 
         observe(&conn, next, next + WEEK, 0.);
         let reset_cycle = latest_cycle(&conn, "codex", "account:a").unwrap().unwrap();

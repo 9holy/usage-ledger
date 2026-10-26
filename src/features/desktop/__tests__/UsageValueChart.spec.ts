@@ -1,4 +1,5 @@
 import './usageI18nFixture'
+import i18n from '@/i18n'
 import { mount } from '@vue/test-utils'
 import { it, expect } from 'vitest'
 import UsageValueChart from '../UsageValueChart.vue'
@@ -144,6 +145,29 @@ it('keeps the liquid boundary, scale, percentages and monetary leaders on the sa
   expect(w.findAll('.capsule-links path')[0].attributes('d')).toContain(
     'M 295 0',
   )
+})
+
+it('labels every partial account amount as a priced portion in both languages without changing chart geometry', async () => {
+  const w = mount(UsageValueChart, {
+    props: {
+      forecast: { currency: 'USD', observedSubtotal: 10, additionalSubtotal: 40, projectedSubtotal: 50 },
+      quota: { accountLabel: 'Account 2', usedPercent: 20 }, partial: true,
+    },
+  })
+  expect(w.get('.value-bridge-heading').text()).toContain('已计价部分推算')
+  expect(w.findAll('dt').map(row => row.text())).toEqual(['本轮已计价', '剩余已计价部分推算', '100%额度已计价部分'])
+  expect(w.get('figure').attributes('aria-label')).toContain('已计价部分推算')
+  expect(w.get('[role=img]').attributes('aria-label')).toContain('100%额度已计价部分推算 $50')
+  expect(w.text()).not.toContain('本周额度总额')
+  const boundary = w.get('.capsule-divider').attributes('style')
+  i18n.global.locale.value = 'en'
+  await w.vm.$nextTick()
+  expect(w.get('.value-bridge-heading').text()).toContain('Priced-portion projection')
+  expect(w.findAll('dt').map(row => row.text())).toEqual(['Priced this cycle', 'Remaining priced portion', 'Priced portion at 100%'])
+  expect(w.get('[role=img]').attributes('aria-label')).toContain('unidentified or unpriced usage excluded')
+  expect(w.get('.capsule-divider').attributes('style')).toBe(boundary)
+  expect(w.get('.observed-fill').attributes('style')).toBe('width: 20%;')
+  expect(w.findAll('[data-value]').map(row => row.attributes('data-value'))).toEqual(['10', '40', '50'])
 })
 
 it('does not invent a minimum liquid segment at zero, full or very small shares', async () => {
