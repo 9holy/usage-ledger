@@ -66,6 +66,7 @@ export function initAppleFidelity(root = document) {
   if (existing) return existing;
 
   const doc = queryScope(root);
+  const hasResizeObserver = "ResizeObserver" in doc.defaultView;
   const controller = new doc.defaultView.AbortController();
   const { signal } = controller;
   const resizeTarget = isDocumentRoot(root) ? root.documentElement : root;
@@ -240,7 +241,7 @@ export function initAppleFidelity(root = document) {
       source.addEventListener("scroll", update, { passive: true, signal });
       update();
 
-      if ("ResizeObserver" in doc.defaultView) {
+      if (hasResizeObserver) {
         const observer = new doc.defaultView.ResizeObserver(update);
         observer.observe(source);
         observers.push(observer);
@@ -250,10 +251,13 @@ export function initAppleFidelity(root = document) {
 
   const bindDynamicContent = () => {
     if (!("MutationObserver" in doc.defaultView)) return;
-    const observer = new doc.defaultView.MutationObserver(() => {
+    const observer = new doc.defaultView.MutationObserver((records) => {
       if (signal.aborted) return;
-      bindScrollEdges();
-      updateSizeClass();
+      // Text updates cannot introduce scroll sources; ResizeObserver owns size changes.
+      if (records.some((record) => Array.from(record.addedNodes).some((node) => node.nodeType === 1))) {
+        bindScrollEdges();
+      }
+      if (!hasResizeObserver) updateSizeClass();
     });
     observer.observe(root, { childList: true, subtree: true });
     observers.push(observer);
@@ -279,7 +283,7 @@ export function initAppleFidelity(root = document) {
     signal,
   });
 
-  if ("ResizeObserver" in doc.defaultView) {
+  if (hasResizeObserver) {
     const observer = new doc.defaultView.ResizeObserver(updateSizeClass);
     observer.observe(resizeTarget);
     observers.push(observer);

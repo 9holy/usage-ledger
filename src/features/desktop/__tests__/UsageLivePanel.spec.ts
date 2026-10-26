@@ -17,6 +17,45 @@ function snapshot(): MonitorSnapshot {
 }
 
 describe('UsageLivePanel', () => {
+  it('indexes session windows once with first-match semantics and reacts to missing/null keys and new snapshots', async () => {
+    const data = snapshot()
+    data.rateSessions = Array.from({ length: 24 }, (_, index) => ({ key: `codex:${index}`, tool: 'codex', id: String(index), parentId: null, project: null, model: 'gpt-6-astra', status: 'active', startedAtMs: 1, updatedAtMs: 100000, totals: data.totals }))
+    data.rateSessions.push({ ...data.rateSessions[0], key: 'missing', id: 'missing' })
+    data.live!.bySession = data.rateSessions.slice(0, 24).map(session => ({ tool: 'codex', model: null, sessionKey: session.key, windows: [window(60, 60)] }))
+    data.live!.bySession.push({ ...data.live!.bySession[0], windows: [window(60, 0)] }, { tool: 'codex', model: null, sessionKey: null, windows: [window(60, 600)] })
+    let reads = 0
+    for (const row of data.live!.bySession) {
+      const key = row.sessionKey
+      Object.defineProperty(row, 'sessionKey', { configurable: true, enumerable: true, get() { reads++; return key } })
+    }
+    const expected = data.rateSessions.map(session => data.live!.bySession.find(row => row.sessionKey === session.key))
+    expect(reads).toBe(326)
+    reads = 0
+    const wrapper = mount(UsageLivePanel, { props: { snapshot: data, tool: null } })
+    expect(expected.filter(row => row?.windows[0].observedOutputTokens)).toHaveLength(24)
+    expect(wrapper.findAll('.rate-session')).toHaveLength(24)
+    expect(wrapper.findAll('.rate-session strong').every(row => row.text().includes('1.00'))).toBe(true)
+    reads = 0
+    await wrapper.get('[aria-label="速度统计时段"]').findAll('button')[1].trigger('click')
+    expect(reads).toBe(26)
+    expect(wrapper.find('.rate-session').exists()).toBe(false)
+    reads = 0
+    await wrapper.get('[aria-label="速度统计时段"]').findAll('button')[0].trigger('click')
+    expect(reads).toBe(26)
+    expect(wrapper.findAll('.rate-session')).toHaveLength(24)
+    await wrapper.setProps({ tool: 'claude' })
+    expect(wrapper.find('.rate-session').exists()).toBe(false)
+    const next = snapshot()
+    next.rateSessions = data.rateSessions
+    next.live!.bySession = [{ tool: 'codex', model: null, sessionKey: 'codex:0', windows: [window(60, 120)] }]
+    await wrapper.setProps({ snapshot: next, tool: null })
+    expect(wrapper.findAll('.rate-session')).toHaveLength(1)
+    expect(wrapper.get('.rate-session strong').text()).toContain('2.00')
+    await wrapper.setProps({ snapshot: null })
+    expect(wrapper.find('.rate-session').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('does not turn missing activity data into zero counts, but keeps loaded empty data distinct', async () => {
     const wrapper = mount(UsageLivePanel, { props: { snapshot: null, tool: null } })
     expect(wrapper.findAll('.hour-statistics strong').map(row => row.text())).toEqual(Array(4).fill('尚未取得'))

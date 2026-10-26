@@ -53,7 +53,7 @@ export const setModelsListCandidates = (
       ? currentSelected.has(id)
       : state.savedModels.length > 0
         ? savedSelected.has(id)
-        : normalizedCandidates.includes(id)
+        : true
 
     return {
       id,

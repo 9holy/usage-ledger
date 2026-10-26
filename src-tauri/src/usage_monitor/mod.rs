@@ -20,7 +20,7 @@ pub mod weekly;
 use std::sync::{Arc, Mutex};
 use types::*;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RuntimeStatus {
     started_at_ms: i64,
     collected_at_ms: i64,
@@ -36,6 +36,13 @@ pub struct MonitorRuntime {
 }
 
 impl MonitorRuntime {
+    fn status_snapshot(&self) -> Result<RuntimeStatus, String> {
+        self.inner
+            .lock()
+            .map(|state| state.clone())
+            .map_err(|error| error.to_string())
+    }
+
     fn update_error(&self, error: Option<String>) {
         if let Ok(mut s) = self.inner.lock() {
             s.error = error;
@@ -185,12 +192,11 @@ pub async fn usage_monitor_snapshot(
             })
             .cloned()
             .collect();
-        let state = runtime.inner.lock().map_err(|e| e.to_string())?;
+        let state = runtime.status_snapshot()?;
         let sources: Vec<_> = state
             .sources
-            .iter()
-            .cloned()
-            .chain(state.antigravity.iter().cloned())
+            .into_iter()
+            .chain(state.antigravity)
             .collect();
         let mut live = live::read(&tx, now, state.started_at_ms, state.collected_at_ms)?;
         live.unavailable_tools = ["codex", "claude", "antigravity", "deepseek-harness"]
@@ -219,8 +225,7 @@ pub async fn usage_monitor_snapshot(
         let count = sessions.len() as i64;
         let collected_at_ms = state.collected_at_ms;
         let collecting = state.collecting;
-        let error = state.error.clone();
-        drop(state);
+        let error = state.error;
         let mut sessions: Vec<_> = sessions
             .into_iter()
             .skip(offset.unwrap_or(0) as usize)
@@ -476,6 +481,40 @@ pub async fn usage_monitor_analysis(
 #[cfg(test)]
 mod pricing_reason_filter_tests {
     use super::*;
+    #[test]
+    fn status_snapshot_releases_the_mutex_and_keeps_one_consistent_status() {
+        let runtime = MonitorRuntime::default();
+        {
+            let mut state = runtime.inner.lock().unwrap();
+            state.started_at_ms = 1;
+            state.collected_at_ms = 10;
+            state.collecting = true;
+            state.sources.push(SourceStatus { tool: "codex".into(), status: "watching".into(), ..Default::default() });
+            state.antigravity = Some(SourceStatus { tool: "antigravity".into(), status: "watching".into(), ..Default::default() });
+        }
+        let captured = runtime.status_snapshot().unwrap();
+        let writer = runtime.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut state = writer.inner.lock().unwrap();
+            state.collected_at_ms = 20;
+            state.collecting = false;
+            state.sources[0].status = "error".into();
+            state.error = Some("synthetic failure".into());
+            sent.send(()).unwrap();
+        });
+        received.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        thread.join().unwrap();
+        assert_eq!((captured.started_at_ms, captured.collected_at_ms, captured.collecting), (1, 10, true));
+        assert_eq!(captured.sources[0].status, "watching");
+        assert_eq!(captured.antigravity.unwrap().status, "watching");
+        assert!(captured.error.is_none());
+        let latest = runtime.status_snapshot().unwrap();
+        assert_eq!((latest.collected_at_ms, latest.collecting), (20, false));
+        assert_eq!(latest.sources[0].status, "error");
+        assert_eq!(latest.error.as_deref(), Some("synthetic failure"));
+    }
+
     #[test]
     fn pricing_reason_boundary_rejects_only_oversized_filters() {
         let mut period = MonitorPeriod {

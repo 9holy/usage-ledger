@@ -29,7 +29,7 @@ Windows can be built from source using the instructions below. Mac test packages
 | macOS 13+, Intel | Experimental build/test channel, separate from the Windows baseline. |
 | Linux | No supported desktop packaging instructions are provided here. |
 
-The Mac test channel is maintained on [`test/macos-free-20261026`](https://github.com/9holy/usage-ledger/tree/test/macos-free-20261026), separate from the default Windows branch. Follow its [macOS guide](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md) for package selection and building instructions. Test packages use free ad-hoc signing, not Developer ID signing or notarization, so macOS may warn about their origin. Do not disable system security to bypass a warning. Some native window interactions and real-service workflows still need testing; back up important data before trying a test version.
+The default branch includes the Mac build path while keeping the Windows target separate. Earlier Mac test packages remain associated with [`test/macos-free-20261026`](https://github.com/9holy/usage-ledger/tree/test/macos-free-20261026); their successful CI run validates commit `90f1a43`, not the subsequent performance changes. Follow the [macOS guide](docs/platforms/macos.md) for package selection and building instructions. Test packages use free ad-hoc signing, not Developer ID signing or notarization, so macOS may warn about their origin. Do not disable system security to bypass a warning. Some native window interactions and real-service workflows still need testing; back up important data before trying a test version.
 
 ## First Run
 
@@ -103,7 +103,7 @@ The management API uses `/v0/management` with the management key as Bearer authe
 
 Historical detail also depends on the available usage records, including the supported local CPA usage database when present. A reachable management API alone does not guarantee complete historical token/cost data. The management page opens your connected CLIProxyAPI instance.
 
-On the Windows default branch, reading that optional local CPA database requires Python 3 with its standard `sqlite3` module, available as `python` on PATH. This is not needed just to connect to the management API. The Mac test branch reads this database directly and does not require Python for it.
+The desktop application reads that optional local CPA database directly through native SQLite on Windows and macOS; Python is not required. Connecting to the management API does not require the local history database.
 
 ### Cockpit
 
@@ -220,7 +220,6 @@ pnpm desktop:dev
 The desktop development URL is `http://127.0.0.1:5180`. For a local installer without updater-signature artifacts:
 
 ~~~powershell
-pnpm build:desktop
 pnpm exec tauri build --config src-tauri/tauri.local.conf.json
 ~~~
 
@@ -228,12 +227,11 @@ Frontend output is `dist/`; the native executable is `src-tauri/target/release/c
 
 ### macOS Test Channel
 
-Use a Mac, Xcode Command Line Tools, Node.js/pnpm, and Rust. Switch to the test branch **before** using its Mac-only scripts:
+Use a Mac, Xcode Command Line Tools, Node.js/pnpm, and Rust. The default branch includes the Mac-only scripts:
 
 ~~~sh
 git clone https://github.com/9holy/usage-ledger.git
 cd usage-ledger
-git switch test/macos-free-20261026
 xcode-select --install
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm install --frozen-lockfile
@@ -241,14 +239,14 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-The build command creates a universal app/DMG by default; the [macOS guide](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md) also explains single-architecture targets and signing limitations. The default branch does not yet include these Mac scripts. Do not interpret a successful source build as validation of real accounts or every native UI flow.
+The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. The previously tested single-architecture packages do not validate this default universal target or subsequent performance changes. Do not interpret a successful source build as validation of real accounts or every native UI flow.
 
 ## Documentation and Licensing
 
 - [Full screenshot gallery](docs/screenshots/README.md): 14 views per language;
   all screenshots use fictional DEMO data, not real account statements.
 - [DeepSeek Harness integration](docs/integrations/deepseek-harness.md).
-- [macOS test-channel guide](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md).
+- [macOS build and test guide](docs/platforms/macos.md).
 - [0.2.24 release notes](docs/release/0.2.24.md).
 - [Privacy notes](docs/PRIVACY.md).
 - [Third-party notices](THIRD_PARTY_NOTICES.md) and [license texts](LICENSES/).

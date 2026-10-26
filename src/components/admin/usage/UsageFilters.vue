@@ -523,6 +523,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   clearPendingUserSearch()
+  if (apiKeySearchTimeout) clearTimeout(apiKeySearchTimeout)
+  if (accountSearchTimeout) clearTimeout(accountSearchTimeout)
   document.removeEventListener('click', onDocumentClick)
 })
 

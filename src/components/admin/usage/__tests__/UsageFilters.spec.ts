@@ -126,6 +126,38 @@ describe('UsageFilters — user search dropdown', () => {
     vi.useRealTimers()
   })
 
+  it('cancels all pending searches when the filters unmount', async () => {
+    mockSearchUsers.mockClear()
+    mockSearchApiKeys.mockClear()
+    mockAccountsList.mockClear()
+    const wrapper = mountFilters()
+    await wrapper.get('input[placeholder="Search user..."]').setValue('user')
+    await wrapper.get('input[placeholder="Search API key..."]').setValue('key')
+    await wrapper.get('input[placeholder="Search account..."]').setValue('account')
+    expect(vi.getTimerCount()).toBe(3)
+    vi.advanceTimersByTime(299)
+    expect(mockSearchApiKeys).not.toHaveBeenCalled()
+    expect(mockAccountsList).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(mockSearchUsers).toHaveBeenCalledTimes(1)
+    expect(mockSearchApiKeys).toHaveBeenCalledTimes(1)
+    expect(mockAccountsList).toHaveBeenCalledTimes(1)
+    mockSearchUsers.mockClear()
+    mockSearchApiKeys.mockClear()
+    mockAccountsList.mockClear()
+    await wrapper.get('input[placeholder="Search user..."]').setValue('abandoned user')
+    await wrapper.get('input[placeholder="Search API key..."]').setValue('abandoned key')
+    await wrapper.get('input[placeholder="Search account..."]').setValue('abandoned account')
+
+    wrapper.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(300)
+    await flushPromises()
+    expect(mockSearchUsers).not.toHaveBeenCalled()
+    expect(mockSearchApiKeys).not.toHaveBeenCalled()
+    expect(mockAccountsList).not.toHaveBeenCalled()
+  })
+
   it('(a) labels deleted users with the i18n badge and (b) sorts active users before deleted ones, (c) selection sets user_id', async () => {
     // Arrange: mock returns deleted FIRST (proves sorting re-orders to active-first)
     mockSearchUsers.mockResolvedValue([

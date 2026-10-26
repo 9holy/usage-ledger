@@ -76,9 +76,18 @@ ConvertTo-Json -InputObject @($items) -Depth 4 -Compress
     serde_json::from_slice(&output.stdout).map_err(|_| "Antigravity 运行实例元数据格式无效".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "macos", test))]
+#[path = "antigravity_macos.rs"]
+mod macos;
+
+#[cfg(target_os = "macos")]
 fn discover() -> Result<Vec<Connection>, String> {
-    Err("Antigravity LS 自动发现目前仅支持 Windows".into())
+    macos::discover()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn discover() -> Result<Vec<Connection>, String> {
+    Err("Antigravity LS 自动发现目前仅支持 Windows 和 macOS".into())
 }
 
 fn connections() -> Result<Vec<Connection>, String> {

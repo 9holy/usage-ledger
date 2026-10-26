@@ -135,7 +135,7 @@ fn discover(root: &SourceRoot) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-    files.sort_by_key(|p| std::cmp::Reverse(fs::metadata(p).and_then(|m| m.modified()).ok()));
+    files.sort_by_cached_key(|p| std::cmp::Reverse(fs::metadata(p).and_then(|m| m.modified()).ok()));
     Ok(files)
 }
 
@@ -369,6 +369,25 @@ pub fn ingest_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_keeps_newest_first_and_excludes_unrelated_files() {
+        let root = std::env::temp_dir().join(format!(
+            "monitor-discovery-order-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("nested")).unwrap();
+        let older = root.join("older.jsonl");
+        let newer = root.join("nested/newer.jsonl");
+        let artifact = root.join("artifact.json");
+        for (path, seconds) in [(&older, 100), (&newer, 200), (&artifact, 300)] {
+            let file = File::create(path).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(seconds)).unwrap();
+        }
+        let result = discover(&SourceRoot { tool: "codex".into(), path: root.clone() });
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(result.unwrap(), [newer, older]);
+    }
+
     #[test]
     fn deepseek_discovery_root_honors_custom_home_and_empty_default() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

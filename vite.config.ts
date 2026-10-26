@@ -95,7 +95,9 @@ export default defineConfig(({ mode }) => {
           .replace(/<link\s+rel=["']icon["'][^>]*>/i, '<link rel="icon" type="image/png" href="./usage-ledger.png" />'),
       }] : []),
       checker({
-        vueTsc: true
+        vueTsc: true,
+        // Release commands already type-check before Vite; retain live checks in dev.
+        enableBuild: false,
       }),
       injectPublicSettings(backendUrl)
     ],
@@ -132,8 +134,12 @@ export default defineConfig(({ mode }) => {
               return 'vendor-vue'
             }
 
+            // Keep optional export/payment code out of eagerly shared utility chunks.
+            if (id.includes('/xlsx/')) return 'vendor-export'
+            if (id.includes('/@airwallex/')) return 'vendor-airwallex'
+
             // UI 工具库（较大，单独分离）
-            if (id.includes('/@vueuse/') || id.includes('/xlsx/')) {
+            if (id.includes('/@vueuse/')) {
               return 'vendor-ui'
             }
 

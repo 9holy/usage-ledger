@@ -29,7 +29,7 @@ Windows 可按下方步骤从源码构建。Mac 测试包可在 [Mac 测试构�
 | macOS 13+，Intel | 独立于 Windows 基线的实验性构建与测试通道。|
 | Linux | 本文不提供受支持的桌面打包流程。|
 
-Mac 测试版由 [`test/macos-free-20261026` 分支](https://github.com/9holy/usage-ledger/tree/test/macos-free-20261026)单独维护，与默认的 Windows 分支分开。请参阅 [macOS 指南](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md)了解安装包选择与构建方法。测试包使用免费的本地签名（ad-hoc），没有 Developer ID 签名或 Apple 公证，macOS 可能提示来源风险；不要关闭系统安全功能来绕过提示。部分原生窗口操作和真实服务使用流程仍待验证，试用前请备份重要数据。
+默认分支已包含 Mac 构建路径，Windows 目标仍使用独立配置。此前的 Mac 测试包对应 [`test/macos-free-20261026` 分支](https://github.com/9holy/usage-ledger/tree/test/macos-free-20261026)；成功的 CI 运行验证的是提交 `90f1a43`，不代表此后的性能优化已经通过 Mac 验证。请参阅 [macOS 指南](docs/platforms/macos.md)了解安装包选择与构建方法。测试包使用免费的本地签名（ad-hoc），没有 Developer ID 签名或 Apple 公证，macOS 可能提示来源风险；不要关闭系统安全功能来绕过提示。部分原生窗口操作和真实服务使用流程仍待验证，试用前请备份重要数据。
 
 ## 首次使用
 
@@ -101,7 +101,7 @@ Mac 测试版由 [`test/macos-free-20261026` 分支](https://github.com/9holy/us
 
 历史明细还取决于实际存在的用量记录，包括安装相应组件后产生的受支持本机 CPA 用量数据库。管理 API 能连接，不代表历史 Token 与成本一定完整。管理页面打开的是你连接的 CLIProxyAPI 实例。
 
-当前 Windows 默认分支读取这类本机 CPA 历史库时，需要能通过 `python` 命令运行的 Python 3，并包含标准 `sqlite3` 模块；仅连接管理 API 不需要这项依赖。Mac 测试分支已改为直接读取该数据库，不需要为此安装 Python。
+桌面应用在 Windows 和 macOS 上均通过原生 SQLite 直接读取这类可选的本机 CPA 历史库，不需要安装 Python。仅连接管理 API 不需要本机历史数据库。
 
 ### Cockpit
 
@@ -215,7 +215,6 @@ pnpm desktop:dev
 桌面开发地址为 `http://127.0.0.1:5180`。构建不生成 updater 签名产物的本地安装包：
 
 ~~~powershell
-pnpm build:desktop
 pnpm exec tauri build --config src-tauri/tauri.local.conf.json
 ~~~
 
@@ -223,12 +222,11 @@ pnpm exec tauri build --config src-tauri/tauri.local.conf.json
 
 ### macOS 测试通道
 
-使用 Mac、Xcode Command Line Tools、Node.js/pnpm 与 Rust。先切换测试分支，**再使用该分支特有的 Mac 脚本**：
+使用 Mac、Xcode Command Line Tools、Node.js/pnpm 与 Rust。默认分支已包含 Mac 专用脚本：
 
 ~~~sh
 git clone https://github.com/9holy/usage-ledger.git
 cd usage-ledger
-git switch test/macos-free-20261026
 xcode-select --install
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm install --frozen-lockfile
@@ -236,14 +234,14 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-构建脚本默认生成通用 app/DMG。[macOS 指南](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md) 还介绍单架构目标与签名限制。默认分支暂不包含这些 Mac 脚本。源码构建成功不能代替真实账号及所有原生交互流程的验证。
+构建脚本默认生成通用 app/DMG。[macOS 指南](docs/platforms/macos.md)还介绍单架构目标与签名限制。此前通过测试的单架构包不能证明默认通用目标或此后的性能优化已经通过验证。源码构建成功不能代替真实账号及所有原生交互流程的验证。
 
 ## 文档与许可
 
 - [完整配图](docs/screenshots/README.md)：每种语言各 14 个视图；
   全部为虚构 DEMO 数据，不是真实账号账单。
 - [DeepSeek Harness 接入说明](docs/integrations/deepseek-harness.md)。
-- [macOS 测试通道指南](https://github.com/9holy/usage-ledger/blob/test/macos-free-20261026/docs/platforms/macos.md)。
+- [macOS 构建与测试指南](docs/platforms/macos.md)。
 - [0.2.24 发布说明](docs/release/0.2.24.md)。
 - [隐私说明](docs/PRIVACY.md)。
 - [第三方来源与许可](THIRD_PARTY_NOTICES.md)及[许可文本](LICENSES/)。

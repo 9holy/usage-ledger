@@ -169,6 +169,17 @@ fn windows(
         })
         .collect()
 }
+fn counted_windows(counts: &Counts, coverage: &[LiveWindow]) -> Vec<LiveWindow> {
+    coverage
+        .iter()
+        .zip([counts.short, counts.long])
+        .map(|(window, tokens)| LiveWindow {
+            observed_output_tokens: tokens,
+            output_tokens_per_second: window.complete.then_some(tokens as f64 / window.seconds as f64),
+            ..window.clone()
+        })
+        .collect()
+}
 fn add(counts: &mut Counts, timestamp: i64, tokens: i64, now: i64) {
     if timestamp > now - 60_000 {
         counts.short += tokens;
@@ -361,6 +372,10 @@ pub fn read(
         .map(|bucket| bucket.observed_output_tokens)
         .max();
     let (recorded_timeline, recorded_timeline_by_tool) = recorded_timeline(conn, now)?;
+    let tool_coverage: BTreeMap<_, _> = by_tool
+        .keys()
+        .map(|tool| (tool.clone(), windows(&Counts::default(), &spans, now, Some(tool))))
+        .collect();
     Ok(LiveSnapshot {
         sampled_at_ms: now,
         collection_updated_at_ms: updated,
@@ -369,7 +384,7 @@ pub fn read(
         by_tool: by_tool
             .into_iter()
             .map(|(tool, counts)| LiveGroup {
-                windows: windows(&counts, &spans, now, Some(&tool)),
+                windows: counted_windows(&counts, &tool_coverage[&tool]),
                 tool: Some(tool),
                 model: None,
                 session_key: None,
@@ -378,7 +393,7 @@ pub fn read(
         by_model: by_model
             .into_iter()
             .map(|((tool, model), counts)| LiveGroup {
-                windows: windows(&counts, &spans, now, Some(&tool)),
+                windows: counted_windows(&counts, &tool_coverage[&tool]),
                 tool: Some(tool),
                 model,
                 session_key: None,
@@ -387,7 +402,7 @@ pub fn read(
         by_session: by_session
             .into_iter()
             .map(|((tool, key), counts)| LiveGroup {
-                windows: windows(&counts, &spans, now, Some(&tool)),
+                windows: counted_windows(&counts, &tool_coverage[&tool]),
                 tool: Some(tool),
                 model: None,
                 session_key: Some(key),
@@ -407,6 +422,27 @@ pub fn read(
 mod tests {
     use super::*;
     use crate::usage_monitor::store;
+    #[test]
+    fn shared_coverage_keeps_each_groups_counts_and_unknown_windows() {
+        let now = 400_000;
+        for wildcard in [vec![(100_000, now)], vec![(100_000, 340_000), (360_000, now)]] {
+            let spans = BTreeMap::from([
+                ("*".into(), wildcard),
+                ("codex".into(), vec![(100_000, now)]),
+                ("claude".into(), vec![(100_000, 350_000)]),
+            ]);
+            for tool in [None, Some("codex"), Some("claude"), Some("unreported-tool")] {
+                let coverage = windows(&Counts::default(), &spans, now, tool);
+                for counts in [Counts::default(), Counts { short: 17, long: 123 }, Counts { short: 0, long: 9 }] {
+                    assert_eq!(
+                        serde_json::to_value(counted_windows(&counts, &coverage)).unwrap(),
+                        serde_json::to_value(windows(&counts, &spans, now, tool)).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
     fn usage(
         conn: &mut Connection,
         id: &str,

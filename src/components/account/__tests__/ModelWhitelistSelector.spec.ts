@@ -1,7 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { getModelsByPlatform } from '@/composables/useModelWhitelist'
 
 const copyToClipboard = vi.fn().mockResolvedValue(true)
+const { syncUpstreamModels, showSuccess } = vi.hoisted(() => ({
+  syncUpstreamModels: vi.fn(),
+  showSuccess: vi.fn()
+}))
+
+vi.mock('@/api/admin/accounts', () => ({
+  accountsAPI: { syncUpstreamModels }
+}))
 
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')
@@ -16,7 +25,7 @@ vi.mock('vue-i18n', async () => {
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: vi.fn(),
-    showSuccess: vi.fn(),
+    showSuccess,
     showInfo: vi.fn()
   })
 }))
@@ -58,6 +67,48 @@ function findModelRow(wrapper: ReturnType<typeof mountSelector>, modelId: string
 describe('ModelWhitelistSelector', () => {
   beforeEach(() => {
     copyToClipboard.mockClear()
+    syncUpstreamModels.mockReset()
+    showSuccess.mockClear()
+  })
+
+  it('keeps selection marks current when the selected model list changes', async () => {
+    const wrapper = mountSelector()
+    await wrapper.get('div.cursor-pointer').trigger('click')
+    expect(findModelRow(wrapper, 'gpt-5.6-sol').get('[data-testid="select-model"]').find('svg').exists()).toBe(false)
+
+    await wrapper.setProps({ modelValue: ['gpt-5.6-sol'] })
+    expect(findModelRow(wrapper, 'gpt-5.6-sol').get('[data-testid="select-model"]').find('svg').exists()).toBe(true)
+    await wrapper.setProps({ modelValue: [] })
+    expect(findModelRow(wrapper, 'gpt-5.6-sol').get('[data-testid="select-model"]').find('svg').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('fills related models in platform order while preserving existing entries', async () => {
+    const wrapper = mountSelector()
+    const existing = ['custom', 'gpt-5.6-sol', 'custom']
+    await wrapper.setProps({ modelValue: existing, platforms: ['openai', 'gemini'] })
+    const expected = [...existing]
+    for (const platform of ['openai', 'gemini']) {
+      for (const model of getModelsByPlatform(platform)) {
+        if (!expected.includes(model)) expected.push(model)
+      }
+    }
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.fillRelatedModels')!.trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toEqual([[expected]])
+    wrapper.unmount()
+  })
+
+  it('preserves duplicates while merging upstream models in source order', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: [' new-a ', 'existing', '', 'new-a', 'new-b'] })
+    const wrapper = mountSelector()
+    await wrapper.setProps({ accountId: 12, modelValue: ['existing', 'existing'] })
+    await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.syncUpstreamModels')!.trigger('click')
+    await flushPromises()
+
+    expect(syncUpstreamModels).toHaveBeenCalledWith(12)
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['existing', 'existing', 'new-a', 'new-b']]])
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsSuccess')
+    wrapper.unmount()
   })
 
   it('copies a model ID without selecting the model', async () => {

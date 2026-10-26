@@ -44,12 +44,7 @@ export function formatNumber(num: number | null | undefined): string {
 
   // Use Intl.NumberFormat for compact notation if supported and needed
   // Note: Compact notation in 'zh' uses '万/亿', which is appropriate for Chinese
-  const formatter = new Intl.NumberFormat(locale, {
-    notation: absNum >= 10000 ? 'compact' : 'standard',
-    maximumFractionDigits: 1
-  })
-
-  return formatter.format(num)
+  return getNumberFormatter(locale, absNum >= 10000 ? 'compact' : 'standard').format(num)
 }
 
 /**
@@ -258,11 +253,12 @@ export function formatTime(date: string | Date | null | undefined): string {
  */
 const numberFormatters = new Map<string, Intl.NumberFormat>()
 
-function getNumberFormatter(locale: string): Intl.NumberFormat {
-  let formatter = numberFormatters.get(locale)
+function getNumberFormatter(locale: string, notation?: 'compact' | 'standard'): Intl.NumberFormat {
+  const key = `${locale}:${notation ?? 'default'}`
+  let formatter = numberFormatters.get(key)
   if (!formatter) {
-    formatter = new Intl.NumberFormat(locale)
-    numberFormatters.set(locale, formatter)
+    formatter = new Intl.NumberFormat(locale, notation ? { notation, maximumFractionDigits: 1 } : undefined)
+    numberFormatters.set(key, formatter)
   }
   return formatter
 }

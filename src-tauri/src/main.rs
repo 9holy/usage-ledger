@@ -2,6 +2,7 @@
 
 mod cockpit_logs_db;
 mod cockpit_quota;
+mod cliproxy_usage_db;
 mod desktop_shell;
 mod finance_ledger;
 mod model_catalog;
@@ -676,95 +677,15 @@ fn cliproxy_plugins_dir() -> Result<std::path::PathBuf, String> {
     Ok(std::path::PathBuf::from(home).join(".cli-proxy-api").join("plugins").join("codex-token-usage"))
 }
 
-/// 读 CPA 插件 usage.db 的 usage_events 表(最近 30 天),返 JSON 原文供前端 JSON.parse。
-/// 用系统 python(python3.12 带 sqlite3 模块)只读连接读 SQLite,避免引 rusqlite 依赖(网络不通无法下载)。
-/// python3 sqlite3 默认不锁 WAL,只读查询不影响插件持续写入。
-/// 禁止返回 api_key 明文(SQL 侧不 SELECT 该列)。
-/// ponytail: python bridge 是环境网络阻断下绕过 rusqlite 下载的务实方案;系统 python 3.12 已验证可用。
-const CLIPROXY_RESPONSE_TIER_COLUMN: &str = r#"columns = {r[1] for r in con.execute("PRAGMA table_info(usage_events)")}
-response_tier_column = "response_service_tier" if "response_service_tier" in columns else "NULL AS response_service_tier"
-"#;
-
-fn cliproxy_python_command() -> std::process::Command {
-    let mut command = std::process::Command::new("python");
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: automatic refresh must not create a Python console.
-        command.creation_flags(0x08000000);
-    }
-    command
-}
-
+/// Read-only native SQLite query; no external interpreter or API-key column.
 #[tauri::command]
 fn read_cliproxy_usage_events(with_metadata: Option<bool>, start_ms: Option<i64>, end_ms: Option<i64>) -> Result<String, String> {
-    match (start_ms, end_ms) {
-        (None, None) => {}
-        (Some(start), Some(end)) if start < end => {}
-        _ => return Err("startMs/endMs must be supplied together with startMs < endMs".into()),
-    }
-    let db_path = cliproxy_plugins_dir()?.join("usage.db");
-    if !db_path.exists() {
-        return Ok(if with_metadata.unwrap_or(false) {
-            serde_json::json!({"available":false,"events":[],"readStartMs":null,"readEndMs":null}).to_string()
-        } else { "[]".to_string() });
-    }
-    // Windows 反斜杠在 python 字符串里会被当转义,转成正斜杠(Windows sqlite uri 同样接受)。
-    let db_str = db_path.to_string_lossy().replace('\\', "/");
-
-    // 内联 python:只读连接(uri mode=ro),30 天窗口,SELECT 精简字段(无 api_key),输出 JSON。
-    // requested_at 秒×1000 转毫秒,供前端 new Date(ms) 与时间桶数值比较。
-    // 不用 format!(python 脚本含花括号会被当占位符),改 str::replace 注入路径。
-    let script = r#"import sqlite3, json, sys, time
-con = sqlite3.connect("file:__DB__?mode=ro", uri=True)
-con.row_factory = sqlite3.Row
-__RESPONSE_TIER_COLUMN__
-now = __END_MS__ if __END_MS__ is not None else int(time.time() * 1000)
-cutoff = __START_MS__ if __START_MS__ is not None else now - 30 * 86400 * 1000
-rows = con.execute(
-    "SELECT requested_at, provider, executor_type, model, alias, auth_index, auth_type, "
-    "source, reasoning_effort, service_tier, " + response_tier_column + ", latency_ms, ttft_ms, failed, status_code, "
-    "input_tokens, output_tokens, reasoning_tokens, cached_tokens, cache_read_tokens, "
-    "cache_creation_tokens, total_tokens, primary_used_percent, primary_reset_at, "
-    "primary_used_tokens, primary_remaining_tokens, primary_limit_tokens, "
-    "secondary_used_percent, secondary_reset_at, secondary_used_tokens, "
-    "secondary_remaining_tokens, secondary_limit_tokens "
-    "FROM usage_events WHERE requested_at >= ? AND requested_at < ? ORDER BY requested_at DESC",
-    (cutoff / 1000, now / 1000))
-out = []
-for r in rows:
-    d = {k: r[k] for k in r.keys()}
-    d["requested_at"] = (d.get("requested_at") or 0) * 1000
-    d["failed"] = bool(d.get("failed"))
-    out.append(d)
-con.close()
-# ensure_ascii=True:Windows python stdout 默认 cp936(GBK),中文 provider/model 名
-# 用 \uXXXX 转义确保纯 ASCII 传输,前端 JSON.parse 自动还原为中文,避免乱码。
-result = {"available": True, "events": out, "readStartMs": cutoff, "readEndMs": now} if __META__ else out
-sys.stdout.write(json.dumps(result, ensure_ascii=True, default=str))
-"#.replace("__DB__", &db_str)
-    .replace("__RESPONSE_TIER_COLUMN__", CLIPROXY_RESPONSE_TIER_COLUMN)
-    .replace("__START_MS__", &start_ms.map(|value| value.to_string()).unwrap_or_else(|| "None".into()))
-    .replace("__END_MS__", &end_ms.map(|value| value.to_string()).unwrap_or_else(|| "None".into()))
-    .replace("__META__", if with_metadata.unwrap_or(false) { "True" } else { "False" });
-
-    let output = cliproxy_python_command()
-        .arg("-c")
-        .arg(&script)
-        .output()
-        .map_err(|e| format!("启动 python 失败: {e}(需系统 python 3.x 带 sqlite3 模块)"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("python 读取 usage.db 失败: {}", stderr.trim()));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim().is_empty() { return Err("python returned no usage result".into()); }
-    Ok(stdout.into_owned())
+    cliproxy_usage_db::read_usage_events(
+        &cliproxy_plugins_dir()?.join("usage.db"),
+        with_metadata.unwrap_or(false),
+        start_ms,
+        end_ms,
+    )
 }
 
 /// 读 CPA 插件 model_prices.cache 原文 JSON(LiteLLM 3213 模型 per-token USD 定价)。
@@ -869,7 +790,14 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building 2API Console");
 
-    app.run(|_app_handle, _event| {});
+    app.run(|_app_handle, _event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            if let Err(error) = show_main_window(_app_handle) {
+                eprintln!("failed to restore main window from Dock: {error}");
+            }
+        }
+    });
 }
 
 /// 进程级环境变量互斥锁(仅测试)。
@@ -894,7 +822,7 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 关键点:绝不能"用完 `remove_var`" —— 那是**删除**而不是还原,会把整个测试
 /// 进程毒化:此后任何需要主目录/APPDATA 的用例都会拿到
 /// "无法定位用户主目录(USERPROFILE/HOME 均未设置)"。
-/// 因此约定:裸 `remove_var` 只允许出现在 `Drop` 内部,业务代码一律用本守卫。
+/// 因此约定:环境变量的删除也通过本守卫,离开作用域后还原。
 ///
 /// 用 RAII 而非"手动 Save/Restore"还有一层收益:`f()` panic 时 `Drop` 照样
 /// 在 unwind 期间执行,不会把改过的 env 泄给后续用例。
@@ -912,6 +840,12 @@ impl EnvGuard {
         std::env::set_var(key, value);
         Self { key, prev }
     }
+
+    pub(crate) fn remove(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, prev }
+    }
 }
 
 #[cfg(test)]
@@ -927,34 +861,6 @@ impl Drop for EnvGuard {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn cliproxy_optional_response_tier_never_uses_requested_tier() {
-        let script = format!(r#"import sqlite3
-con = sqlite3.connect(":memory:")
-con.execute("CREATE TABLE usage_events(service_tier TEXT)")
-con.execute("INSERT INTO usage_events VALUES('priority')")
-{optional}
-assert con.execute("SELECT " + response_tier_column + " FROM usage_events").fetchone()[0] is None
-con.execute("ALTER TABLE usage_events ADD COLUMN response_service_tier TEXT")
-con.execute("UPDATE usage_events SET response_service_tier='default'")
-{optional}
-assert con.execute("SELECT " + response_tier_column + " FROM usage_events").fetchone()[0] == 'default'
-"#, optional=super::CLIPROXY_RESPONSE_TIER_COLUMN);
-        let output=super::cliproxy_python_command().args(["-c",&script]).output().unwrap();
-        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn cliproxy_background_python_runs_without_a_console() {
-        let output = super::cliproxy_python_command().args(["-c", r#"import ctypes
-ctypes.windll.kernel32.GetConsoleWindow.restype = ctypes.c_void_p
-print(bool(ctypes.windll.kernel32.GetConsoleWindow()))
-"#]).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "False");
-    }
-
     #[test]
     fn read_cliproxy_usage_events_rejects_invalid_bounds() {
         assert!(super::read_cliproxy_usage_events(Some(true), Some(1), None).is_err());

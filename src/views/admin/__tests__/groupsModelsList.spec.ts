@@ -12,6 +12,15 @@ import {
 } from "../groupsModelsList";
 
 describe("groupsModelsList", () => {
+  it("normalizes a large default candidate list without changing order or selection", () => {
+    const state = createModelsListState();
+    const models = Array.from({ length: 5000 }, (_, index) => `model-${index}`);
+
+    setModelsListCandidates(state, [" ", ...models, " model-0 "]);
+
+    expect(state.items).toEqual(models.map(id => ({ id, selected: true })));
+  });
+
   it("selects all default candidates for a new disabled config", () => {
     const state = createModelsListState();
 

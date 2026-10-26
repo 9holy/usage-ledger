@@ -6800,6 +6800,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  clearTimeout(searchTimeout);
   document.removeEventListener("click", handleClickOutside);
   accountSearchRunner.clearAll();
   clearAllAccountSearchState();

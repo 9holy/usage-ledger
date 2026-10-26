@@ -113,13 +113,13 @@ function modelLog(model: string, from = start.getTime(), to = end.getTime()): co
   return { available: true, rowCount: 1, windowStartMs: from, windowEndMs: to, bucketHours: 1, cells: [], groups: [{ model, accountId: 'fixture-account', apiKeyId: '', firstMs: from, lastMs: to, requests: 1, success: 1, error: 0, stdNormalInput: 100, stdCached: 0, stdOutput: 20, longNormalInput: 0, longCached: 0, longOutput: 0, estimatedCostUsd: 1, rateLimited: 0, upstreamError: 0, clientCanceled: 0 }], bucketLatencies: [] } as unknown as cockpitApi.CockpitRequestLogSummary
 }
 
-async function openCockpitModelFixture() {
+async function openCockpitModelFixture(calendarSnapshot = true) {
   const view = await open()
   const state = view.vm as any
   await view.get('[aria-label="统计时间"]').setValue('1h'); await flushPromises()
   const totals = { requestCount: 1, successCount: 1, failureCount: 0, clientCanceledCount: 0, upstreamResponseFailedCount: 0, streamIncompleteCount: 0, totalLatencyMs: 20, textRequestCount: 1, imageRequestCount: 0, imageGenerationRequestCount: 0, imageEditRequestCount: 0, imageGenerationCapabilityFailureCount: 0, inputTokens: 100, outputTokens: 20, totalTokens: 120, cachedTokens: 0, reasoningTokens: 0, estimatedCostUsd: 1 }
   const snapshot = { since: start.getTime(), updatedAt: end.getTime(), totals, accounts: [], models: [{ modelId: 'calendar-model', usage: totals }], apiKeys: [] }
-  const stats: cockpitApi.CockpitStats = { ...snapshot, daily: snapshot, weekly: snapshot, monthly: snapshot }
+  const stats: cockpitApi.CockpitStats = { ...snapshot, ...(calendarSnapshot ? { daily: snapshot, weekly: snapshot, monthly: snapshot } : {}) }
   vi.spyOn(cockpitApi, 'getCockpitStats').mockResolvedValue(stats)
   for (const key of ['getCockpitCodexAccounts', 'getCockpitGeminiAccounts', 'getCockpitAntigravityAccounts', 'getCockpitPlatformAccounts', 'getCockpitModelProviders', 'getCockpitQuotaHistories', 'getCockpitApiKeyNames'] as const) vi.spyOn(cockpitApi, key).mockResolvedValue([])
   vi.spyOn(cockpitApi, 'getCockpitLocalAccess').mockResolvedValue(null)
@@ -136,6 +136,137 @@ async function openCockpitModelFixture() {
 }
 
 describe('CostCenter operating integration', () => {
+  it('coalesces paired restore notifications but refreshes again after a separate blur/restore', async () => {
+    const view = await open()
+    const calls = vi.mocked(shared.data.reload).mock.calls.length
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+    visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('focus')); await flushPromises()
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls + 1)
+    window.dispatchEvent(new Event('focus')); await flushPromises()
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls + 1)
+    window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus')); await flushPromises()
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls + 2)
+    expect((view.vm as any).refreshing).toBe(false)
+  })
+
+  it('queues exactly one fresh restore read behind a pre-resume request', async () => {
+    const view = await open(), state = view.vm as any
+    let complete!: () => void
+    vi.mocked(shared.data.reload).mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
+    const calls = vi.mocked(shared.data.reload).mock.calls.length
+    const pending = state.reload(); await flushPromises()
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+    visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event('focus'))
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls + 1)
+    complete(); await pending; await flushPromises()
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls + 2)
+  })
+
+  it.each(['manual', 'period', 'model source'])('preserves queued %s refreshes during a restore read', async action => {
+    const view = await open(), state = view.vm as any
+    let complete!: () => void
+    vi.mocked(shared.data.reload).mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
+    const calls = vi.mocked(shared.data.reload).mock.calls.length
+    window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus')); await flushPromises()
+    if (action === 'manual') void state.reload()
+    else if (action === 'period') state.range = '7d'
+    else state.modelCostSource = 'requested'
+    await flushPromises()
+    complete(); await flushPromises()
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls + 2)
+    expect(shared.data.reload).toHaveBeenLastCalledWith(action === 'period' ? '7d' : '30d', expect.any(Object))
+  })
+
+  it('freezes only the hidden presentation clock and updates it immediately on restore', async () => {
+    mixed(); const view = await open(), state = view.vm as any
+    const clock = state.now, ledgers = state.accountLedgers, expense = state.operatingSummary.expenseCny.total
+    const calls = vi.mocked(shared.data.reload).mock.calls.length
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(60000); await flushPromises()
+    expect(state.now).toBe(clock)
+    expect(state.accountLedgers).toBe(ledgers)
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls)
+    visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange'))
+    expect(state.now.getTime()).toBe(end.getTime() + 60000)
+    await flushPromises()
+    expect(shared.data.reload).toHaveBeenCalledTimes(calls + 1)
+    expect(state.operatingSummary.expenseCny.total).toBe(expense)
+  })
+
+  it('keeps a queued connection-source refresh behind the existing request', async () => {
+    const { state } = await openCockpitModelFixture()
+    const connection = useConnectionStore()
+    connection.activeId = 'saved-A'; await flushPromises()
+    let complete!: () => void
+    vi.mocked(shared.data.reload).mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve }))
+    const calls = vi.mocked(cockpitApi.getCockpitStats).mock.calls.length
+    const pending = state.reload(); await flushPromises()
+    connection.activeId = null
+    void state.reload(); await flushPromises()
+    expect(cockpitApi.getCockpitStats).toHaveBeenCalledTimes(calls)
+    complete(); await pending; await flushPromises()
+    expect(cockpitApi.getCockpitStats).toHaveBeenCalledTimes(calls + 1)
+    expect(state.costSourceKind).toBe('cockpit')
+  })
+
+  it('passes Cockpit metadata only with its successful current reload, not on independent unified entry', async () => {
+    const { state, stats } = await openCockpitModelFixture()
+    state.activePanel = 'unified'; await flushPromises()
+    expect(shared.unifiedLoad.mock.calls.at(-1)).toHaveLength(2)
+    await state.reload(); await flushPromises()
+    expect(shared.unifiedLoad).toHaveBeenLastCalledWith('1h', expect.any(Object), { stats, accounts: [], localAccess: undefined })
+    vi.spyOn(cockpitApi, 'getCockpitGeminiAccounts').mockRejectedValueOnce(new Error('fixture metadata failure'))
+    await state.reload(); await flushPromises()
+    expect(shared.unifiedLoad.mock.calls.at(-1)).toHaveLength(2)
+  })
+
+  it('keeps Unified raw account amounts while primary stats retain ledger enrichment and historical rows', async () => {
+    const { state, stats } = await openCockpitModelFixture()
+    const rawUsage = { ...stats.totals, estimatedCostUsd: 1 }
+    stats.accounts = [{ accountId: 'fixture-account', email: 'current@example.invalid', usage: rawUsage }]
+    vi.mocked(cockpitApi.readCostLedger).mockResolvedValue({ accounts: [
+      { email: 'current@example.invalid', updatedAt: end.getTime(), usage: { ...rawUsage, estimatedCostUsd: 2 } },
+      { email: 'removed@example.invalid', updatedAt: end.getTime(), usage: { ...rawUsage, estimatedCostUsd: 3 } },
+    ] })
+    state.activePanel = 'unified'; await flushPromises()
+    await state.reload(); await flushPromises()
+    expect(shared.unifiedLoad).toHaveBeenLastCalledWith('1h', expect.any(Object), expect.objectContaining({ stats }))
+    expect(stats.accounts).toHaveLength(1)
+    expect(stats.accounts[0].usage.estimatedCostUsd).toBe(1)
+    expect(state.cockpitStats.accounts).toHaveLength(2)
+    expect(state.cockpitStats.accounts[0].usage.estimatedCostUsd).toBe(2)
+    expect(state.cockpitStats.accounts[1]).toMatchObject({ email: 'removed@example.invalid', costIdentityKind: 'ledger-email', usage: { estimatedCostUsd: 3 } })
+    expect(cockpitApi.writeCostLedger).toHaveBeenLastCalledWith(expect.arrayContaining([
+      expect.objectContaining({ email: 'current@example.invalid', usage: expect.objectContaining({ estimatedCostUsd: 2 }) }),
+      expect.objectContaining({ email: 'removed@example.invalid', usage: expect.objectContaining({ estimatedCostUsd: 3 }) }),
+    ]))
+  })
+
+  it('keeps Unified duplicate-email raw rows separate when an empty ledger merges the primary rows', async () => {
+    const { state, stats } = await openCockpitModelFixture()
+    stats.accounts = [
+      { accountId: 'raw-A', email: 'same@example.invalid', usage: { ...stats.totals, estimatedCostUsd: 2 } },
+      { accountId: 'raw-B', email: 'same@example.invalid', usage: { ...stats.totals, estimatedCostUsd: 1 } },
+    ]
+    vi.mocked(cockpitApi.readCostLedger).mockResolvedValue({ accounts: [] })
+    state.activePanel = 'unified'; await flushPromises()
+    const reads = vi.mocked(cockpitApi.getCockpitStats).mock.calls.length
+    const unifiedReads = shared.unifiedLoad.mock.calls.length
+    await state.reload(); await flushPromises()
+    expect(cockpitApi.getCockpitStats).toHaveBeenCalledTimes(reads + 1)
+    expect(shared.unifiedLoad).toHaveBeenCalledTimes(unifiedReads + 1)
+    expect(shared.unifiedLoad).toHaveBeenLastCalledWith('1h', expect.any(Object), expect.objectContaining({ stats }))
+    expect(stats.accounts.map(row => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 1]])
+    expect(state.cockpitStats.accounts.map((row: cockpitApi.CockpitStats['accounts'][number]) => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 2]])
+    expect(cockpitApi.writeCostLedger).toHaveBeenLastCalledWith([
+      expect.objectContaining({ email: 'same@example.invalid', usage: expect.objectContaining({ estimatedCostUsd: 2 }) }),
+    ])
+  })
+
   it('updates current import and fullscreen failure prefixes without rerunning operations or translating raw details', async () => {
     const view = await open()
     const state = view.vm as any
@@ -205,8 +336,7 @@ describe('CostCenter operating integration', () => {
   })
 
   it.each([true, false])('falls back without a reload loop after model-window failure (calendar snapshot: %s)', async available => {
-    const { view, state, logs, stats } = await openCockpitModelFixture()
-    if (!available) { delete stats.daily; delete stats.weekly; delete stats.monthly }
+    const { view, state, logs } = await openCockpitModelFixture(available)
     const mainReads = vi.mocked(cockpitApi.getCockpitStats).mock.calls.length
     logs.mockRejectedValue(new Error('fixture model read failed'))
     shared.data.modelCostRange.value = '7d'; await flushPromises()

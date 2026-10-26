@@ -111,6 +111,7 @@ const RULES: Rule[] = [
 const RESOLVED_OPTIONS_ALLOWLIST = [
   'src/api/client.ts',
   'src/components/admin/usage/UsageCleanupDialog.vue',
+  'src/features/cost-center/unifiedSourceReader.ts', // Query windows use the host timezone, not display locale.
   'src/features/cost-center/useCostCenterData.ts',
   'src/views/KeyUsageView.vue',
   'src/views/admin/GroupsView.vue',
@@ -482,7 +483,7 @@ describe('格式化 locale 契约（禁止落到 OS 默认 locale）', () => {
     const raw = readFileSync(resolve(process.cwd(), 'src/utils/format.ts'), 'utf8')
     // 不能再是 `num.toLocaleString()` —— 那正是本轮修掉的 bug 本体
     expect(raw).not.toMatch(/num\.toLocaleString\(/)
-    expect(raw).toMatch(/new Intl\.NumberFormat\(locale\)/)
+    expect(raw).toMatch(/new Intl\.NumberFormat\(locale(?:,|\))/)
     expect(raw).toMatch(/getNumberFormatter\(getLocale\(\)\)/)
   })
 

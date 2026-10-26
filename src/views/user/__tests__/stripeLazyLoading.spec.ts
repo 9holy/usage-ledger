@@ -30,4 +30,16 @@ describe('Stripe lazy-loading contract', () => {
     expect(viteConfig.slice(stripeRule, miscFallback)).toContain("return 'vendor-stripe'")
     expect(stripeRule).toBeLessThan(miscFallback)
   })
+
+  it.each([
+    ['xlsx', 'src/views/admin/UsageView.vue', 'vendor-export'],
+    ['@airwallex/components-sdk', 'src/views/user/AirwallexPaymentView.vue', 'vendor-airwallex'],
+  ])('keeps %s behind its existing on-demand import', (dependency, consumer, chunk) => {
+    expect(readFrontendFile(consumer)).toContain(`await import('${dependency}')`)
+    const viteConfig = readFrontendFile('vite.config.ts')
+    const split = viteConfig.indexOf(`return '${chunk}'`)
+    expect(split).toBeGreaterThan(-1)
+    expect(split).toBeLessThan(viteConfig.indexOf("return 'vendor-ui'"))
+    expect(split).toBeLessThan(viteConfig.indexOf("return 'vendor-misc'"))
+  })
 })

@@ -198,7 +198,8 @@ const showBlockingConfirmation = ref(false)
 const deleteRequest = reactive<{ mode: '' | 'single' | 'batch'; ids: number[] }>({ mode: '', ids: [] })
 const loading = reactive({ config: false, runtime: false, groups: false, events: false, saving: false, detail: false, deleting: false, previewing: false })
 const loadErrors = reactive<PromptLoadErrors>({ config: '', runtime: '', groups: '', events: '' })
-const dirty = computed(() => draftFingerprint(draft.value) !== draftFingerprint(serverConfig.value))
+const serverFingerprint = computed(() => draftFingerprint(serverConfig.value))
+const dirty = computed(() => draftFingerprint(draft.value) !== serverFingerprint.value)
 
 const SaveToggle = defineComponent({
   inheritAttrs: false,

@@ -40,6 +40,9 @@ const { t } = useI18n()
 
 const now = ref(new Date())
 let timer: ReturnType<typeof setInterval> | null = null
+const resetTimestamp = computed(() =>
+  props.account.rate_limit_reset_at ? Date.parse(props.account.rate_limit_reset_at) : NaN
+)
 
 // 是否为 Code Assist OAuth
 // 判断逻辑与后端保持一致：project_id 存在即为 Code Assist
@@ -131,7 +134,7 @@ const tierBadgeClass = computed(() => {
 // 是否限流
 const isRateLimited = computed(() => {
   if (!props.account.rate_limit_reset_at) return false
-  const resetTime = Date.parse(props.account.rate_limit_reset_at)
+  const resetTime = resetTimestamp.value
   // 防护：如果日期解析失败（NaN），则认为未限流
   if (Number.isNaN(resetTime)) return false
   return resetTime > now.value.getTime()
@@ -140,7 +143,7 @@ const isRateLimited = computed(() => {
 // 倒计时文本
 const resetCountdown = computed(() => {
   if (!props.account.rate_limit_reset_at) return ''
-  const resetTime = Date.parse(props.account.rate_limit_reset_at)
+  const resetTime = resetTimestamp.value
   // 防护：如果日期解析失败，显示 "-"
   if (Number.isNaN(resetTime)) return '-'
 
@@ -163,7 +166,7 @@ const resetCountdown = computed(() => {
 // 是否紧急（< 1分钟）
 const isUrgent = computed(() => {
   if (!props.account.rate_limit_reset_at) return false
-  const resetTime = Date.parse(props.account.rate_limit_reset_at)
+  const resetTime = resetTimestamp.value
   // 防护：如果日期解析失败，返回 false
   if (Number.isNaN(resetTime)) return false
 

@@ -717,8 +717,9 @@ pub fn save_session(tx: &Transaction<'_>, meta: &SessionMeta) -> Result<(), Stri
         .filter(|timing| !timing.turn_id.is_empty())
     {
         let old: Option<String> = tx
+            .prepare_cached("SELECT data FROM monitor_turns WHERE session_key=?1 AND turn_id=?2")
+            .map_err(|error| error.to_string())?
             .query_row(
-                "SELECT data FROM monitor_turns WHERE session_key=?1 AND turn_id=?2",
                 params![key, timing.turn_id],
                 |row| row.get(0),
             )
@@ -732,11 +733,12 @@ pub fn save_session(tx: &Transaction<'_>, meta: &SessionMeta) -> Result<(), Stri
             timing.duration_ms = timing.duration_ms.or(old.duration_ms);
             timing.ttft_ms = timing.ttft_ms.or(old.ttft_ms);
         }
-        tx.execute("INSERT INTO monitor_turns(session_key,turn_id,data) VALUES(?1,?2,?3) ON CONFLICT(session_key,turn_id) DO UPDATE SET data=excluded.data",params![key,timing.turn_id,serde_json::to_string(&timing).map_err(|error|error.to_string())?]).map_err(|error|error.to_string())?;
+        tx.prepare_cached("INSERT INTO monitor_turns(session_key,turn_id,data) VALUES(?1,?2,?3) ON CONFLICT(session_key,turn_id) DO UPDATE SET data=excluded.data").map_err(|error|error.to_string())?.execute(params![key,timing.turn_id,serde_json::to_string(&timing).map_err(|error|error.to_string())?]).map_err(|error|error.to_string())?;
     }
     let previous: Option<String> = tx
+        .prepare_cached("SELECT meta FROM monitor_sessions WHERE key=?1")
+        .map_err(|e| e.to_string())?
         .query_row(
-            "SELECT meta FROM monitor_sessions WHERE key=?1",
             [&key],
             |r| r.get(0),
         )
@@ -764,9 +766,12 @@ pub fn save_session(tx: &Transaction<'_>, meta: &SessionMeta) -> Result<(), Stri
             next.started_at_ms = old.started_at_ms;
         }
     }
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO monitor_sessions(key,tool,meta,totals,updated_ms) VALUES(?1,?2,?3,?4,?5)
          ON CONFLICT(key) DO UPDATE SET meta=excluded.meta, updated_ms=excluded.updated_ms",
+    )
+    .map_err(|e| e.to_string())?
+    .execute(
         params![
             key,
             next.tool,
@@ -787,8 +792,9 @@ fn adjust(
 ) -> Result<(), String> {
     let key = session_key(&usage.tool, &usage.session_id);
     let json: String = tx
+        .prepare_cached("SELECT totals FROM monitor_sessions WHERE key=?1")
+        .map_err(|e| e.to_string())?
         .query_row(
-            "SELECT totals FROM monitor_sessions WHERE key=?1",
             [&key],
             |r| r.get(0),
         )
@@ -860,8 +866,11 @@ fn adjust(
         unpriced_reason(unpriced, !cost.scenarios.is_empty(), cost.reason.as_deref()),
         sign,
     );
-    tx.execute(
+    tx.prepare_cached(
         "UPDATE monitor_sessions SET totals=?2 WHERE key=?1",
+    )
+    .map_err(|e| e.to_string())?
+    .execute(
         params![
             key,
             serde_json::to_string(&totals).map_err(|e| e.to_string())?
@@ -980,8 +989,9 @@ fn previous(
     id: &str,
 ) -> Result<Option<(UsageRecord, CostEstimate)>, String> {
     let row: Option<(String, String)> = conn
+        .prepare_cached("SELECT usage,cost FROM monitor_requests WHERE tool=?1 AND id=?2")
+        .map_err(|e| e.to_string())?
         .query_row(
-            "SELECT usage,cost FROM monitor_requests WHERE tool=?1 AND id=?2",
             params![tool, id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1111,8 +1121,9 @@ fn save_usage_impl(
     enrich_partial: bool,
 ) -> Result<(), String> {
     let superseded: bool = tx
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM monitor_aliases WHERE tool=?1 AND id=?2)")
+        .map_err(|e| e.to_string())?
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM monitor_aliases WHERE tool=?1 AND id=?2)",
             params![incoming.tool, incoming.id],
             |r| r.get(0),
         )
@@ -1187,8 +1198,9 @@ fn save_usage_impl(
     }
     if merged.tool == "codex" && !merged.turn_id.is_empty() {
         let evidence: Option<String> = tx
+            .prepare_cached("SELECT data FROM monitor_turn_mode_evidence WHERE session_key=?1 AND turn_id=?2")
+            .map_err(|error| error.to_string())?
             .query_row(
-                "SELECT data FROM monitor_turn_mode_evidence WHERE session_key=?1 AND turn_id=?2",
                 params![
                     session_key(&merged.tool, &merged.session_id),
                     merged.turn_id
@@ -1214,8 +1226,9 @@ fn save_usage_impl(
     }
     let key = session_key(&usage.tool, &usage.session_id);
     let exists: bool = tx
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM monitor_sessions WHERE key=?1)")
+        .map_err(|e| e.to_string())?
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM monitor_sessions WHERE key=?1)",
             [&key],
             |r| r.get(0),
         )
@@ -1243,9 +1256,9 @@ fn save_usage_impl(
     if let Some((u, c)) = old {
         adjust(tx, &u, &c, -1)?;
     }
-    tx.execute("INSERT INTO monitor_requests(tool,id,session_key,timestamp_ms,usage,cost) VALUES(?1,?2,?3,?4,?5,?6)
-        ON CONFLICT(tool,id) DO UPDATE SET session_key=excluded.session_key,timestamp_ms=excluded.timestamp_ms,usage=excluded.usage,cost=excluded.cost",
-        params![usage.tool,usage.id,key,usage.timestamp_ms,json,serde_json::to_string(&cost).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+    tx.prepare_cached("INSERT INTO monitor_requests(tool,id,session_key,timestamp_ms,usage,cost) VALUES(?1,?2,?3,?4,?5,?6)
+        ON CONFLICT(tool,id) DO UPDATE SET session_key=excluded.session_key,timestamp_ms=excluded.timestamp_ms,usage=excluded.usage,cost=excluded.cost").map_err(|e|e.to_string())?
+        .execute(params![usage.tool,usage.id,key,usage.timestamp_ms,json,serde_json::to_string(&cost).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
     adjust(tx, usage, &cost, 1)?;
     let delta = usage.output_tokens - prior_output;
     // LS timestamps identify request start. Only its reported full duration can establish
@@ -1264,8 +1277,8 @@ fn save_usage_impl(
         && output_time <= observed_ms + 5_000
         && output_time >= observed_ms - 60_000
     {
-        tx.execute("INSERT INTO monitor_observations(tool,id,session_key,observed_ms,output_tokens) VALUES(?1,?2,?3,?4,?5)",
-            params![usage.tool,usage.id,key,observed_ms,delta]).map_err(|e| e.to_string())?;
+        tx.prepare_cached("INSERT INTO monitor_observations(tool,id,session_key,observed_ms,output_tokens) VALUES(?1,?2,?3,?4,?5)").map_err(|e| e.to_string())?
+            .execute(params![usage.tool,usage.id,key,observed_ms,delta]).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1329,7 +1342,7 @@ fn request_summary(
     conn: &Connection,
     key: &str,
 ) -> Result<(Option<RecentRequest>, RequestSpeed), String> {
-    let mut query=conn.prepare("SELECT usage FROM monitor_requests WHERE session_key=?1 ORDER BY timestamp_ms DESC,id DESC LIMIT 10").map_err(|error|error.to_string())?;
+    let mut query=conn.prepare_cached("SELECT usage FROM monitor_requests WHERE session_key=?1 ORDER BY timestamp_ms DESC,id DESC LIMIT 10").map_err(|error|error.to_string())?;
     let rows = query
         .query_map([key], |row| row.get::<_, String>(0))
         .map_err(|error| error.to_string())?;
@@ -1898,6 +1911,84 @@ mod completeness_tests {
         .unwrap();
         tx.commit().unwrap();
     }
+
+    fn cache_fixture(conn: &mut Connection, count: i64) -> std::time::Duration {
+        let catalog = crate::model_catalog::CatalogSnapshot::default();
+        let started = std::time::Instant::now();
+        for pass in 0..2 {
+            let tx = conn.transaction().unwrap();
+            for id in 0..count {
+                let mut usage = record(
+                    &id.to_string(),
+                    if id % 2 == 0 { "codex" } else { "claude" },
+                    50 + pass,
+                );
+                usage.session_id = format!("session{}", id % 8);
+                save_usage_with_catalog(&tx, &usage, i64::MAX, 0, &catalog).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        started.elapsed()
+    }
+
+    fn cache_snapshot(conn: &Connection) -> Vec<(String, String)> {
+        let mut requests = conn.prepare("SELECT usage,cost FROM monitor_requests ORDER BY tool,id").unwrap();
+        let mut sessions = conn.prepare("SELECT meta,totals FROM monitor_sessions ORDER BY key").unwrap();
+        requests
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .chain(sessions
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap())
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn cached_writes_rebind_across_transactions_and_preserve_rollback() {
+        let mut snapshots = Vec::new();
+        for capacity in [0, 16] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.set_prepared_statement_cache_capacity(capacity);
+            initialize(&conn).unwrap();
+            cache_fixture(&mut conn, 32);
+            let saved = cache_snapshot(&conn);
+            {
+                let tx = conn.transaction().unwrap();
+                let usage = record("rolled-back", "codex", 999);
+                save_usage_with_catalog(
+                    &tx, &usage, i64::MAX, 0,
+                    &crate::model_catalog::CatalogSnapshot::default(),
+                ).unwrap();
+                delete_request(&tx, "codex", "0").unwrap();
+            }
+            assert_eq!(cache_snapshot(&conn), saved);
+            snapshots.push(saved);
+        }
+        assert_eq!(snapshots[0], snapshots[1]);
+    }
+
+    #[test]
+    #[ignore = "opt-in synthetic file-database timing; never opens a user database"]
+    fn statement_cache_ingest_benchmark() {
+        let root = std::env::temp_dir().join(format!(
+            "monitor-statement-cache-bench-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut snapshots = Vec::new();
+        for capacity in [0, 16] {
+            let mut conn = crate::ledger_db::open(&root.join(format!("cache-{capacity}.sqlite"))).unwrap();
+            conn.set_prepared_statement_cache_capacity(capacity);
+            initialize(&conn).unwrap();
+            let elapsed = cache_fixture(&mut conn, 4096);
+            eprintln!("file SQLite, 8192 request insert/update operations, statement cache {capacity}: {elapsed:?}");
+            snapshots.push(cache_snapshot(&conn));
+        }
+        assert_eq!(snapshots[0], snapshots[1]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn full_session_aggregation_leaves_unreturned_request_history_unenriched() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -1936,7 +2027,7 @@ mod completeness_tests {
         assert_eq!(rates[0].recent_request.as_ref().unwrap().id, "good");
     }
     #[test]
-    fn unpriced_reason_counts_include_scenarios_but_the_unpriced_filter_stays_quote_free() {
+    fn unpriced_reason_counts_and_filter_follow_automatic_quote_coverage() {
         let mut conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
         let mut scenario = record("scenario", "codex", 50);
@@ -1973,8 +2064,10 @@ mod completeness_tests {
             &MonitorPeriod::default(),
         )
         .unwrap();
-        assert_eq!(detail.request_count, 1);
-        assert_eq!(detail.requests[0].usage.id, "missing");
+        assert_eq!(detail.request_count, 2);
+        let mut ids = detail.requests.iter().map(|request| request.usage.id.as_str()).collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["missing", "scenario"]);
         let analysis = super::super::analysis::read(
             &conn,
             None,

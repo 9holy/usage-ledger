@@ -142,7 +142,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onMounted, reactive, ref, type PropType } from 'vue'
+import { computed, defineComponent, h, onMounted, onUnmounted, reactive, ref, type PropType } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
@@ -175,6 +175,9 @@ const overviewDialog = ref(false)
 const overviewLoading = ref(false)
 const selectedOverview = ref<AffiliateUserOverview | null>(null)
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
+onUnmounted(() => {
+  if (debounceTimer) clearTimeout(debounceTimer)
+})
 
 const columns = computed<Column[]>(() => {
   if (props.type === 'invites') {

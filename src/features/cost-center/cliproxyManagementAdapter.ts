@@ -229,9 +229,6 @@ export function cliproxyEventsToModelRoutes(
     const requestedModel = ev.alias || model
     const authIndex = ev.auth_index?.trim() ? ev.auth_index : ''
     const key = JSON.stringify([model, requestedModel, authIndex, ev.provider])
-    const accountId = authIndex ? authIndexToAccountId(authIndex) : null
-    const account = accounts.find((a) => a.id === accountId)
-    const accountName = account?.name || (authIndex ? authIndex : costDataText('unattributedAccountUsage'))
     // 用带 basis 的计价函数:无匹配单价时 pricedEventCostUsd 返的是**哨兵 0**(basis 标"算不出"),
     // 而 eventCostUsd 只给 number,丢掉标注后 0 会被当实测成本写进路由明细的成本列。
     const priced = pricedEventCostUsd(ev, resolveModelPricing(model, prices))
@@ -239,6 +236,9 @@ export function cliproxyEventsToModelRoutes(
     const unpriced = isUnknownCostBasis(priced.basis.kind)
     let row = map.get(key)
     if (!row) {
+      const accountId = authIndex ? authIndexToAccountId(authIndex) : null
+      const account = accounts.find((a) => a.id === accountId)
+      const accountName = account?.name || (authIndex ? authIndex : costDataText('unattributedAccountUsage'))
       row = {
         model,
         requestedModel,

@@ -3,6 +3,7 @@ import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
 import type { PromptAuditConfig, PromptAuditRuntime } from '../types'
 import { SCANNER_CATALOG } from '../viewModel'
+import * as viewModel from '../viewModel'
 import PromptAuditView from '../PromptAuditView.vue'
 
 const mocks = vi.hoisted(() => ({
@@ -71,6 +72,29 @@ describe('PromptAuditView', () => {
     mocks.deleteEventsByFilter.mockResolvedValue({ deleted_events: 2, deleted_jobs: 2 })
     mocks.deleteEvent.mockResolvedValue({ deleted_events: 1, deleted_jobs: 1 })
     mocks.batchDeleteEvents.mockResolvedValue({ deleted_events: 2, deleted_jobs: 2 })
+  })
+
+  it('fingerprints an unchanged server config once while keeping edit, reset and refreshed config comparisons current', async () => {
+    const fingerprint = vi.spyOn(viewModel, 'draftFingerprint')
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="tab-config"]').trigger('click')
+    fingerprint.mockClear()
+    await wrapper.get('[data-test="enabled-toggle"]').trigger('click')
+    expect(fingerprint).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-test="save-config"]').attributes('disabled')).toBeUndefined()
+    fingerprint.mockClear()
+    await wrapper.findAll('button').find(button => button.text() === 'common.reset')!.trigger('click')
+    expect(fingerprint).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-test="save-config"]').attributes('disabled')).toBeDefined()
+    fingerprint.mockClear()
+    mocks.getConfig.mockResolvedValueOnce({ ...baseConfig(), config_version: 9, enabled: false })
+    await (wrapper.vm as any).loadConfig(); await flushPromises()
+    expect(fingerprint).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-test="enabled-toggle"]').attributes('aria-checked')).toBe('false')
+    expect(wrapper.get('[data-test="save-config"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+    fingerprint.mockRestore()
   })
 
   it('starts config, runtime, groups, and events loads independently', async () => {
@@ -147,6 +171,28 @@ describe('PromptAuditView', () => {
     const endpointProps = wrapper.getComponent(EndpointStub).props('endpoints') as Array<{ token: string }>
     expect(endpointProps[0].token).toBe('')
     expect(wrapper.html()).not.toContain('PROMPT_AUDIT_CANARY_SECRET_DO_NOT_PERSIST')
+  })
+
+  it('retains the dirty draft and expected version after a conflict, then accepts the successful retry baseline', async () => {
+    mocks.updateConfig.mockRejectedValueOnce({ status: 409, code: 'prompt_audit_config_conflict', message: 'fixture conflict' })
+      .mockResolvedValueOnce({ ...baseConfig(), enabled: false, config_version: 8 })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="tab-config"]').trigger('click')
+    await wrapper.get('[data-test="enabled-toggle"]').trigger('click')
+    await wrapper.get('[data-test="save-config"]').trigger('click'); await flushPromises()
+    expect(mocks.updateConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false, expected_config_version: 7 }))
+    expect(mocks.showError).toHaveBeenCalledWith('fixture conflict')
+    expect(mocks.showSuccess).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-test="enabled-toggle"]').attributes('aria-checked')).toBe('false')
+    expect(wrapper.get('[data-test="save-config"]').attributes('disabled')).toBeUndefined()
+    expect(mocks.getConfig).toHaveBeenCalledOnce()
+    await wrapper.get('[data-test="save-config"]').trigger('click'); await flushPromises()
+    expect(mocks.updateConfig).toHaveBeenCalledTimes(2)
+    expect(mocks.updateConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false, expected_config_version: 7 }))
+    expect(mocks.showSuccess).toHaveBeenCalledOnce()
+    expect(wrapper.get('[data-test="save-config"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
   })
 
   it('reports real probe progress/results and invalidates filter confirmation when filters change', async () => {

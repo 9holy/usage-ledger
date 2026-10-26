@@ -1344,7 +1344,7 @@ fn scan_batch(
     let sql = scan_batch_sql(source, columns);
     let mut binds: Vec<rusqlite::types::Value> = after.binds(source.id_columns().len());
     binds.push(rusqlite::types::Value::Integer(limit.max(1)));
-    let mut stmt = conn.prepare(&sql).map_err(|e| format!("扫描源库失败: {e}"))?;
+    let mut stmt = conn.prepare_cached(&sql).map_err(|e| format!("扫描源库失败: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(binds), |row| read_row(row, source))
         .map_err(|e| format!("扫描源库失败: {e}"))?
@@ -1365,7 +1365,7 @@ fn scan_bucket(
 ) -> Result<Vec<SourceRow>, String> {
     let sql = scan_bucket_sql(source, columns);
     let (from, to) = source.bucket_bounds(bucket);
-    let mut stmt = conn.prepare(&sql).map_err(|e| format!("扫描源库桶失败: {e}"))?;
+    let mut stmt = conn.prepare_cached(&sql).map_err(|e| format!("扫描源库桶失败: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params![from, to], |row| read_row(row, source))
         .map_err(|e| format!("扫描源库桶失败: {e}"))?
@@ -1595,7 +1595,7 @@ fn read_bucket_state(
     instance: &str,
 ) -> Result<(i64, bool), String> {
     let mut stmt = tx
-        .prepare(
+        .prepare_cached(
             "SELECT max_source_id, sealed FROM rollup_bucket_state
              WHERE source_name = ?1 AND hour_bucket = ?2 AND client_instance_id = ?3",
         )
@@ -1621,7 +1621,7 @@ fn read_error_categories(
     key: &BucketKey,
 ) -> Result<BTreeMap<String, i64>, String> {
     let mut stmt = tx
-        .prepare(
+        .prepare_cached(
             "SELECT error_categories FROM usage_rollup
              WHERE hour_bucket = ?1 AND source_name = ?2 AND source_account_id = ?3
                AND model_id = ?4 AND api_key_id = ?5 AND client_instance_id = ?6",
@@ -1781,7 +1781,7 @@ fn upsert_identity(tx: &Transaction<'_>, seg: &IdentitySegment, now: i64) -> Res
 
     // 1) 同邮箱已有段(开或闭)覆盖该小时 → 只放宽
     let mut containing = tx
-        .prepare(
+        .prepare_cached(
             "SELECT id FROM account_identity
              WHERE source_account_id = ?1 AND client_instance_id = ?2 AND email_norm = ?3
                AND valid_from_hour <= ?4 AND (valid_to_hour IS NULL OR valid_to_hour > ?4)
@@ -1812,7 +1812,7 @@ fn upsert_identity(tx: &Transaction<'_>, seg: &IdentitySegment, now: i64) -> Res
 
     // 2) 找开段
     let mut open_stmt = tx
-        .prepare(
+        .prepare_cached(
             "SELECT id, email_norm, valid_from_hour FROM account_identity
              WHERE source_account_id = ?1 AND client_instance_id = ?2 AND valid_to_hour IS NULL
              ORDER BY valid_from_hour DESC LIMIT 1",

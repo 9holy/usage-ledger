@@ -116,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminPaymentAPI } from '@/api/admin/payment'
@@ -164,6 +164,9 @@ function paymentAmountSymbol(order: PaymentOrder | null | undefined): string {
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
+onUnmounted(() => {
+  if (debounceTimer) clearTimeout(debounceTimer)
+})
 function debounceLoadOrders() {
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => loadOrders(), 300)

@@ -115,6 +115,59 @@ describe('same-window independent source summaries', () => {
     vi.mocked(getCliproxyModelPrices).mockResolvedValue({ 'fixture-model': { input_cost_per_token: 0.000002, output_cost_per_token: 0.000004 } })
   }
 
+  it('reuses all three successful same-batch metadata reads without reusing SQL or caching the next load', async () => {
+    paidFixtures()
+    const unified = useUnifiedCost(ref(null), ref(0.7))
+    unified.selectedSources.value = new Set(['cockpit'])
+    const batch = { stats: stats(), accounts: [], localAccess: { modelPricings: [{ modelId: 'fixture-model', inputUsdPerMillion: 2, outputUsdPerMillion: 4, cachedInputUsdPerMillion: 0 }] } as never }
+    await unified.loadUnified('1h', undefined, batch)
+    expect(getCockpitStats).not.toHaveBeenCalled()
+    expect(getCockpitCodexAccounts).not.toHaveBeenCalled()
+    expect(getCockpitLocalAccess).not.toHaveBeenCalled()
+    expect(getCockpitRequestLogSummary).toHaveBeenCalledOnce()
+    expect(unified.cockpitCost.value).toBeCloseTo(1.4)
+    expect(unified.cockpitStats.value).toEqual(batch.stats)
+    await unified.loadUnified('1h')
+    expect(getCockpitStats).toHaveBeenCalledOnce()
+    expect(getCockpitCodexAccounts).toHaveBeenCalledOnce()
+    expect(getCockpitLocalAccess).toHaveBeenCalledOnce()
+    expect(getCockpitRequestLogSummary).toHaveBeenCalledTimes(2)
+    expect(unified.cockpitCost.value).toBeCloseTo(1.4)
+  })
+
+  it('reads missing batch fields normally and retains unknown-price semantics when those reads fail', async () => {
+    paidFixtures()
+    vi.mocked(getCockpitLocalAccess).mockRejectedValueOnce(new Error('fixture read failed'))
+    vi.mocked(getCockpitCodexAccounts).mockRejectedValueOnce(new Error('fixture account read failed'))
+    const unified = useUnifiedCost(ref(null))
+    unified.selectedSources.value = new Set(['cockpit'])
+    await unified.loadUnified('1h', undefined, { stats: stats() })
+    expect(getCockpitStats).not.toHaveBeenCalled()
+    expect(getCockpitCodexAccounts).toHaveBeenCalledOnce()
+    expect(getCockpitLocalAccess).toHaveBeenCalledOnce()
+    expect(unified.cockpitStats.value).toEqual(stats())
+    expect(unified.cockpitCost.value).toBeNull()
+    expect(unified.sourceStatuses.value.cockpit.state).toBe('partial')
+    expect(unified.sourceStatuses.value.cockpit.records).toBe(1)
+  })
+
+  it('does not publish older injected metadata after a newer window wins', async () => {
+    const unified = useUnifiedCost(ref(null))
+    unified.selectedSources.value = new Set(['cockpit'])
+    let complete!: (value: Awaited<ReturnType<typeof getCockpitRequestLogSummary>>) => void
+    vi.mocked(getCockpitRequestLogSummary).mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
+    const oldStats = stats(), newStats = { ...(stats() as object), updatedAt: Date.now(), accounts: [] } as never
+    const previous = unified.loadUnified('1h', undefined, { stats: oldStats, accounts: [] })
+    await unified.loadUnified('5m', undefined, { stats: newStats, accounts: [] })
+    const latest = unified.sourceReadings.value.cockpit
+    complete({ available: false, rowCount: 0, groups: [] } as never)
+    await previous
+    expect(unified.sourceReadings.value.cockpit).toEqual(latest)
+    expect(unified.cockpitStats.value).toEqual(newStats)
+    expect(unified.cockpitAccountRows.value).toEqual([])
+    expect(unified.cockpitCost.value).toBe(0)
+  })
+
   it.each(['today', '1m', '5m', '30m', '1h', '6h', '24h', '7d', '30d'] as const)('%s: all three sources share exact bounds, instance identity, counts and window units', async (range) => {
     paidFixtures()
     activeConnection.active = { type: 'cliproxy', id: 'remote-management' }
@@ -136,7 +189,7 @@ describe('same-window independent source summaries', () => {
     expect(unified.sourceReadings.value.cliproxy?.tokens).toBe(1000000)
     expect(getCockpitRequestLogSummary).toHaveBeenCalledWith(1, bounds.start.getTime(), end - 1, false)
     expect(getCliproxyUsageSnapshot).toHaveBeenCalledWith({ start: bounds.start, end: new Date(end) })
-    expect(unified.totalCostNote.value).toContain('未跨源去重')
+    expect(unified.totalCostNote.value).toContain('未去除跨来源重复请求')
   })
 
   it('keeps saved Sub2API and local CPA data when the main connection changes to Cockpit', async () => {
@@ -199,7 +252,7 @@ describe('same-window independent source summaries', () => {
     expect(unified.cliproxyCost.value).toBeCloseTo(1.4)
     expect(unified.sourceStatuses.value.cliproxy.state).toBe('partial')
     expect(unified.lowerBoundSources.value).toContain('cliproxy')
-    expect(unified.totalCostNote.value).toContain('下界')
+    expect(unified.totalCostNote.value).toContain('合计金额尚未算全')
   })
 
   it('refreshes CPA instead of reusing an injected snapshot that cannot cover the new end time', async () => {
@@ -325,7 +378,8 @@ describe('lowerBoundSourcesNote · 纯函数文案', () => {
   it('有下界端 ⇒ 点名并说清"总额是下界,不是实测总额"', () => {
     const note = lowerBoundSourcesNote(['cockpit'])
     expect(note).toContain('cockpit')
-    expect(note).toContain('下界')
+    expect(note).toContain('未计入缺价格的用量')
+    expect(note).toContain('合计金额尚未算全')
   })
 })
 
@@ -338,9 +392,9 @@ describe('lowerBoundSourcesNote · 纯函数文案', () => {
 describe('unmeasuredSourcesNote · 纯函数文案', () => {
   it('有总成本 + 有未计入端 ⇒ 点名未计入的端', () => {
     const note = unmeasuredSourcesNote(10, ['cockpit'])
-    expect(note).toContain('未计入 1 端')
+    expect(note).toContain('未计入 1 个来源')
     expect(note).toContain('cockpit')
-    expect(note).toContain('总额只含其余端')
+    expect(note).toContain('合计只含其余来源')
   })
 
   it('有总成本 + 无未计入端 ⇒ 空串', () => {
@@ -349,13 +403,13 @@ describe('unmeasuredSourcesNote · 纯函数文案', () => {
 
   it('无总成本 + 有未计入端 ⇒ 说清是"算不出来",不是"没有数据"', () => {
     const note = unmeasuredSourcesNote(null, ['cockpit', 'cliproxy'])
-    expect(note).toContain('都没有可用成本')
+    expect(note).toContain('都没有可用费用')
     expect(note).toContain('cockpit、cliproxy')
-    expect(note).toContain('算不出来')
+    expect(note).toContain('暂不能计算')
   })
 
   it('无总成本 + 无未计入端 ⇒ 仍给出解释', () => {
-    expect(unmeasuredSourcesNote(null, [])).toBe('选中的端当前都没有可用成本')
+    expect(unmeasuredSourcesNote(null, [])).toBe('所选来源都没有可用费用')
   })
 })
 

@@ -36,14 +36,21 @@ function coverage(window?: LiveWindow): string {
   if (display.partial) return t('usageMonitor.text.partialSamplingObservedOutputCoverageS', { value0: window.observedOutputTokens.toLocaleString(usageLocale()), value1: Math.floor(window.coveredMs / 1000), value2: window.seconds, value3: window.sourceComplete === false ? t('usageMonitor.text.sourcesNotFullyConnected') : '' })
   return display.value === 0 ? t('usageMonitor.text.noNewOutputRecordedInThisWindow') : t('usageMonitor.text.lastOfRecordsUpdatedEveryS', { value0: seconds.value === 60 ? t('usageMonitor.text.60Seconds') : t('usageMonitor.text.5Minutes'), value1: (props.snapshot?.refreshMs || 2000) / 1000 })
 }
-const sessionRows = computed(() => (props.snapshot?.rateSessions ?? props.snapshot?.activeSessions ?? []).map(session => ({
-  session, window: windowOf(props.snapshot?.live?.bySession.find(row => row.sessionKey === session.key)?.windows),
-})).map(row => ({
-  ...row, rate: rate(row.window, row.session.totals.outputTokensPerSecond),
-  recentSpeed: row.session.requestSpeed?.latest && row.session.requestSpeed.latest.outputTokensPerSecond > 0 && Number.isFinite(row.session.requestSpeed.latest.outputTokensPerSecond) && row.session.requestSpeed.latest.timestampMs > 0
-    ? t('usageMonitor.text.latestValidRequestTokensS', { value0: formatMeasuredRate(row.session.requestSpeed.latest.outputTokensPerSecond), value1: new Date(row.session.requestSpeed.latest.timestampMs).toLocaleString(usageLocale(), { hour12: false }) }) : null,
-})).filter(row => (!props.tool || row.session.tool === props.tool)
-  && (row.window ? row.window.observedOutputTokens > 0 : (row.rate.value ?? 0) > 0)))
+const sessionRows = computed(() => {
+  const windowsBySession = new Map<string | null, LiveWindow[]>()
+  for (const row of props.snapshot?.live?.bySession ?? []) {
+    const key = row.sessionKey
+    if (!windowsBySession.has(key)) windowsBySession.set(key, row.windows)
+  }
+  return (props.snapshot?.rateSessions ?? props.snapshot?.activeSessions ?? []).map(session => ({
+    session, window: windowOf(windowsBySession.get(session.key)),
+  })).map(row => ({
+    ...row, rate: rate(row.window, row.session.totals.outputTokensPerSecond),
+    recentSpeed: row.session.requestSpeed?.latest && row.session.requestSpeed.latest.outputTokensPerSecond > 0 && Number.isFinite(row.session.requestSpeed.latest.outputTokensPerSecond) && row.session.requestSpeed.latest.timestampMs > 0
+      ? t('usageMonitor.text.latestValidRequestTokensS', { value0: formatMeasuredRate(row.session.requestSpeed.latest.outputTokensPerSecond), value1: new Date(row.session.requestSpeed.latest.timestampMs).toLocaleString(usageLocale(), { hour12: false }) }) : null,
+  })).filter(row => (!props.tool || row.session.tool === props.tool)
+    && (row.window ? row.window.observedOutputTokens > 0 : (row.rate.value ?? 0) > 0))
+})
 const modelRows = computed(() => (props.snapshot?.live?.byModel ?? []).filter(row => !props.tool || row.tool === props.tool)
   .slice().sort((a, b) => (windowOf(b.windows)?.observedOutputTokens ?? 0) - (windowOf(a.windows)?.observedOutputTokens ?? 0)))
 const timelineSource = computed(() => props.tool ? props.snapshot?.live?.recordedTimelineByTool?.[props.tool] : props.snapshot?.live?.recordedTimeline)

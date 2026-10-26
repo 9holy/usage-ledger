@@ -197,6 +197,27 @@ describe('GroupsView duplicate action', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('cancels a pending group search when the view unmounts', async () => {
+    vi.useFakeTimers()
+    const wrapper = mountView()
+    await flushPromises()
+    listGroups.mockClear()
+    await wrapper.get('input[type="text"]').setValue('new search')
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    vi.advanceTimersByTime(299)
+    expect(listGroups).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(listGroups).toHaveBeenCalledTimes(1)
+    listGroups.mockClear()
+    await wrapper.get('input[type="text"]').setValue('abandoned search')
+
+    wrapper.unmount()
+    vi.advanceTimersByTime(300)
+    await flushPromises()
+    expect(listGroups).not.toHaveBeenCalled()
   })
 
   it('duplicates the selected group, reports success, and refreshes the list', async () => {

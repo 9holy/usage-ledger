@@ -134,7 +134,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { PaymentOrder } from '@/types/payment'
 import type { Column } from '@/components/common/types'
@@ -175,6 +175,9 @@ function paymentAmountSymbol(order: PaymentOrder): string {
 }
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
+onUnmounted(() => {
+  if (debounceTimer) clearTimeout(debounceTimer)
+})
 function handleSearch() {
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => emitFiltersChanged(), 300)

@@ -1589,7 +1589,7 @@ import {
 } from '@/features/cost-center/honestValues'
 import { routeCostBasisLabel, type ModelRouteRow } from '@/features/cost-center/modelRouteAnalysis'
 import { resolveRowUsageSuffix, resolveUsageStatsFor } from '@/features/cost-center/accountRowUsageBasis'
-import { useUnifiedCost, type SourceStatus, type CostUnit } from '@/features/cost-center/useUnifiedCost'
+import { useUnifiedCost, type SourceStatus, type CostUnit, type CockpitBatchMetadata } from '@/features/cost-center/useUnifiedCost'
 import { summarizeOperatingCosts, type OperatingAccount, type OperatingSummary } from '@/features/cost-center/costEngine'
 import { recordedAccountCosts, sumCompleteCosts } from '@/features/cost-center/recordedCosts'
 import type { CockpitPlatformAccountInput } from '@/features/cost-center/cockpitAdapter'
@@ -2214,7 +2214,7 @@ async function handleImportFile(event: Event) {
   }
 }
 
-async function loadCockpitOverview() {
+async function loadCockpitOverview(): Promise<CockpitBatchMetadata | undefined> {
   if (connectionType.value !== null) return
   try {
     const [stats, codex, gemini, antigravity, localAccess, claude, cursor, kiro, providers, codexGroups, accountGroups] = await Promise.all([
@@ -2241,6 +2241,7 @@ async function loadCockpitOverview() {
     cockpitKiroAccounts.value = kiro
     cockpitModelProviders.value = providers
     cockpitGroupNameMap.value = cockpitGroupNameByAccountId(codexGroups, accountGroups)
+    return { stats: stats ?? undefined, accounts: codex, localAccess: localAccess ?? undefined }
   } catch (e) {
     console.warn('[cockpit] overview load failed', errMsg(e, ''))
   }
@@ -3753,9 +3754,10 @@ const poolGroups = computed(() => {
   })
 })
 
-function loadVisibleUnified(window: { start: Date; end: Date }) {
+function loadVisibleUnified(window: { start: Date; end: Date }, cockpitMetadata?: CockpitBatchMetadata) {
   if (activePanel.value !== 'unified') return false
-  void unified.loadUnified(range.value, window).catch(failure => console.warn('[unified] load failed', failure))
+  const reading = cockpitMetadata ? unified.loadUnified(range.value, window, cockpitMetadata) : unified.loadUnified(range.value, window)
+  void reading.catch(failure => console.warn('[unified] load failed', failure))
   return true
 }
 watch(activePanel, (panel) => {
@@ -3885,6 +3887,7 @@ async function reload(background = false) {
   try {
   do {
     reloadQueued = false
+    let cockpitMetadata: CockpitBatchMetadata | undefined
     let summaryWindow = usageWindowBounds(range.value)
     summaryWindow.end = new Date(Math.min(Date.now(), summaryWindow.end.getTime()))
     if (connectionType.value !== 'sub2api') await data.preloadLocalCostProfiles()
@@ -3954,12 +3957,14 @@ async function reload(background = false) {
       // range 切换时 loadFromCockpit 按 range 取对应时序窗口。
       // 汇率:cockpit 分支不走通用 reload,需独立请求网络实时汇率(与 cliproxy 同理)
       exchangeRate.value = await loadUsdCnyExchangeRate()
-      await loadCockpitOverview()
+      cockpitMetadata = await loadCockpitOverview()
       // 用量台账(cockpit 移除 API 会清数据、重加从 0 计数——成本端不能丢):
       // 快照当前用量(含孤儿) + 回填被清零的回归账号 + 注入 stats 已消失的账号,
       // 再持久化合并结果。台账读失败(旧版宿主/非桌面)返 null → 跳过合并,主流程不受影响。
       if (cockpitStats.value) {
         const ledger = await readCostLedger()
+        // Ledger merging replaces row.usage and appends accounts; keep the raw batch for Unified.
+        cockpitStats.value = { ...cockpitStats.value, accounts: cockpitStats.value.accounts.map(account => ({ ...account })) }
         const mergedLedger = applyCockpitUsageLedger(cockpitStats.value, ledger?.accounts ?? null)
         await writeCostLedger(mergedLedger)
       }
@@ -4162,7 +4167,7 @@ async function reload(background = false) {
         data.clearCockpitSourceData(t('costCenter.text.cockpitNotInstalledOrCodexLocalAccessStats'))
       }
     }
-    if (!reloadQueued) unifiedReadStarted = loadVisibleUnified(summaryWindow)
+    if (!reloadQueued) unifiedReadStarted = loadVisibleUnified(summaryWindow, cockpitMetadata)
   } while (reloadQueued)
   } finally {
     reloadInFlight = false
@@ -4356,8 +4361,13 @@ function handleKeydown(event: KeyboardEvent) {
   if (workspace) { event.preventDefault(); activePanel.value = workspace.key }
 }
 
+let resumeHandled = false
+function markSuspended() { resumeHandled = false }
 async function refreshOnResume() {
-  if (document.visibilityState !== 'visible') return
+  if (document.visibilityState !== 'visible') { markSuspended(); return }
+  if (resumeHandled) return
+  resumeHandled = true
+  now.value = new Date()
   countdown.value = refreshIntervalSeconds.value
   await reload(lastUpdated.value != null)
 }
@@ -4367,9 +4377,11 @@ onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
   document.addEventListener('visibilitychange', refreshOnResume)
   window.addEventListener('focus', refreshOnResume)
+  window.addEventListener('blur', markSuspended)
   clockTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'visible') return
     now.value = new Date()
-    if (!autoRefresh.value || document.visibilityState !== 'visible' || refreshing.value || loading.value) return
+    if (!autoRefresh.value || refreshing.value || loading.value) return
     countdown.value = Math.max(0, countdown.value - 1)
     if (countdown.value === 0) void reload(true)
   }, 1000)
@@ -4379,6 +4391,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
   document.removeEventListener('visibilitychange', refreshOnResume)
   window.removeEventListener('focus', refreshOnResume)
+  window.removeEventListener('blur', markSuspended)
   if (clockTimer !== null) window.clearInterval(clockTimer)
 })
 </script>

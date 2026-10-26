@@ -14,13 +14,16 @@
 
 use axum::{
     body::Bytes,
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::any,
     Router,
 };
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+};
 use tower_http::cors::CorsLayer;
 
 /// 反代监听端口。前端 url.ts 硬编码同一端口,对称无注入。
@@ -47,6 +50,7 @@ pub fn spawn_proxy() {
             let app = Router::new()
                 .route("/", any(forward))
                 .route("/*path", any(forward))
+                .with_state(Arc::new(OnceLock::new()))
                 .layer(cors);
             let listener = tokio::net::TcpListener::bind(addr)
                 .await
@@ -59,7 +63,7 @@ pub fn spawn_proxy() {
 }
 
 /// 转发 handler。捕获所有方法/路径。
-async fn forward(req: Request) -> Response {
+async fn forward(State(client): State<Arc<OnceLock<reqwest::Client>>>, req: Request) -> Response {
     // 1. 读 target,无则 502(前端连接未配置或 target 注入失败)
     let target_base = match req.headers().get(TARGET_HEADER) {
         Some(v) => v.to_str().unwrap_or("").trim_end_matches('/').to_string(),
@@ -96,7 +100,7 @@ async fn forward(req: Request) -> Response {
         forward_headers.insert(name.clone(), value.clone());
     }
 
-    let client = match reqwest_client() {
+    let client = match reqwest_client(&client) {
         Ok(c) => c,
         Err(e) => return upstream_error_response(&format!("reqwest client init: {e}")),
     };
@@ -147,10 +151,14 @@ async fn forward(req: Request) -> Response {
 
 /// 构造 reqwest client。rustls-tls(与 updater 一致,不依赖 openssl);
 /// 不跟重定向(sub2api 不该重定向,跟了会丢 Authorization header)。
-fn reqwest_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
+fn reqwest_client(cache: &OnceLock<reqwest::Client>) -> Result<reqwest::Client, reqwest::Error> {
+    if let Some(client) = cache.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .build()
+        .build()?;
+    Ok(cache.get_or_init(|| client).clone())
 }
 
 /// 无 target header 的响应。502 + sub2api 标准 API 错误格式,让前端错误链路正常显示。
@@ -209,8 +217,97 @@ mod tests {
     /// reqwest client 必须可用且不跟重定向(否则重定向会丢 Authorization)。
     #[test]
     fn reqwest_client_builds_without_redirect() {
-        let client = reqwest_client().expect("reqwest client must build");
+        let client = reqwest_client(&OnceLock::new()).expect("reqwest client must build");
         // 无公开 API 直接断言 redirect policy,但能构造即证明 rustls-tls feature 链路通。
         let _ = client;
+    }
+
+    #[tokio::test]
+    async fn shared_client_reuses_connections_without_sharing_targets_or_authorization() {
+        use axum::{extract::ConnectInfo, http::header, Json};
+
+        async fn upstream(
+            State(label): State<&'static str>,
+            ConnectInfo(peer): ConnectInfo<SocketAddr>,
+            req: Request,
+        ) -> Response {
+            if req.uri().path() == "/redirect" {
+                return (StatusCode::FOUND, [(header::LOCATION, "/must-not-follow")]).into_response();
+            }
+            Json(serde_json::json!({
+                "target": label,
+                "authorization": req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                "control": req.headers().get(TARGET_HEADER).is_some(),
+                "path": req.uri().to_string(),
+                "peer": peer.port(),
+            }))
+            .into_response()
+        }
+
+        let mut servers = Vec::new();
+        let mut targets = Vec::new();
+        for label in ["first", "second"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            targets.push(format!("http://{}", listener.local_addr().unwrap()));
+            let app = Router::new()
+                .route("/*path", any(upstream))
+                .with_state(label);
+            servers.push(tokio::spawn(async move {
+                axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+                    .unwrap();
+            }));
+        }
+
+        let cache = Arc::new(OnceLock::new());
+        let mut replies = Vec::new();
+        for (target, authorization) in [
+            (0, Some("Bearer first")),
+            (0, Some("Bearer changed")),
+            (1, Some("Bearer second")),
+            (0, None),
+        ] {
+            let mut req = Request::builder()
+                .uri("/usage?scope=current")
+                .header(TARGET_HEADER, &targets[target]);
+            if let Some(authorization) = authorization {
+                req = req.header(header::AUTHORIZATION, authorization);
+            }
+            let reply = forward(
+                State(cache.clone()),
+                req.body(axum::body::Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(reply.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(reply.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            replies.push(serde_json::from_slice::<serde_json::Value>(&body).unwrap());
+        }
+        assert_eq!(
+            replies.iter().map(|r| r["authorization"].clone()).collect::<Vec<_>>(),
+            vec![
+                serde_json::json!("Bearer first"),
+                serde_json::json!("Bearer changed"),
+                serde_json::json!("Bearer second"),
+                serde_json::Value::Null,
+            ]
+        );
+        assert_eq!(
+            replies.iter().map(|r| r["target"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["first", "first", "second", "first"]
+        );
+        assert_eq!(replies[0]["peer"], replies[1]["peer"]);
+        assert_eq!(replies[0]["peer"], replies[3]["peer"]);
+        assert!(replies.iter().all(|r| r["control"] == false && r["path"] == "/usage?scope=current"));
+        let req = Request::builder()
+            .uri("/redirect")
+            .header(TARGET_HEADER, &targets[0])
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(forward(State(cache), req).await.status(), StatusCode::FOUND);
+        for server in servers {
+            server.abort();
+        }
     }
 }

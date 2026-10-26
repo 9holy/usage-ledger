@@ -62,12 +62,12 @@
               <span
                 :class="[
                   'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
-                  modelValue.includes(model.value)
+                  selectedModels.has(model.value)
                     ? 'border-primary-500 bg-primary-500 text-white'
                     : 'border-gray-300 dark:border-dark-500'
                 ]"
               >
-                <svg v-if="modelValue.includes(model.value)" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg v-if="selectedModels.has(model.value)" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7" />
                 </svg>
               </span>
@@ -182,6 +182,7 @@ const searchQuery = ref('')
 const customModel = ref('')
 const isComposing = ref(false)
 const isSyncingUpstream = ref(false)
+const selectedModels = computed(() => new Set(props.modelValue))
 const normalizedPlatforms = computed(() => {
   const rawPlatforms =
     props.platforms && props.platforms.length > 0
@@ -244,7 +245,7 @@ const removeModel = (model: string) => {
 }
 
 const toggleModel = (model: string) => {
-  if (props.modelValue.includes(model)) {
+  if (selectedModels.value.has(model)) {
     removeModel(model)
   } else {
     emit('update:modelValue', [...props.modelValue, model])
@@ -258,7 +259,7 @@ const copyModelId = async (model: string) => {
 const addCustom = () => {
   const model = customModel.value.trim()
   if (!model) return
-  if (props.modelValue.includes(model)) {
+  if (selectedModels.value.has(model)) {
     appStore.showInfo(t('admin.accounts.modelExists'))
     return
   }
@@ -272,9 +273,11 @@ const handleEnter = () => {
 
 const fillRelated = () => {
   const newModels = [...props.modelValue]
+  const seen = new Set(selectedModels.value)
   for (const platform of normalizedPlatforms.value) {
     for (const model of getModelsByPlatform(platform)) {
-      if (!newModels.includes(model)) {
+      if (!seen.has(model)) {
+        seen.add(model)
         newModels.push(model)
       }
     }
@@ -304,9 +307,11 @@ const syncUpstreamModels = async () => {
     }
 
     const newModels = [...props.modelValue]
+    const seen = new Set(selectedModels.value)
     let addedCount = 0
     for (const model of upstreamModels) {
-      if (!newModels.includes(model)) {
+      if (!seen.has(model)) {
+        seen.add(model)
         newModels.push(model)
         addedCount += 1
       }

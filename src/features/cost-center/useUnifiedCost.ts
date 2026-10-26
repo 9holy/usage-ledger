@@ -11,6 +11,7 @@ import {
   getCockpitLocalAccess,
   type CockpitStats,
   type CockpitCodexAccount,
+  type CockpitLocalAccess,
 } from '@/api/cockpit'
 import { getCliproxyUsageSnapshot, getCliproxyModelPrices, type CliproxyUsageSnapshot, type CliproxyUsageEvent, type LitellmPricing } from '@/api/cliproxy/cpaData'
 import { cliproxyEventsPricedCost, pricedEventCostUsd, resolveModelPricing } from './cliproxyAdapter'
@@ -103,6 +104,13 @@ export interface SourceStatus {
   state: 'loading' | 'measured' | 'estimated' | 'partial' | 'unavailable' | 'empty'
   /** 状态原因/提示 */
   reason: string
+}
+
+/** Raw metadata from this primary reload only; never retained for a later read. */
+export interface CockpitBatchMetadata {
+  stats?: CockpitStats
+  accounts?: CockpitCodexAccount[]
+  localAccess?: CockpitLocalAccess
 }
 
 export function useUnifiedCost(
@@ -279,7 +287,7 @@ export function useUnifiedCost(
     injectedSub = { id: connection.id, baseUrl: connection.baseUrl, reading: { ...reading } }
   }
 
-  async function loadUnified(range: CostCenterRange = '1h', requested?: UsageQueryWindow) {
+  async function loadUnified(range: CostCenterRange = '1h', requested?: UsageQueryWindow, cockpitMetadata?: CockpitBatchMetadata) {
     const sequence = ++loadSequence
     pendingSubRequest?.abort()
     const controller = new AbortController()
@@ -313,7 +321,9 @@ export function useUnifiedCost(
         if (!isDesktop) return { ...result, get reason() { return costDataText('localDatabasesAreReadableOnlyInTheDesktopApp') } }
         const [summary, access, stats, accounts] = await Promise.all([
           getCockpitRequestLogSummary(1, window.start.getTime(), window.end.getTime() - 1, false),
-          getCockpitLocalAccess().catch(() => null), getCockpitStats().catch(() => null), getCockpitCodexAccounts().catch(() => []),
+          cockpitMetadata?.localAccess ?? getCockpitLocalAccess().catch(() => null),
+          cockpitMetadata?.stats ?? getCockpitStats().catch(() => null),
+          cockpitMetadata?.accounts ?? getCockpitCodexAccounts().catch(() => []),
         ])
         if (sequence === loadSequence) { cockpitStats.value = stats; cockpitAccounts.value = accounts; cockpitAvailable.value = !!summary?.available }
         if (!summary?.available) return { ...result, get reason() { return costDataText('cockpitRequestStoreUnavailableCumulativeSnapshotsCannotSubstituteFor') } }

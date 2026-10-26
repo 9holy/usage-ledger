@@ -33,6 +33,26 @@ beforeEach(() => {
 afterEach(() => { setActiveConnection(null); vi.useRealTimers() })
 
 describe('CPA source identity and usage evidence', () => {
+  it('resolves account metadata only when a route group is created, keeping first matching identity and amounts', () => {
+    const accounts = cliproxyAuthFilesToAccounts([file()], [])
+    accounts.push({ ...accounts[0], name: 'later duplicate must not win' })
+    const lookup = vi.spyOn(accounts, 'find')
+    const events = Array.from({ length: 2000 }, (_, index) => event({ id: index, alias: index % 2 ? 'alias-B' : 'alias-A' }))
+    const rows = cliproxyEventsToModelRoutes(events, prices, accounts, '1h', 0.2)
+    expect(lookup).toHaveBeenCalledTimes(2)
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
+      expect(row.accountName).toBe(accounts[0].name)
+      expect(row.accountId).toBe(accounts[0].id)
+      expect(row.requests).toBe(1000)
+      expect(row.inputTokens).toBe(1_000_000_000)
+      expect(row.outputTokens).toBe(0)
+      expect(row.costUsd).toBeCloseTo(400)
+      expect(row.costUnknown).toBe(false)
+    }
+    lookup.mockRestore()
+  })
+
   it('isolates management-file identities from identically named opaque runtime indexes', () => {
     const managed = cliproxyAuthFilesToAccounts([file({ auth_index: '', id: 'x:/opaque' })], [])[0]!
     const runtime = cliproxyEventsToAccounts([event({ auth_index: 'management-file:x:/opaque' })])[0]!

@@ -1502,7 +1502,7 @@ CREATE TABLE IF NOT EXISTS identity_override (
             "账本不得与 cockpit 源库同名"
         );
         // 显式构造一个 cockpit 路径,自检函数必须拒绝
-        let cockpit = std::path::PathBuf::from(r"C:\Users\someone\.antigravity_cockpit").join(LEDGER_DB_FILE_NAME);
+        let cockpit = std::env::temp_dir().join("someone").join(".antigravity_cockpit").join(LEDGER_DB_FILE_NAME);
         assert!(assert_not_cockpit_path(&cockpit).is_err(), "cockpit 路径应被拒绝");
     }
 

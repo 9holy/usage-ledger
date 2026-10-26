@@ -52,6 +52,32 @@ function orderFactory(overrides: Partial<PaymentOrder> = {}): PaymentOrder {
 }
 
 describe('admin order currency display', () => {
+  it('cancels a pending order filter event on unmount', async () => {
+    vi.useFakeTimers()
+    const onFilter = vi.fn()
+    const wrapper = mount(AdminOrderTable, {
+      props: { orders: [], loading: false, page: 1, pageSize: 20, total: 0, onFilter },
+      global: { stubs: { DataTable: true, Icon: true, Pagination: true, Select: true } },
+    })
+    try {
+      await wrapper.get('input[type="text"]').setValue('order')
+      expect(vi.getTimerCount()).toBe(1)
+      vi.advanceTimersByTime(299)
+      expect(wrapper.emitted('filter')).toBeUndefined()
+      vi.advanceTimersByTime(1)
+      expect(onFilter).toHaveBeenCalledTimes(1)
+      expect(wrapper.emitted('filter')![0][0]).toMatchObject({ keyword: 'order' })
+      await wrapper.get('input[type="text"]').setValue('abandoned order')
+      wrapper.unmount()
+      expect(vi.getTimerCount()).toBe(0)
+      vi.advanceTimersByTime(300)
+      expect(onFilter).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('uses order currency for paid/base/fee amounts and USD for credited/refund amounts', () => {
     const wrapper = mount(AdminOrderDetail, {
       props: {
