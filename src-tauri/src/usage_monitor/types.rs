@@ -60,6 +60,8 @@ pub struct RuntimeModeEvidence {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageRecord {
+    #[serde(default)]
+    pub billing_scope: Option<String>,
     pub id: String,
     pub tool: String,
     pub session_id: String,

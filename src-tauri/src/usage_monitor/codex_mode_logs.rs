@@ -10,6 +10,7 @@ use std::{
 const BATCH_ROWS: usize = 512;
 
 pub struct ModeBatch {
+    pub billings: Vec<super::billing::Observation>,
     pub observations: Vec<store::RuntimeModeObservation>,
     pub next_cursor: store::RuntimeModeCursor,
     pub invalid_rows: usize,
@@ -130,13 +131,18 @@ fn exact_identity(
     Ok(first.clone())
 }
 
-fn parse_observation(
+struct TurnMetadata {
+    mode: Option<store::RuntimeModeObservation>,
+    billing: Option<super::billing::Observation>,
+}
+
+fn parse_metadata(
     id: i64,
     ts: i64,
     nanos: i64,
     thread: &str,
     body: &str,
-) -> Result<Option<store::RuntimeModeObservation>, &'static str> {
+) -> Result<TurnMetadata, &'static str> {
     let thread = exact_identity(
         body,
         &["thread_id", "thread.id", "conversation.id"],
@@ -164,19 +170,19 @@ fn parse_observation(
     };
     let tags = value.as_object().ok_or("tags must be an object")?;
     let tier = match tags.get("service_tier") {
-        None => return Ok(None),
+        None => None,
         Some(Value::Null) => Some("auto"),
         Some(Value::String(value)) => Some(value.as_str()),
         Some(_) => return Err("service tier must be a string or null"),
     };
     let mode = match tier {
-        Some("default" | "standard" | "normal") => "standard",
-        Some("priority" | "fast") => "fast",
-        Some("ultrafast" | "ultra_fast") => "ultrafast",
-        Some("flex") => "flex",
-        Some("scale") => "scale",
-        Some("auto") => "unknown",
-        None => return Ok(None),
+        Some("default" | "standard" | "normal") => Some("standard"),
+        Some("priority" | "fast") => Some("fast"),
+        Some("ultrafast" | "ultra_fast") => Some("ultrafast"),
+        Some("flex") => Some("flex"),
+        Some("scale") => Some("scale"),
+        Some("auto") => Some("unknown"),
+        None => None,
         Some(_) => return Err("unrecognized service tier"),
     };
     let observed_at_ms = ts
@@ -184,13 +190,28 @@ fn parse_observation(
         .and_then(|ms| ms.checked_add(nanos / 1_000_000))
         .filter(|ms| *ms > 0 && (0..1_000_000_000).contains(&nanos))
         .ok_or("invalid source time")?;
-    Ok(Some(store::RuntimeModeObservation {
-        session_key: store::session_key("codex", &thread),
+    let session_key=store::session_key("codex",&thread);
+    let mut kinds=BTreeSet::new();
+    for token in body[..offset-"tags_json".len()].split_whitespace().filter_map(|s|s.strip_prefix("auth_mode=")) {
+        if token=="Some(Chatgpt)" || token=="Chatgpt" {kinds.insert("subscription");}
+        else if token=="Some(ApiKey)" || token=="ApiKey" {kinds.insert("api");}
+    }
+    let billing=(!kinds.is_empty()).then(||super::billing::Observation {
+        session_key:session_key.clone(),turn_id:turn.clone(),
+        kind:if kinds.len()==1{*kinds.first().unwrap()}else{"unknown"}.into(),observed_ms:observed_at_ms,
+    });
+    Ok(TurnMetadata {billing,mode:mode.map(|mode|store::RuntimeModeObservation {
+        session_key,
         turn_id: turn,
         mode: mode.into(),
         observed_at_ms,
         source_row_id: id,
-    }))
+    })})
+}
+
+#[cfg(test)]
+fn parse_observation(id:i64,ts:i64,nanos:i64,thread:&str,body:&str)->Result<Option<store::RuntimeModeObservation>,&'static str>{
+    parse_metadata(id,ts,nanos,thread,body).map(|metadata|metadata.mode)
 }
 
 pub fn read_batch(
@@ -248,6 +269,7 @@ pub fn read_batch(
         })
         .map_err(|error| error.to_string())?;
     let mut batch = ModeBatch {
+        billings: Vec::new(),
         observations: Vec::new(),
         next_cursor: upper.clone(),
         invalid_rows: 0,
@@ -266,10 +288,12 @@ pub fn read_batch(
         match thread
             .as_deref()
             .ok_or("missing thread identity")
-            .and_then(|thread| parse_observation(id, ts, nanos, thread, &body))
+            .and_then(|thread| parse_metadata(id, ts, nanos, thread, &body))
         {
-            Ok(Some(observation)) => batch.observations.push(observation),
-            Ok(None) => {}
+            Ok(metadata) => {
+                batch.billings.extend(metadata.billing);
+                batch.observations.extend(metadata.mode);
+            },
             Err(_) => batch.invalid_rows += 1,
         }
     }
@@ -287,11 +311,14 @@ pub fn collect(conn: &mut Connection, paths: &[PathBuf]) -> Vec<SourceStatus> {
                 .map_err(|error| error.to_string())?;
             source.busy_timeout(Duration::from_millis(500)).map_err(|error| error.to_string())?;
             let source_path = path.to_string_lossy();
-            let cursor = store::runtime_mode_cursor(conn, &source_path)?;
+            let mode_cursor = store::runtime_mode_cursor(conn, &source_path)?;
+            let billing_cursor=super::billing::cursor(conn,&source_path)?;
+            let cursor=if mode_cursor.id<=billing_cursor.id {mode_cursor}else{billing_cursor};
             let batch = read_batch(&source, &cursor)?;
             if batch.next_cursor != cursor || !batch.observations.is_empty() {
                 store::apply_runtime_mode_batch(conn, &source_path, &batch.observations, &batch.next_cursor)?;
             }
+            super::billing::apply_batch(conn,&source_path,&batch.billings,&batch.next_cursor)?;
             Ok::<_,String>(if batch.invalid_rows > 0 {
                 Some(format!("{} runtime mode log rows have invalid tags or identities; their modes remain unknown", batch.invalid_rows))
             } else if batch.catching_up {
@@ -307,6 +334,17 @@ mod tests {
     use super::*;
     fn body(thread: &str, turn: &str, tags: &str) -> String {
         format!("session_task.run{{thread_id={thread}}}: run_turn{{turn_id={turn} thread.id={thread} turn.id={turn} submission.id={turn}}}: tags_json={tags}")
+    }
+    #[test]
+    fn billing_authentication_does_not_require_a_recorded_speed_tier() {
+        for (auth,kind) in [("Some(Chatgpt)","subscription"),("Some(ApiKey)","api")] {
+            let text=body("thread","turn","{}").replace("tags_json",&format!("auth_mode={auth} tags_json"));
+            let parsed=parse_metadata(1,100,0,"thread",&text).unwrap();
+            assert!(parsed.mode.is_none());
+            assert_eq!(parsed.billing.unwrap().kind,kind);
+        }
+        let text=body("thread","turn",r#"{"note":"auth_mode=Some(Chatgpt)"}"#);
+        assert!(parse_metadata(1,100,0,"thread",&text).unwrap().billing.is_none());
     }
     #[test]
     fn exact_span_and_structured_tier_are_required_not_collaboration_mode() {

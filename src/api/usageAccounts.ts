@@ -5,12 +5,14 @@ import type { MonitorTotals } from './usageMonitor'
 export interface AccountSubscription {
   startMs: number | null
   endMs: number | null
+  renewalAtMs?: number | null
   checkedAtMs: number | null
-  source: 'local_auth' | 'none'
+  source: 'local_auth' | 'official' | 'none'
   error: string | null
 }
 
 export interface AccountUsagePeriod {
+  billingTotals?: Record<string, MonitorTotals>
   startMs: number
   endMs: number
   observedEndMs: number
@@ -31,7 +33,11 @@ export interface AccountUsage {
   accountKey: string
   accountLabel: string
   tool: 'codex' | 'claude' | 'antigravity'
-  attribution: 'session_creator'
+  attribution: 'session_creator' | 'request_evidence_with_creator_reference'
+  billingAccountVerified?: boolean
+  verifiedWeekRequests?: number
+  creatorReferenceWeekRequests?: number
+  verifiedHistory?: AccountUsagePeriod | null
   subscription: AccountSubscription
   calendarWeek: AccountUsagePeriod
   subscriptionMonth: AccountUsagePeriod | null
@@ -40,6 +46,7 @@ export interface AccountUsage {
   quotaCycles: AccountUsageCycle[]
   monthCycles: AccountUsageCycle[]
   unsegmentedMonth: MonitorTotals
+  unsegmentedMonthBillingTotals?: Record<string, MonitorTotals>
 }
 
 export interface AccountUsageReport {

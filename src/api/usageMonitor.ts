@@ -188,6 +188,7 @@ export interface MonitorCostEstimate {
 }
 
 export interface MonitorRequest {
+  billingScope?: 'subscription' | 'api' | null
   id: string
   tool: string
   sessionId: string
@@ -341,6 +342,7 @@ export interface MonitorAnalysis {
 }
 
 export interface MonitorWeeklyUsage {
+  billingTotals?: Record<string, MonitorTotals>
   startMs: number
   endMs: number
   firstRecordAtMs: number | null
@@ -348,7 +350,7 @@ export interface MonitorWeeklyUsage {
   totals: MonitorTotals
   reference?: MonitorReferenceSummary[]
   forecast?: MonitorForecastSummary[]
-  byTool: Array<{ tool: string; model: null; totals: MonitorTotals; reference?: MonitorReferenceSummary[]; forecast?: MonitorForecastSummary[] }>
+  byTool: Array<{ tool: string; model: null; totals: MonitorTotals; billingTotals?: Record<string, MonitorTotals>; reference?: MonitorReferenceSummary[]; forecast?: MonitorForecastSummary[] }>
 }
 
 export interface MonitorReferenceSummary {
@@ -384,6 +386,7 @@ export interface MonitorQuota {
   accountKey: string
   accountLabel: string
   attribution: string
+  billingAccountVerified?: boolean
   limitId: string
   slot: string
   windowMinutes: number | null
@@ -666,6 +669,7 @@ export function monitorMode(mode: string): string {
 }
 
 export function monitorContext(value: string): string {
+  if (value === 'subscription_no_long_context_surcharge') return t('usageMonitor.text.subscriptionContextExempt')
   if (value === 'base' || value === 'standard') return t('usageMonitor.format.regularContext')
   if (value === 'full published context window') return t('usageMonitor.format.fullContext')
   return value.replace(/^(<=|>)(\d+)(?: input tokens)?$/, (_, sign, count) => t(sign === '<=' ? 'usageMonitor.format.inputAtMost' : 'usageMonitor.format.inputMoreThan', { count: Number(count).toLocaleString(usageLocale()) }))

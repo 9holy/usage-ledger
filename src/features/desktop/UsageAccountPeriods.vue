@@ -43,10 +43,17 @@ const cycleQuotaPercent = (cycle: AccountUsageCycle) => cycle.usedPercent == nul
 const cycleQuotaRecordedAt = (cycle: AccountUsageCycle) => cycle.quotaObservedAtMs > 0 ? t('usageMonitor.text.quotaPercentageRecordedAt', { time: date(cycle.quotaObservedAtMs) }) : undefined
 const currentPeriod = computed(() => props.account.currentCycle)
 const current = computed(() => currentPeriod.value ? cycleMoney(currentPeriod.value) : null)
+const weekWithoutCycle = computed(() => !currentPeriod.value && (props.account.verifiedWeekRequests ?? 0) > 0 && props.account.calendarWeek.totals.requestCount > 0
+  ? money(props.account.calendarWeek.totals) : null)
+const historyWithoutCycle = computed(() => !currentPeriod.value && !weekWithoutCycle.value && props.account.verifiedHistory?.totals.requestCount
+  ? money(props.account.verifiedHistory.totals) : null)
 const previous = computed(() => props.account.previousCycle ? cycleMoney(props.account.previousCycle) : null)
 const quotaCycles = computed(() => props.account.quotaCycles.map(cycle => ({ ...cycle, money: cycleMoney(cycle) })))
 const month = computed(() => props.account.subscriptionMonth ? money(props.account.subscriptionMonth.totals) : null)
 const historicalMonth = computed(() => props.account.subscriptionMonth != null && props.account.subscriptionMonth.endMs <= Date.now())
+const attributionNote = computed(() => (props.account.verifiedHistory?.totals.requestCount ?? props.account.verifiedWeekRequests ?? 0) > 0
+  ? t('usageMonitor.text.mixedAccountAmounts', { history: props.account.verifiedHistory?.totals.requestCount ?? props.account.verifiedWeekRequests ?? 0, reference: props.account.creatorReferenceWeekRequests ?? 0 })
+  : t('usageMonitor.text.creatorAccountAmountsOnly'))
 const cycles = computed(() => props.account.monthCycles.map((cycle, index) => {
   const month = props.account.subscriptionMonth!
   return {
@@ -65,14 +72,16 @@ const unsegmented = computed(() => props.account.unsegmentedMonth.requestCount >
 <template>
   <section class="account-periods" :aria-label="t('usageMonitor.text.accountQuotaCyclesSubscriptionMonthUsage')">
     <div class="amount-overview">
-      <div class="amount-item"><h4>{{ t('usageMonitor.text.weeklyQuotaUsedThisCycle') }}</h4><strong class="period-amount">{{ current?.amount ?? t('usageMonitor.text.cycleBoundariesUnconfirmed') }}</strong></div>
+      <div class="amount-item"><h4 :title="account.billingAccountVerified === false ? attributionNote : undefined">{{ t(historyWithoutCycle ? 'usageMonitor.text.verifiedHistoryAmount' : weekWithoutCycle ? 'usageMonitor.text.recordedWeekReference' : account.billingAccountVerified === false ? 'usageMonitor.text.recordedCycleReference' : 'usageMonitor.text.weeklyQuotaUsedThisCycle') }}</h4><strong class="period-amount">{{ current?.amount ?? weekWithoutCycle?.amount ?? historyWithoutCycle?.amount ?? t('usageMonitor.text.cycleBoundariesUnconfirmed') }}</strong></div>
       <div v-if="account.subscriptionMonth && month" class="amount-item subscription-month"><h4>{{ historicalMonth ? t('usageMonitor.text.historicalMonthUsed') : t('usageMonitor.text.usedThisMonth') }}</h4><strong class="period-amount">{{ month.amount }}</strong></div>
       <div v-else class="amount-item"><h4>{{ t('usageMonitor.text.usedThisMonth') }}</h4><small class="unknown-month">{{ t('usageMonitor.text.subscriptionDatesUnconfirmed') }}</small></div>
       <div v-if="previous" class="amount-item previous-cycle"><h4>{{ t('usageMonitor.text.previousWeeklyQuotaUsed') }}</h4><strong class="period-amount">{{ previous.amount }}</strong></div>
     </div>
     <details class="amount-details">
       <summary>{{ t('usageMonitor.text.amountDetails') }}</summary>
+      <small v-if="account.billingAccountVerified === false" class="source-error">{{ attributionNote }}</small>
       <small v-if="paused">{{ t('usageMonitor.text.collectionPaused') }}</small>
+      <div v-if="account.verifiedHistory?.totals.requestCount" class="verified-history"><h4>{{ t('usageMonitor.text.verifiedHistoryAmount') }}</h4><p class="period-range">{{ range(account.verifiedHistory) }}</p><strong>{{ money(account.verifiedHistory.totals).amount }}</strong><small>{{ money(account.verifiedHistory.totals).note }}</small></div>
       <div class="amount-evidence">
         <div class="current-details">
           <div class="period-heading"><h4>{{ t('usageMonitor.text.estimatedRecordedUsageThisCycle') }}</h4></div>
@@ -85,14 +94,14 @@ const unsegmented = computed(() => props.account.unsegmentedMonth.requestCount >
             <small v-if="current.note">{{ current.note }}</small>
             <small v-if="!unknownExhaustion(currentPeriod)">{{ t('usageMonitor.text.recordedThrough') }} {{ date(currentPeriod.observedEndMs) }}</small>
           </template>
-          <template v-else><p class="empty-period">{{ t('usageMonitor.text.cycleBoundariesUnconfirmed') }}</p><small>{{ t('usageMonitor.text.noQuotaCycleObservedYet') }}</small></template>
+          <template v-else><p class="empty-period">{{ t('usageMonitor.text.cycleBoundariesUnconfirmed') }}</p><small>{{ t('usageMonitor.text.noQuotaCycleObservedYet') }}</small><template v-if="weekWithoutCycle"><p class="period-range">{{ range(account.calendarWeek) }}</p><small>{{ weekWithoutCycle.note }}</small><small v-if="weekWithoutCycle.reference">{{ weekWithoutCycle.reference }}</small></template></template>
         </div>
         <div v-if="account.subscriptionMonth && month" class="month-details">
           <div class="period-heading"><h4>{{ historicalMonth ? t('usageMonitor.text.historicalSubscriptionMonthTotal') : t('usageMonitor.text.currentSubscriptionMonthTotal') }}{{ t('usageMonitor.text.includingUsageAfterQuotaExhaustion') }}</h4><small v-if="historicalMonth">{{ t('usageMonitor.text.thisSubscriptionMonthHasEnded') }}</small></div>
           <p class="period-range">{{ range(account.subscriptionMonth) }}</p>
           <small v-if="month.reference" class="reference">{{ month.reference }}</small>
           <small v-if="month.note">{{ month.note }}</small>
-          <small>{{ t('usageMonitor.text.recordedThrough') }} {{ date(account.subscriptionMonth.observedEndMs) }} {{ t('usageMonitor.text.basedOnSourceSubscriptionDates') }}</small>
+          <small>{{ t('usageMonitor.text.recordedThrough') }} {{ date(account.subscriptionMonth.observedEndMs) }} {{ t(account.subscription.source === 'official' ? 'usageMonitor.text.basedOnOfficialRenewalDate' : 'usageMonitor.text.basedOnSourceSubscriptionDates') }}</small>
         </div>
         <p v-else class="unknown-month">{{ t('usageMonitor.text.sourceDoesNotProvideASubscriptionStart') }}</p>
         <div v-if="account.previousCycle && previous" class="previous-details">

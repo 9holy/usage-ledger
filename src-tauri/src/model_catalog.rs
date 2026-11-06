@@ -337,23 +337,26 @@ pub fn start() {
     if STARTED.set(()).is_err() {
         return;
     }
-    std::thread::spawn(|| {
-        let load = (|| {
-            let conn = crate::ledger_db::open_default().map_err(|e| e.to_string())?;
-            if let Some(cached) = read_cache(&conn)? {
-                let parsed =
-                    CatalogSnapshot::parse(&cached.json, cached.revision.clone(), cached.fetched)?;
-                publish(&cached, parsed);
-            }
-            Ok::<_, String>(())
-        })();
-        if let Err(error) = load {
-            state()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .status
-                .error = Some(error);
+
+    // Publish the persisted catalog before the monitor can perform its first backfill.
+    let load = (|| {
+        let conn = crate::ledger_db::open_default().map_err(|e| e.to_string())?;
+        if let Some(cached) = read_cache(&conn)? {
+            let parsed =
+                CatalogSnapshot::parse(&cached.json, cached.revision.clone(), cached.fetched)?;
+            publish(&cached, parsed);
         }
+        Ok::<_, String>(())
+    })();
+    if let Err(error) = load {
+        state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .status
+            .error = Some(error);
+    }
+
+    std::thread::spawn(|| {
         loop {
             let now = crate::ledger_db::now_ms();
             let checked = status().checked_at_ms.unwrap_or(0);

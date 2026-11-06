@@ -52,6 +52,7 @@ pub struct ParsedLine {
     pub usage: Vec<UsageRecord>,
     pub delete_ids: Vec<String>,
     pub quotas: Vec<super::quota::QuotaObservation>,
+    pub request_quotas: Vec<super::codex_quota_accounts::RequestQuota>,
 }
 
 impl ParserState {
@@ -677,6 +678,7 @@ fn codex(
             });
             if paired {
                 state.pending_usage.as_mut().unwrap().paired = true;
+                result.request_quotas = super::codex_quota_accounts::request_quotas(payload, &state.pending_usage.as_ref().unwrap().id);
                 if let Some(id) = provisional {
                     result.delete_ids.push(id);
                 }
@@ -723,6 +725,7 @@ fn codex(
                 canonical: false,
                 paired: false,
             });
+            result.request_quotas = super::codex_quota_accounts::request_quotas(payload, &usage.id);
             result.usage.push(usage);
         }
         _ => {}
@@ -1003,6 +1006,21 @@ mod tests {
             json!({"type":"event_msg","timestamp":"2026-10-15T17:01:00Z","payload":{"type":"token_usage_record","thread_id":"thread","session_id":"root","turn_id":"turn","root_turn_id":"root-turn","response_id":response,"usage":counts(10,2),"thread_token_usage":counts(input,output)}}),
         )
     }
+    #[test]
+    fn quota_evidence_is_attached_to_the_response_not_the_creator() {
+        let mut state=ParserState::default();
+        meta(&mut state);
+        modern(&mut state,"quota-response",10,2);
+        let parsed=feed(&mut state,json!({"type":"event_msg","timestamp":"2026-10-15T17:01:00Z","payload":{
+            "type":"token_count","info":{"total_token_usage":counts(10,2),"last_token_usage":counts(10,2)},
+            "rate_limits":{"limit_id":"codex","plan_type":"pro","secondary":{"window_minutes":10080,"resets_at":1800000000}}
+        }}));
+        assert!(parsed.usage.is_empty());
+        assert_eq!(parsed.request_quotas.len(),1);
+        assert_eq!(parsed.request_quotas[0].id,"response:quota-response");
+        assert_eq!(parsed.request_quotas[0].reset_ms,1800000000000);
+    }
+
     #[test]
     fn canonical_replaces_legacy_and_reverse_order_deduplicates() {
         let mut s = ParserState::default();

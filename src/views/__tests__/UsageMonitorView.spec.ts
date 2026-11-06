@@ -87,6 +87,33 @@ describe('UsageMonitorView', () => {
   })
   afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.restoreAllMocks(); vi.useRealTimers() })
 
+  it('preserves the original single weekly total and forecasts only subscription value', async () => {
+    const account = forecastAccount('codex:1', 300, 25)
+    const value = (amount: number) => ({ ...snapshot().totals, requestCount: 1, automaticPriceSummary: automaticEstimate(amount) })
+    const scopes = { subscription: value(25), api: value(200), unknown: value(75) }
+    const cycle = account.currentCycle!
+    cycle.billingTotals = scopes; cycle.quotaSnapshot!.billingTotals = scopes
+    cycle.totals.requestCount = 3; cycle.quotaSnapshot!.totals.requestCount = 3
+    mockAccountForecast(account, forecastQuota('codex:1', { usedPercent: 25, remainingPercent: 75 }))
+    vi.mocked(getUsageMonitorWeekly).mockResolvedValue({ startMs: monitorWeekBounds(NOW).startMs, endMs: NOW,
+      firstRecordAtMs: NOW - 1000, lastRecordAtMs: NOW, totals: cycle.totals, billingTotals: scopes, byTool: [] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('≈ $100')
+    expect(wrapper.find('.weekly-billing-values').exists()).toBe(false)
+    const weeklyValue = wrapper.get('.week-figures > div:first-child')
+    expect(weeklyValue.text()).toContain('本周已识别用量估算')
+    expect(weeklyValue.findAll('strong')).toHaveLength(1)
+    expect(weeklyValue.get('strong').text()).toContain('$300')
+    expect(wrapper.text()).not.toContain('类型待确认估值')
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast').observedSubtotal).toBe(25)
+    cycle.billingTotals = { api: value(300) }; cycle.quotaSnapshot!.billingTotals = cycle.billingTotals
+    mockAccountForecast({ ...account, currentCycle: { ...cycle, quotaSnapshot: { ...cycle.quotaSnapshot! } } },
+      forecastQuota('codex:1', { usedPercent: 25, remainingPercent: 75 }))
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('等待确认本轮订阅用量')
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).exists()).toBe(false)
+  })
+
   it('switches every monitor workspace label without refetching or changing quota cycles and saved estimates', async () => {
     const account = forecastAccount()
     mockAccountForecast(account)
@@ -396,7 +423,7 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.hidden-quota-accounts').attributes('open')).toBeUndefined()
     const hidden = wrapper.get<HTMLDetailsElement>('.hidden-quota-accounts')
     hidden.element.open = true
-    await hidden.get('[aria-label="恢复账号显示 账号 2"]').trigger('click'); await flushPromises()
+    await hidden.get('[aria-label="恢复账号显示 账号 2 · pro"]').trigger('click'); await flushPromises()
     expect(wrapper.get<HTMLSelectElement>('[aria-label="额度账号"]').element.value).toBe('codex:2')
     expect(wrapper.get('[aria-label="额度账号"]').findAll('option')).toHaveLength(2)
     expect(wrapper.get('.current-quotas').text()).toContain('账号 2')
@@ -413,7 +440,7 @@ describe('UsageMonitorView', () => {
     expect(selector.findAll('option')).toHaveLength(1)
     expect(selector.get('option').text()).toContain('（当前）')
     expect(wrapper.find('[aria-label="删除账号显示"]').exists()).toBe(false)
-    expect(wrapper.findAll('.hidden-quota-account>span').map(row => row.text())).toEqual(['Codex · 账号 2'])
+    expect(wrapper.findAll('.hidden-quota-account>span').map(row => row.text())).toEqual(['Codex · 账号 2 · pro'])
   })
 
   it('allows an unverified fallback to be hidden without labeling it as current, and retains unknown source records', async () => {
@@ -528,7 +555,10 @@ describe('UsageMonitorView', () => {
     expect(JSON.parse(stored!)[0]).toMatchObject({ updatedAtMs: NOW, quotaObservedAtMs: NOW, usedPercent: 20, partial: true })
 
     for (const observedAtMs of [NOW, NOW - 1000]) {
-      mockAccountForecast(forecastAccount('codex:1', 30, 20), forecastQuota('codex:1', { observedAtMs }))
+      const same = forecastAccount('codex:1', 10, 20)
+      same.currentCycle!.totals.requestCount = 3
+      same.currentCycle!.totals.automaticPriceSummary!.byCurrency.CNY = { responseSubtotal: 0, responseRequests: 0, requestedSubtotal: 40, requestedRequests: 1, unknownReferenceSubtotal: 0, unknownReferenceRequests: 0 }
+      mockAccountForecast(same, forecastQuota('codex:1', { observedAtMs }))
       await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
       expect(forecasts()).toEqual(originalQuotes)
       expect(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)).toBe(stored)
@@ -558,6 +588,97 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.account-quota-forecast').text()).not.toContain('显示上次')
     expect(wrapper.get('.account-quota-forecast').text()).not.toContain('仅含可计价部分')
     expect(JSON.parse(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)!)[0]).toMatchObject({ updatedAtMs: nextObservation, quotaObservedAtMs: nextObservation, usedPercent: 35 })
+  })
+
+  it('lets a request-matched account without a quota snapshot show its recorded amount', async () => {
+    const current = forecastAccount();
+    const upstream = { ...forecastAccount('codex:account-upstream', 25), currentCycle: null,
+      verifiedWeekRequests: 2, creatorReferenceWeekRequests: 0,
+      calendarWeek: { ...current.calendarWeek, totals: { ...snapshot().totals, automaticPriceSummary: automaticEstimate(25) } } };
+    mockAccountForecast(current);
+    vi.mocked(getUsageMonitorAccounts).mockResolvedValue({ collectedAtMs: NOW, weekStartMs: monitorWeekBounds(NOW).startMs,
+      currentAccountKey: current.accountKey, unassignedWeek: snapshot().totals, accounts: [current, upstream] });
+    wrapper = mount(UsageMonitorView, options); await flushPromises();
+    await wrapper.get('[aria-label="额度账号"]').setValue(upstream.accountKey); await flushPromises();
+    expect(wrapper.get('[aria-label="额度账号"]').findAll('option')).toHaveLength(2);
+    expect(wrapper.find('.quota-dial').exists()).toBe(false);
+    expect(wrapper.findAllComponents({ name: 'UsageAccountPeriods' }).some(item => item.props('account').accountKey === upstream.accountKey)).toBe(true);
+  })
+
+  it('keeps the 100-percent reference projection and its frozen pair when billing identity is unverified', async () => {
+    const account = forecastAccount('codex:332', 32.59, 16);
+    account.billingAccountVerified = false;
+    mockAccountForecast(account, forecastQuota('codex:332', { usedPercent: 16, remainingPercent: 84, billingAccountVerified: false }));
+    wrapper = mount(UsageMonitorView, options); await flushPromises();
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('当前账号周额度总额推算');
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('≈ $204');
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('参考推算');
+    expect(wrapper.get('.account-quota-forecast').attributes('title')).toContain('不是账单');
+    const chart = wrapper.findComponent({ name: 'UsageValueChart' });
+    expect(chart.props('forecast').projectedSubtotal).toBeCloseTo(203.6875);
+    expect(chart.props('quota').usedPercent).toBe(16);
+    const later = forecastAccount('codex:332', 200, 16);
+    later.billingAccountVerified = false;
+    mockAccountForecast(later, forecastQuota('codex:332', { usedPercent: 16, remainingPercent: 84, stale: true, billingAccountVerified: false }));
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises();
+    expect(chart.props('forecast').observedSubtotal).toBe(32.59);
+    expect(chart.props('forecast').projectedSubtotal).toBeCloseTo(203.6875);
+    expect(wrapper.get('[aria-label="额度账号"]').text()).toContain('当前登录身份');
+    expect(wrapper.get('.quota-source-details').text()).toContain('会话日志报告的额度');
+    expect(wrapper.find('.quota-estimate').exists()).toBe(false);
+  })
+
+  it('shows distinct account IDs normally without presenting billing uncertainty as a different identity type', async () => {
+    const current = forecastAccount('codex:332');
+    mockAccountForecast(current);
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [
+      forecastQuota('codex:332', { billingAccountVerified: false, plan: 'self_serve_business_prolite' }),
+      forecastQuota('codex:2', { id: 2, billingAccountVerified: false, plan: 'self_serve_business_prolite' }),
+    ] });
+    wrapper = mount(UsageMonitorView, options); await flushPromises();
+    const accountOptions = wrapper.get('[aria-label="额度账号"]').findAll('option');
+    expect(accountOptions).toHaveLength(2);
+    expect(accountOptions.map(item => item.attributes('value'))).toEqual(expect.arrayContaining(['codex:332', 'codex:2']));
+    expect(accountOptions.find(item => item.attributes('value') === 'codex:2')!.text()).toBe('Codex · 账号 2');
+    expect(wrapper.get('[aria-label="额度账号"]').text()).not.toContain('会话创建身份');
+    expect(accountOptions.filter(item => item.text().includes('self_serve_business_prolite'))).toHaveLength(1);
+    expect(accountOptions.find(item => item.attributes('value') === 'codex:332')!.text()).toContain('当前登录身份');
+  })
+
+  it('accepts a same-timestamp cutoff correction without grafting later usage or older observations', async () => {
+    const initial = forecastAccount('codex:1', 10, 20)
+    initial.currentCycle!.totals.requestCount = 3
+    initial.currentCycle!.totals.automaticPriceSummary = automaticEstimate(10, 'standard', 1)
+    mockAccountForecast(initial)
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const storedInitial = JSON.parse(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)!)
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toEqual({ currency: 'USD', observedSubtotal: 10, additionalSubtotal: 40, projectedSubtotal: 50 })
+
+    const corrected = forecastAccount('codex:1', 14, 20)
+    corrected.currentCycle!.totals.requestCount = 4
+    corrected.currentCycle!.totals.automaticPriceSummary = automaticEstimate(14, 'standard', 2)
+    mockAccountForecast(corrected)
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toEqual({ currency: 'USD', observedSubtotal: 14, additionalSubtotal: 56, projectedSubtotal: 70 })
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('已计价 2 / 4 次')
+    const correctedStored = JSON.parse(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)!)
+    expect(correctedStored[0]).toMatchObject({ quotaObservedAtMs: NOW, coveredRequests: 2, requestCount: 4 })
+    expect(correctedStored[0].quotes).not.toEqual(storedInitial[0].quotes)
+
+    const laterUsage = forecastAccount('codex:1', 200, 20)
+    laterUsage.currentCycle!.totals.requestCount = 4
+    laterUsage.currentCycle!.totals.automaticPriceSummary = automaticEstimate(200, 'standard', 2)
+    laterUsage.currentCycle!.quotaSnapshot = { ...corrected.currentCycle!.quotaSnapshot!, totals: { ...corrected.currentCycle!.quotaSnapshot!.totals } }
+    mockAccountForecast(laterUsage)
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toEqual({ currency: 'USD', observedSubtotal: 14, additionalSubtotal: 56, projectedSubtotal: 70 })
+    expect(JSON.parse(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)!)).toEqual(correctedStored)
+
+    const older = forecastAccount('codex:1', 300, 20, NOW - 1000)
+    mockAccountForecast(older, forecastQuota('codex:1', { observedAtMs: NOW - 1000 }))
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toEqual({ currency: 'USD', observedSubtotal: 14, additionalSubtotal: 56, projectedSubtotal: 70 })
+    expect(JSON.parse(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)!)).toEqual(correctedStored)
   })
 
   it('restores only the matching persisted account-cycle snapshot after a stale remount', async () => {
@@ -780,6 +901,24 @@ describe('UsageMonitorView', () => {
     await wrapper.get('#monitor-tab-sessions').trigger('click'); await flushPromises()
     expect(wrapper.get('#monitor-session-detail').exists()).toBe(true)
     expect(wrapper.findAll('.turn-choice')[1].attributes('aria-pressed')).toBe('true')
+  })
+
+  it.each([null, { hasCredits: false, unlimited: false, balance: '0' },
+    { hasCredits: true, unlimited: false, balance: '0' },
+    { hasCredits: false, unlimited: false, balance: '10' },
+    { hasCredits: null, unlimited: null, balance: null },
+    { hasCredits: true, unlimited: false, balance: 'not-a-number' }])('hides the credits section when no usable credits are reported: %j', async credits => {
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [{ ...forecastQuota(), credits }] });
+    wrapper = mount(UsageMonitorView, options); await flushPromises();
+    expect(wrapper.find('.credits-section').exists()).toBe(false);
+    expect(wrapper.find('.credit-account').exists()).toBe(false);
+  })
+
+  it.each([{ hasCredits: true, unlimited: false, balance: '0.004' },
+    { hasCredits: true, unlimited: true, balance: null }])('shows reported positive or unlimited credits: %j', async credits => {
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [{ ...forecastQuota(), credits }] });
+    wrapper = mount(UsageMonitorView, options); await flushPromises();
+    expect(wrapper.find('.credits-section').exists()).toBe(true);
   })
 
   it('keeps fresh and last-known account credits visible while source notes remain expandable', async () => {
@@ -1184,6 +1323,68 @@ describe('UsageMonitorView', () => {
     expect(wrapper.find('.tariff-visual').exists()).toBe(true)
   })
 
+  it.each([
+    ['zh', 'Sub2API 参考价', '按当前参考单价估算（历史回填亦同），不是历史实付账单，也非 OpenAI 官方订阅费用。', '模型名称来自请求记录，未经响应确认。'],
+    ['en', 'Sub2API reference price', 'Current reference price, also used for historical backfills; not a historical paid bill or OpenAI subscription cost.', 'The model name comes from the request record, not response confirmation.'],
+  ] as const)('identifies saved and lookup Sub2API reference evidence without claiming historical payments in %s', async (locale, provider, caveat, modelCaveat) => {
+    i18n.global.locale.value = locale
+    const sourceUrl = 'https://github.com/Wei-Shaw/sub2api/blob/ba81c7fd758e425d67f856d601147ef0c5263d3f/backend/resources/model-pricing/model_prices_and_context_window.json'
+    const ruleSource = 'https://github.com/Wei-Shaw/sub2api/blob/ba81c7fd758e425d67f856d601147ef0c5263d3f/backend/internal/service/billing_service.go'
+    const reference = { ...evidence('codex-auto-review'), pricingBasis: 'sub2api_reference', pricingProvider: 'Sub2API', checkedAt: '2026-10-27', sourceUrl, ruleSources: [ruleSource] }
+    const reason = 'current_sub2api_reference_price; requested_model_not_response_confirmed'
+    const cost = { usd: 0.1234, reason, evidence: reference }
+    const row = pricedRequest('sub2api-reference', 'codex-auto-review', cost)
+    row.requestedMode = 'standard'
+    vi.mocked(getUsageMonitorSession).mockResolvedValue({ ...sessionDetail(), requests: [row] })
+    vi.mocked(quoteModelCatalogBatch).mockResolvedValue([{ id: 'reference-price-preview', cost }])
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    await wrapper.get('.sessions-table .session-link').trigger('click'); await flushPromises()
+    await wrapper.get('.requests-table .session-link').trigger('click'); await flushPromises()
+    const selected = wrapper.get('.selected-price-evidence')
+    expect(selected.text()).toContain(provider)
+    expect(selected.text()).toContain(caveat)
+    expect(selected.text()).toContain('2026-10-27')
+    expect(selected.get('.proof-amount').text()).toContain('$0.123400')
+    expect(selected.get('.mode-badge').text()).toContain(i18n.global.t('usageMonitor.text.standard'))
+    expect(selected.get('a').attributes('href')).toBe(sourceUrl)
+    const saved = wrapper.get('.price-evidence')
+    expect(saved.text()).toContain(provider)
+    expect(saved.text()).toContain(caveat)
+    expect(saved.text()).toContain('2026-10-27')
+    expect(saved.findAll('a').map(link => link.attributes('href'))).toEqual([sourceUrl, ruleSource])
+    expect(saved.findAll('a')[1].text()).toBe(i18n.global.t('usageMonitor.text.viewSub2apiPricingRules'))
+    expect(wrapper.get('.request-notes').text()).toContain(modelCaveat)
+    expect(wrapper.get('.request-detail').text()).not.toContain(reason)
+
+    await wrapper.get('#monitor-tab-sources').trigger('click'); await flushPromises()
+    await wrapper.get('.price-form input[list]').setValue('codex-auto-review')
+    await wrapper.get('.price-form').trigger('submit'); await flushPromises()
+    const lookup = wrapper.get('.lookup-evidence')
+    expect(lookup.get('.lookup-context').text()).toContain(provider)
+    expect(lookup.text()).toContain(caveat)
+    expect(lookup.text()).toContain('2026-10-27')
+    expect(lookup.get('a').attributes('href')).toBe(sourceUrl)
+    expect(wrapper.findComponent({ name: 'UsagePriceFlow' }).props('evidence')).toEqual(reference)
+
+    vi.mocked(quoteModelCatalogBatch).mockResolvedValue([{ id: 'reference-price-preview', cost: { usd: null, reason: 'missing_cache_read_price; requested_model_not_response_confirmed', evidence: null } }])
+    await wrapper.get('.price-form').trigger('submit'); await flushPromises()
+    expect(wrapper.get('.price-lookup .unpriced').text()).toBe(i18n.global.t('usageMonitor.text.cacheReadsOccurredButTheMatchingUnitPriceIs'))
+    expect(wrapper.find('.lookup-evidence').exists()).toBe(false)
+  })
+
+  it('does not let an exhausted old slot block a replenished weekly pool', async () => {
+    const old = forecastQuota('codex:1', { id: 41, slot: 'primary', usedPercent: 100, remainingPercent: 0,
+      observedAtMs: NOW - 2000, resetsAtMs: NOW - 1000, stale: true, expired: true });
+    const current = forecastQuota('codex:1', { id: 42, slot: 'secondary', usedPercent: 10, remainingPercent: 90 });
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [old, current] });
+    wrapper = mount(UsageMonitorView, options); await flushPromises();
+    expect(wrapper.find('.forecast-paused').exists()).toBe(false);
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [],
+      quotas: [{ ...old, limitId: 'independent-pool' }, current] });
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises();
+    expect(wrapper.find('.forecast-paused').exists()).toBe(true);
+  })
+
   it('stops positive usage extrapolation when current allowance is exhausted and fills the used quota ring', async () => {
     vi.mocked(getUsageMonitorWeekly).mockResolvedValue({ startMs: monitorWeekBounds(NOW).startMs, endMs: NOW, firstRecordAtMs: NOW - 1000, lastRecordAtMs: NOW, totals: { ...snapshot().totals, automaticPriceSummary: automaticEstimate(50) }, byTool: [], reference: [{ currency: 'USD', amount: 50, knownSubtotal: 50, pricedRequests: 1, unpricedRequests: 0, requestedModelRequests: 1, catalogRevision: 'fixture', ruleVersion: 'fixture' }], forecast: [{ currency: 'USD', method: 'week_average', projectedAmount: 70, projectedSubtotal: 70, observedSubtotal: 50, additionalSubtotal: 20, pricedRequests: 1, unpricedRequests: 0, coverage: 'observed_records_only', reason: 'fixture', comparisons: [] }] })
     vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [{ id: 1, accountKey: 'codex:1', tool: 'codex', accountLabel: 'Account 1', attribution: 'account', limitId: 'codex', slot: 'primary', windowMinutes: 10080, plan: 'pro', modelId: null, poolLabel: null, observedAtMs: NOW, resetsAtMs: NOW + 86400000, usedPercent: 100, remainingPercent: 0, source: 'codex_local_log', stale: false, expired: false, sourceError: null }] })
@@ -1294,6 +1495,9 @@ describe('UsageMonitorView', () => {
     await wrapper.get('.price-form').trigger('submit'); await flushPromises()
     expect(quoteModelCatalogBatch).toHaveBeenCalledWith([expect.objectContaining({ inputTokens: 300000, contextTokens: 300000, actualMode: 'standard' })])
     expect(wrapper.get('.lookup-evidence').text()).toContain('0.000001')
+    await wrapper.get('.price-form select').setValue('flex')
+    await wrapper.get('.price-form').trigger('submit'); await flushPromises()
+    expect(quoteModelCatalogBatch).toHaveBeenLastCalledWith([expect.objectContaining({ inputTokens: 300000, contextTokens: 300000, actualMode: 'flex' })])
     const reads = vi.mocked(getUsageMonitorAnalysis).mock.calls.length
     await vi.advanceTimersByTimeAsync(16000)
     expect(getUsageMonitorAnalysis).toHaveBeenCalledTimes(reads)

@@ -15,6 +15,7 @@ const DAY: i64 = 86_400_000;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WeeklyUsage {
+    billing_totals: BTreeMap<String,Totals>,
     start_ms: i64,
     end_ms: i64,
     forecast_end_ms: Option<i64>,
@@ -29,6 +30,7 @@ pub struct WeeklyUsage {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WeeklyTool {
+    billing_totals: BTreeMap<String,Totals>,
     tool: String,
     model: Option<String>,
     totals: Totals,
@@ -59,6 +61,7 @@ struct ReferenceTotal {
 }
 #[derive(Default)]
 struct Group {
+    billing_totals: BTreeMap<String,Totals>,
     totals: Totals,
     reference: BTreeMap<String, ReferenceTotal>,
     series: BTreeMap<String, PriceSeries>,
@@ -210,8 +213,9 @@ fn finish_group(
     start: i64,
     end: i64,
     horizon: Option<i64>,
-) -> (Totals, Vec<ReferenceSummary>, Vec<ForecastSummary>) {
+) -> (Totals, Vec<ReferenceSummary>, Vec<ForecastSummary>,BTreeMap<String,Totals>) {
     store::finish_totals(&mut group.totals);
+    for totals in group.billing_totals.values_mut(){store::finish_totals(totals);}
     for series in group.series.values_mut() {
         series.seal();
     }
@@ -247,7 +251,7 @@ fn finish_group(
             rule_version: pricing::VERSION,
         });
     }
-    (group.totals, references, forecasts)
+    (group.totals, references, forecasts,group.billing_totals)
 }
 
 fn read_with_catalog(
@@ -298,6 +302,7 @@ fn read_with_catalog(
             }
             if let Some(saved) = &saved {
                 store::merge_totals(&mut group.totals, saved);
+                store::merge_totals(group.billing_totals.entry(super::billing::key(&usage).into()).or_default(),saved);
                 group.first = Some(
                     group
                         .first
@@ -338,14 +343,15 @@ fn read_with_catalog(
     }
     let first_record_at_ms = global.first;
     let last_record_at_ms = global.last;
-    let (totals, reference, forecast) =
+    let (totals, reference, forecast,billing_totals) =
         finish_group(global, catalog, start_ms, end_ms, forecast_end_ms);
     let by_tool = groups
         .into_iter()
         .map(|(tool, group)| {
-            let (totals, reference, forecast) =
+            let (totals, reference, forecast,billing_totals) =
                 finish_group(group, catalog, start_ms, end_ms, forecast_end_ms);
             WeeklyTool {
+                billing_totals,
                 tool,
                 model: None,
                 totals,
@@ -355,6 +361,7 @@ fn read_with_catalog(
         })
         .collect();
     Ok(WeeklyUsage {
+        billing_totals,
         start_ms,
         end_ms,
         forecast_end_ms,
@@ -402,6 +409,19 @@ pub async fn usage_monitor_weekly(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn billing_totals_are_disjoint_and_conserve_the_full_week() {
+        let conn=Connection::open_in_memory().unwrap();store::initialize(&conn).unwrap();
+        for (id,kind,amount) in [("s","subscription",2.),("a","api",10.),("u","unknown",5.)] {
+            insert(&conn,id,"codex",1000,"gpt-6.1-sol",serde_json::json!({"usd":amount,"evidence":{"currency":"USD","mode":"fast"}}));
+            conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope',?2) WHERE id=?1",params![id,kind]).unwrap();
+        }
+        let result=read_with_catalog(&conn,0,2000,None,&CatalogSnapshot::default()).unwrap();
+        assert_eq!(result.totals.request_count,3);
+        assert_eq!(result.billing_totals["subscription"].priced_cost_usd,2.);
+        assert_eq!(result.billing_totals["api"].priced_cost_usd,10.);
+        assert_eq!(result.billing_totals.values().map(|r|r.priced_cost_usd).sum::<f64>(),result.totals.priced_cost_usd);
+    }
     fn insert(
         conn: &Connection,
         id: &str,

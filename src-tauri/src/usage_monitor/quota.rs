@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::{collections::BTreeMap, io::{BufRead, BufReader, Read, Seek, SeekFrom}};
 use std::path::Path;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -33,6 +33,8 @@ pub struct QuotaObservation {
     #[serde(default)]
     credits: Option<QuotaCredits>,
     source: String,
+    #[serde(default)]
+    billing_account_verified: Option<bool>,
     pub(crate) source_error: Option<String>,
     stale_after_ms: i64,
 }
@@ -45,6 +47,8 @@ pub struct QuotaSnapshot {
     pub account_key: String,
     pub account_label: String,
     pub attribution: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_account_verified: Option<bool>,
     pub limit_id: String,
     pub slot: String,
     pub window_minutes: Option<i64>,
@@ -122,6 +126,38 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
     super::accounts::initialize(conn)
 }
 
+pub(super) fn account_report_identities(
+    conn: &Connection,
+    tool: &str,
+) -> Result<BTreeMap<String, (String, String)>, String> {
+    let mut statement = conn
+        .prepare("SELECT account_key,MIN(id) FROM monitor_quotas WHERE tool=?1
+            AND json_extract(data,'$.attribution')='account'
+            GROUP BY account_key
+            UNION ALL SELECT account_key,0 FROM monitor_request_account_evidence e WHERE ?1='codex'
+              AND NOT EXISTS(SELECT 1 FROM monitor_quotas q WHERE q.tool=?1 AND q.account_key=e.account_key)
+            GROUP BY account_key ORDER BY 1")
+        .map_err(|error| error.to_string())?;
+    let keys = statement
+        .query_map([tool], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(keys
+        .into_iter()
+        .map(|(key, number)| {
+            let digest = format!("{:x}", md5::compute(key.as_bytes()));
+            (
+                key,
+                (
+                    format!("{tool}:account-{}", &digest[..12]),
+                    if number > 0 { format!("Account {number}") } else { format!("Account {}", &digest[..6]) },
+                ),
+            )
+        })
+        .collect())
+}
+
 fn text(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)?
@@ -184,11 +220,53 @@ pub fn codex_observations(
                 used_percent: percent(window["used_percent"].as_f64()),
                 credits: credits.clone(),
                 source: "codex_local_log".into(),
+                billing_account_verified: None,
                 source_error: None,
                 stale_after_ms: 300_000,
             })
         })
         .collect()
+}
+
+pub(super) fn save_authenticated_codex(conn: &Connection, account: &str, payload: &Value, now: i64) -> Result<(), String> {
+    let mut limits = serde_json::json!({"limit_id":"codex","plan_type":payload["plan_type"],"credits":payload["credits"]});
+    for (slot, key) in [("primary","primary_window"),("secondary","secondary_window")] {
+        let window = &payload["rate_limit"][key];
+        if let Some(seconds) = window["limit_window_seconds"].as_i64().filter(|s| *s > 0 && s % 60 == 0) {
+            limits[slot] = serde_json::json!({"window_minutes":seconds/60,"resets_at":window["reset_at"],"used_percent":window["used_percent"]});
+        }
+    }
+    for mut observation in codex_observations(&serde_json::json!({"rate_limits":limits}),Some(account),"",Some(now)) {
+        observation.source = "codex_official_usage".into();
+        observation.billing_account_verified = Some(true);
+        save(conn,&observation)?;
+    }
+    Ok(())
+}
+
+pub(super) fn bind_codex_observations(conn: &Connection, path: &Path, observations: &mut [QuotaObservation]) -> Result<(), String> {
+    let Some(home) = super::codex_quota_accounts::home(path) else { return Ok(()); };
+    let Some(weekly) = observations.iter().find(|q| q.tool=="codex" && q.limit_id=="codex" && q.window_minutes==Some(10080)) else { return Ok(()); };
+    let mut query = conn.prepare_cached("SELECT DISTINCT account_key FROM monitor_codex_quota_accounts WHERE home=?1 AND reset_ms=?2 AND plan=?3")
+        .map_err(|e|e.to_string())?;
+    let accounts = query.query_map(params![home.to_string_lossy(),weekly.resets_at_ms,weekly.plan],|r|r.get::<_,String>(0))
+        .map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    if let [account] = accounts.as_slice() {
+        for quota in observations {
+            if quota.account_key!=*account && quota.source=="codex_local_log" {
+                // Keep the old row ID/history, not a proven misattributed current snapshot.
+                conn.prepare_cached("UPDATE monitor_quotas SET data=json_set(data,'$.source_error','superseded_account_quota')
+                    WHERE tool='codex' AND account_key=?1 AND limit_id=?2 AND slot=?3 AND window_minutes=?4
+                    AND observed_ms=?5 AND json_extract(data,'$.source_error') IS NULL")
+                    .map_err(|e|e.to_string())?.execute(params![quota.account_key,quota.limit_id,quota.slot,quota.window_minutes,quota.observed_at_ms])
+                    .map_err(|e|e.to_string())?;
+            }
+            quota.account_key=account.clone();
+            quota.attribution="account".into();
+            quota.billing_account_verified=Some(true);
+        }
+    }
+    Ok(())
 }
 
 pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), String> {
@@ -444,6 +522,7 @@ fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str) -> QuotaOb
         used_percent: percent(row.used_fraction.map(|v| v * 100.0)),
         credits: None,
         source: "cockpit_snapshot".into(),
+        billing_account_verified: None,
         source_error: row.unavailable_reason,
         stale_after_ms: if row.raw_kind == crate::cockpit_quota::SUBDIR_QUOTA_DESKTOP {
             60_000
@@ -546,9 +625,13 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
         .transpose()
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
+    let report_identities = ["codex", "claude", "antigravity", "deepseek-harness"]
+        .into_iter()
+        .map(|tool| account_report_identities(conn, tool).map(|ids| (tool, ids)))
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let mut stmt = conn
         .prepare(
-            "SELECT id,data,MIN(id) OVER (PARTITION BY tool,account_key)
+            "SELECT id,data
         FROM monitor_quotas ORDER BY tool,account_key,limit_id,slot,window_minutes",
         )
         .map_err(|e| e.to_string())?;
@@ -557,15 +640,19 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
             ))
         })
         .map_err(|e| e.to_string())?;
     let mut quotas = Vec::new();
     for row in rows {
-        let (id, data, account_id) = row.map_err(|e| e.to_string())?;
+        let (id, data) = row.map_err(|e| e.to_string())?;
         let observation: QuotaObservation =
             serde_json::from_str(&data).map_err(|e| e.to_string())?;
+        if observation.source_error.as_deref()==Some("superseded_account_quota") { continue; }
+        let account_identity = observation
+            .account_key
+            .rsplit_once(':')
+            .map_or(observation.account_key.as_str(), |(_, value)| value);
         let expired = observation
             .resets_at_ms
             .is_some_and(|reset| reset <= now_ms);
@@ -581,16 +668,29 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
         });
         let stale = stale || source_error.is_some();
         let depletion = depletion(conn, id, &observation, stale, source_error.is_some())?;
+        let (report_key, default_label) = report_identities
+            .get(observation.tool.as_str())
+            .and_then(|ids| ids.get(&observation.account_key))
+            .cloned()
+            .unwrap_or_else(|| {
+                (
+                    format!("{}:{}", observation.tool, observation.account_key),
+                    if observation.attribution == "account" {
+                        "Account".into()
+                    } else {
+                        format!("Unattributed session {account_identity}")
+                    },
+                )
+            });
         quotas.push(QuotaSnapshot {
             id,
-            account_key: format!("{}:{account_id}", observation.tool),
-            account_label: observation.account_label.unwrap_or_else(|| {
-                if observation.attribution == "account" {
-                    format!("Account {account_id}")
-                } else {
-                    format!("Unattributed session {account_id}")
-                }
+            billing_account_verified: observation.billing_account_verified.or_else(|| match observation.source.as_str() {
+                "codex_local_log" => Some(false),
+                "codex_official_usage" => Some(true),
+                _ => None,
             }),
+            account_key: report_key,
+            account_label: observation.account_label.unwrap_or(default_label),
             tool: observation.tool,
             attribution: observation.attribution,
             limit_id: observation.limit_id,
@@ -1047,6 +1147,54 @@ mod tests {
             .unwrap();
         assert_eq!(primary.observed_at_ms, Some(2000));
         assert!(primary.credits.is_none());
+    }
+
+    #[test]
+    fn read_preserves_distinct_codex_account_keys_instead_of_row_ids() {
+        let conn = db();
+        for account in ["account-a", "account-b"] {
+            let observation = codex_observations(
+                &event(json!(25)),
+                Some(account),
+                account,
+                Some(1000),
+            )
+            .remove(0);
+            save(&conn, &observation).unwrap();
+        }
+
+        let report = read(&conn, 1000).unwrap();
+        let mut rows = report
+            .quotas
+            .into_iter()
+            .filter(|row| row.attribution == "account")
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.account_key.cmp(&right.account_key));
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.billing_account_verified == Some(false)));
+        assert!(rows[0].account_key.starts_with("codex:account-"));
+        assert!(rows[1].account_key.starts_with("codex:account-"));
+        assert_ne!(rows[0].account_key, rows[1].account_key);
+        let mut labels = rows.iter().map(|row| row.account_label.as_str()).collect::<Vec<_>>();
+        labels.sort_unstable();
+        assert_eq!(labels, ["Account 1", "Account 2"]);
+    }
+
+    #[test]
+    fn report_account_keys_stay_stable_when_another_source_account_appears() {
+        let conn = db();
+        for account in ["account-b", "account-c"] {
+            let observation = codex_observations(&event(json!(25)), Some(account), account, Some(1000)).remove(0);
+            save(&conn, &observation).unwrap();
+        }
+        let before = account_report_identities(&conn, "codex").unwrap();
+        let observation = codex_observations(&event(json!(25)), Some("account-a"), "account-a", Some(1000)).remove(0);
+        save(&conn, &observation).unwrap();
+        let after = account_report_identities(&conn, "codex").unwrap();
+        assert_eq!(before["account:account-b"].0, after["account:account-b"].0);
+        assert_eq!(before["account:account-c"].0, after["account:account-c"].0);
+        assert_eq!(before["account:account-b"].1, after["account:account-b"].1);
+        assert_eq!(before["account:account-c"].1, after["account:account-c"].1);
     }
 
     #[test]

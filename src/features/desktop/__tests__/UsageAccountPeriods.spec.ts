@@ -28,6 +28,46 @@ function identified(usd: number, cny?: number): MonitorTotals {
 afterEach(() => vi.useRealTimers())
 
 describe('account allowance periods', () => {
+  it('preserves the original account totals without additional billing groups', () => {
+    i18n.global.locale.value = 'zh'
+    const scopes = { subscription: identified(20), api: identified(100), unknown: identified(50) }
+    const current = cycle(identified(170), { billingTotals: scopes })
+    const wrapper = mount(UsageAccountPeriods, { props: { account: account({ currentCycle: current,
+      subscriptionMonth: { ...period(identified(170)), billingTotals: scopes } }) } })
+    expect(wrapper.get('.amount-overview .period-amount').text()).toBe('$170.00')
+    expect(wrapper.get('.subscription-month .period-amount').text()).toBe('$170.00')
+    expect(wrapper.get('.amount-overview').text()).not.toContain('API 用量估值')
+    expect(wrapper.get('.amount-overview').text()).not.toContain('类型待确认估值')
+  })
+  it('keeps verified historical value visible after its natural week ends', () => {
+    i18n.global.locale.value = 'zh';
+    const wrapper = mount(UsageAccountPeriods, { props: { account: account({ currentCycle: null,
+      verifiedWeekRequests: 0, calendarWeek: period(), verifiedHistory: period(identified(40)) }) } });
+    expect(wrapper.get('.amount-overview').text()).toContain('已核对历史金额');
+    expect(wrapper.get('.amount-overview').text()).toContain('$40.00');
+    expect(wrapper.find('.quota-cycle-details').exists()).toBe(false);
+  })
+
+  it('shows observed weekly value without inventing a quota cycle', () => {
+    i18n.global.locale.value = 'zh';
+    const wrapper = mount(UsageAccountPeriods, { props: { account: account({ currentCycle: null,
+      verifiedWeekRequests: 2, calendarWeek: period(identified(25)) }) } });
+    expect(wrapper.get('.amount-overview').text()).toContain('本周已记录金额');
+    expect(wrapper.get('.amount-overview').text()).toContain('$25.00');
+    expect(wrapper.find('.quota-cycle-details').exists()).toBe(false);
+  })
+
+  it('keeps reference amounts visible while attribution details stay collapsed', () => {
+    i18n.global.locale.value = 'zh';
+    const wrapper = mount(UsageAccountPeriods, { props: { account: account({ billingAccountVerified: false,
+      currentCycle: cycle(identified(13.68)) }) } });
+    expect(wrapper.get('.amount-overview').text()).toContain('$13.68');
+    expect(wrapper.get('.amount-overview h4').text()).toContain('本轮已记录金额');
+    expect(wrapper.find('.account-periods>.source-error').exists()).toBe(false);
+    expect(wrapper.get('.amount-details').attributes('open')).toBeUndefined();
+    expect(wrapper.get('.amount-details .source-error').text()).toContain('切号');
+  })
+
   it('switches period labels, dates and currencies without changing account attribution, cycles or amounts', async () => {
     const data = account({ currentCycle: cycle(identified(1.25, 8.75)) })
     const wrapper = mount(UsageAccountPeriods, { props: { account: data } })

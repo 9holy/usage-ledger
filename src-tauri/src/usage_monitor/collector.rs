@@ -169,10 +169,12 @@ fn apply(
     conn: &rusqlite::Transaction<'_>,
     parsed: parser::ParsedLine,
     tool: &str,
+    path: &Path,
     start: i64,
     now: i64,
     catalog: &crate::model_catalog::CatalogSnapshot,
 ) -> Result<(), String> {
+    super::codex_quota_accounts::save_parsed(conn,path,&parsed)?;
     if let Some(session) = parsed.session {
         if !session.id.is_empty() {
             store::save_session(conn, &session)?;
@@ -184,10 +186,128 @@ fn apply(
     for usage in parsed.usage {
         store::save_usage_with_catalog(conn, &usage, start, now, catalog)?;
     }
-    for quota in parsed.quotas {
+    let mut quotas = parsed.quotas;
+    super::quota::bind_codex_observations(conn,path,&mut quotas)?;
+    for quota in quotas {
         super::quota::save(conn, &quota)?;
     }
+    super::billing::repair_ids(conn,parsed.request_quotas.iter().map(|r|r.id.as_str()))?;
     Ok(())
+}
+
+fn backfill_account_quota_evidence(conn: &mut rusqlite::Connection, home: &Path, reset: i64) -> Result<(), String> {
+    let files = {
+        let mut query = conn.prepare("SELECT path,offset,signature FROM monitor_files WHERE tool='codex' AND json_extract(state,'$.session.updatedAtMs')>=?1")
+            .map_err(|e|e.to_string())?;
+        let rows = query.query_map([reset-super::codex_quota_accounts::WEEK_MS],|r|Ok((PathBuf::from(r.get::<_,String>(0)?),r.get::<_,u64>(1)?,r.get::<_,String>(2)?)))
+            .map_err(|e|e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?
+    };
+    let tx = conn.transaction().map_err(|e|e.to_string())?;
+    for (path,offset,signature) in files {
+        if super::codex_quota_accounts::home(&path)!=Some(home) { continue; }
+        let Some((reader,modified)) = mode_replay_source(&path,offset,&signature)? else {
+            eprintln!("Codex quota evidence source is no longer available; saved usage retained: {}",path.display());
+            continue;
+        };
+        let mut reader = reader.take(offset);
+        let mut state = parser::ParserState::default();
+        let mut line = Vec::new();
+        while reader.limit()>0 {
+            line.clear();
+            let read = reader.by_ref().take(MAX_LINE_BYTES).read_until(b'\n',&mut line).map_err(|e|e.to_string())?;
+            let raw = if line.ends_with(b"\n") {
+                Cow::Borrowed(std::str::from_utf8(&line).map_err(|e|e.to_string())?)
+            } else if read as u64==MAX_LINE_BYTES {
+                Cow::Owned(project_large_body(&mut Cursor::new(line.as_slice()).chain(&mut reader))?
+                    .ok_or("Incomplete committed Codex quota evidence record")?)
+            } else { return Err("Incomplete committed Codex quota evidence record".into()); };
+            let mut parsed = parser::parse_line(&mut state,"codex",&path,&raw,modified)?;
+            super::quota::bind_codex_observations(&tx,&path,&mut parsed.quotas)?;
+            parsed.request_quotas.retain(|q|q.reset_ms==reset);
+            super::codex_quota_accounts::save_parsed(&tx,&path,&parsed)?;
+            super::billing::repair_ids(&tx,parsed.request_quotas.iter().map(|q|q.id.as_str()))?;
+        }
+    }
+    tx.execute("UPDATE monitor_codex_quota_accounts SET replayed=?3 WHERE home=?1 AND reset_ms=?2",
+        params![home.to_string_lossy(),reset,super::codex_quota_accounts::REPLAY_VERSION]).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())
+}
+
+#[cfg(test)]
+mod account_quota_reconciliation_tests {
+    use super::*;
+
+    #[test]
+    fn missing_old_source_does_not_block_other_accounts_quota_evidence() {
+        use serde_json::json;
+        let home=std::env::temp_dir().join(format!("monitor-quota-replay-{}-{}",std::process::id(),crate::ledger_db::now_ms()));
+        let path=home.join("sessions/valid.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let tokens=json!({"input_tokens":10,"output_tokens":2,"cached_input_tokens":0});
+        let records=[
+            json!({"type":"session_meta","timestamp":"2026-10-15T17:00:00Z","payload":{"id":"thread","model":"gpt-6.1-sol"}}),
+            json!({"type":"event_msg","timestamp":"2026-10-15T17:01:00Z","payload":{"type":"token_usage_record","thread_id":"thread","turn_id":"turn","response_id":"known","usage":tokens,"thread_token_usage":tokens}}),
+            json!({"type":"event_msg","timestamp":"2026-10-15T17:01:00Z","payload":{"type":"token_count","info":{"total_token_usage":tokens,"last_token_usage":tokens},"rate_limits":{"limit_id":"codex","plan_type":"pro","secondary":{"window_minutes":10080,"resets_at":1800000000}}}}),
+        ];
+        let text=records.iter().map(|r|format!("{r}\n")).collect::<String>();
+        fs::write(&path,&text).unwrap();
+        let mut conn=Connection::open_in_memory().unwrap();
+        store::initialize(&conn).unwrap();
+        let state=json!({"session":{"updatedAtMs":1800000000000_i64}}).to_string();
+        let missing=home.join("sessions/missing.jsonl");
+        for (file,offset) in [(&missing,0),(&path,text.len())] {
+            conn.execute("INSERT INTO monitor_files VALUES(?1,'codex',?2,?3,?4)",params![file.to_string_lossy(),offset,format!("{:x}",md5::compute(&text.as_bytes()[..text.len().min(256)])),state]).unwrap();
+        }
+        backfill_account_quota_evidence(&mut conn,&home,1800000000000).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence WHERE id='response:known'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires explicit writable ledger copy and a captured authenticated official response"]
+    fn reconcile_copied_official_account_snapshot() {
+        let path=PathBuf::from(std::env::var_os("MONITOR_QUOTA_REPAIR_COPY").unwrap()).canonicalize().unwrap();
+        assert_eq!(path.file_name().unwrap(),"ledger-audit-work.sqlite");
+        assert_ne!(path,crate::ledger_db::ledger_db_path().unwrap().canonicalize().unwrap());
+        let receipt:serde_json::Value=serde_json::from_slice(&std::fs::read(std::env::var_os("MONITOR_OFFICIAL_ACCOUNT_RECEIPT").unwrap()).unwrap()).unwrap();
+        let account=receipt["account"].as_str().unwrap();
+        let home=PathBuf::from(receipt["home"].as_str().unwrap());
+        assert!(home.is_dir());
+        let now=receipt["observedMs"].as_i64().unwrap();
+        let mut conn=Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+        store::initialize(&conn).unwrap();
+        super::super::accounts::save_official_subscription(&conn,account,&receipt["accountCheck"],now).unwrap();
+        super::super::codex_quota_accounts::save_authenticated(&conn,&home,account,&receipt["quota"],receipt["quotaObservedMs"].as_i64().unwrap()).unwrap();
+        let reset=receipt["quota"]["rate_limit"]["primary_window"]["reset_at"].as_i64().unwrap()*1000;
+        backfill_account_quota_evidence(&mut conn,&home,reset).unwrap();
+        println!("Captured official subscription and quota evidence reconciled on the explicit copy");
+    }
+
+    #[test]
+    #[ignore = "Requires an explicit writable ledger copy and authenticated local Codex home"]
+    fn reconcile_copied_account_quota() {
+        let path=PathBuf::from(std::env::var_os("MONITOR_QUOTA_REPAIR_COPY").unwrap()).canonicalize().unwrap();
+        assert_eq!(path.file_name().unwrap(),"ledger-audit-work.sqlite");
+        assert_ne!(path,crate::ledger_db::ledger_db_path().unwrap().canonicalize().unwrap());
+        let home=PathBuf::from(std::env::var_os("MONITOR_QUOTA_REPAIR_HOME").unwrap());
+        let mut conn=Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+        store::initialize(&conn).unwrap();
+        let mut reader=super::super::codex_quota_accounts::Reader::new();
+        let sources=[SourceRoot { tool:"codex".into(),path:home.join("sessions") }];
+        for _ in 0..60 {
+            let pending=reader.collect(&conn,&sources,crate::ledger_db::now_ms()).unwrap();
+            if !pending.is_empty() {
+                for (home,reset) in pending { backfill_account_quota_evidence(&mut conn,&home,reset).unwrap(); }
+                let count:i64=conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence",[],|r|r.get(0)).unwrap();
+                assert!(count>0);
+                println!("Reconciled request quota evidence rows: {count}");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        panic!("Official account quota binding was not received; no guessed account repair was applied");
+    }
 }
 
 #[derive(Deserialize)]
@@ -483,7 +603,7 @@ pub fn ingest_file(
                         let next = reader.stream_position().map_err(|error| error.to_string())?;
                         let parsed =
                             parser::parse_line(&mut state, tool, path, &metadata, modified)?;
-                        apply(&tx, parsed, tool, live_after, now, &catalog)?;
+                        apply(&tx, parsed, tool, path, live_after, now, &catalog)?;
                         offset = next;
                         continue;
                     }
@@ -499,13 +619,14 @@ pub fn ingest_file(
         let raw = std::str::from_utf8(&line).map_err(|e| format!("UTF-8 at byte {offset}: {e}"))?;
         let parsed = parser::parse_line(&mut state, tool, path, raw, modified)
             .map_err(|e| format!("Record at byte {offset}: {e}"))?;
-        apply(&tx, parsed, tool, live_after, now, &catalog)?;
+        apply(&tx, parsed, tool, path, live_after, now, &catalog)?;
         offset += read as u64;
     }
     apply(
         &tx,
         parser::finish_batch(&mut state),
         tool,
+        path,
         live_after,
         now,
         &catalog,
@@ -966,6 +1087,7 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
     store::initialize(&conn)?;
     store::backfill_unquoted(&mut conn)?;
     super::quota::bootstrap(&conn)?;
+    super::billing::bootstrap(&mut conn)?;
     let started = crate::ledger_db::now_ms();
     let (sender, receiver) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |event| {
@@ -986,12 +1108,18 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
     let mut file_errors = std::collections::HashMap::<PathBuf, String>::new();
     let mut watcher_error: Option<String> = None;
     let mut coverage = super::live::CoverageWriter::new("jsonl");
+    let mut account_quota_reader = super::codex_quota_accounts::Reader::new();
     loop {
         if discovery.elapsed() >= Duration::from_secs(30) {
             watcher_error = None;
             // The revision check is cheap; a new snapshot only revisits still-unquoted rows.
             store::backfill_unquoted(&mut conn)?;
             super::quota::collect_offline(&conn)?;
+            match super::request_accounts::collect(&mut conn, crate::ledger_db::now_ms()) {
+                Ok(n) if n>0 => if let Err(error)=super::billing::seed_proxy_requests(&mut conn){eprintln!("API billing evidence unavailable: {error}");},
+                Err(error) => eprintln!("Request account evidence unavailable: {error}"),
+                _ => {},
+            }
             if let Err(error) = super::accounts::capture_subscription_dates(&conn) {
                 eprintln!("Subscription date cache unavailable: {error}");
             }
@@ -1004,6 +1132,14 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
                 }
             }
             sources = discovered;
+            match account_quota_reader.collect(&conn,&sources,crate::ledger_db::now_ms()) {
+                Ok(bindings) => for (home,reset) in bindings {
+                    if let Err(error)=backfill_account_quota_evidence(&mut conn,&home,reset) {
+                        eprintln!("Codex account quota reconciliation unavailable: {error}");
+                    }
+                },
+                Err(error) => eprintln!("Codex account quota binding unavailable: {error}"),
+            }
             (mode_paths, mode_discovery_issues) = super::codex_mode_logs::discover(&sources);
             let registered = {
                 let mut query = conn

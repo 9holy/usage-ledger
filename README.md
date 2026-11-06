@@ -2,7 +2,7 @@
 
 # Usage Ledger
 
-**Version 0.2.25 · AI usage monitoring and cost workspace · English / 中文**
+**Source version 0.2.36 · AI usage monitoring and cost workspace · English / 中文**
 
 Usage Ledger is a desktop app for understanding AI-tool activity and the cost of the accounts and services behind it. It combines a local usage monitor with a cost workspace for Sub2API, CLIProxyAPI, and Cockpit.
 
@@ -19,6 +19,8 @@ Amounts calculated by Usage Ledger are estimates based on available usage, prici
 [Source repository](https://github.com/9holy/usage-ledger) · [Chinese guide](README.zh-CN.md) · [Screenshot gallery](docs/screenshots/README.md)
 
 ## Get the App
+
+The current source includes the [0.2.36 fixes](docs/release/0.2.36.md). The downloadable installers below remain at 0.2.25; publishing source does not replace those packages.
 
 Download v0.2.25 from the [Usage Ledger release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.25):
 

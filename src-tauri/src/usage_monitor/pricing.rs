@@ -5,8 +5,13 @@ use crate::model_catalog::{
 use chrono::{Datelike, Timelike};
 
 const CHECKED_AT: &str = "2026-10-16";
-pub const VERSION: &str = "models-dev-official-rules-2026-10-16-v3";
+const OPENAI_CHECKED_AT: &str = "2026-11-07";
+pub const VERSION: &str = "models-dev-reference-rules-2026-11-07-v6";
 const OPENAI: &str = "https://developers.openai.com/api/docs/pricing";
+const TERRA: &str = "https://developers.openai.com/api/docs/models/gpt-6.1-terra";
+const NEW_MODELS_CHECKED_AT: &str = "2026-10-27";
+const SUB2API: &str = "https://github.com/Wei-Shaw/sub2api/blob/ba81c7fd758e425d67f856d601147ef0c5263d3f/backend/resources/model-pricing/model_prices_and_context_window.json";
+const SUB2API_BILLING: &str = "https://github.com/Wei-Shaw/sub2api/blob/ba81c7fd758e425d67f856d601147ef0c5263d3f/backend/internal/service/billing_service.go";
 const ANTHROPIC: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
 const ZAI: &str = "https://docs.z.ai/guides/overview/pricing";
 const VOLCENGINE: &str = "https://docs.volcengine.com/docs/ark/model-pricing?lang=zh";
@@ -38,36 +43,38 @@ fn unknown(reason: &str) -> CostEstimate {
     }
 }
 
-// Rates are verified model/tier rows, not a provider-wide multiplier.
+// These eight API models share the published speed/context rules, not subscription quota multipliers.
 fn openai(model: &str, mode: &str, long: bool) -> Option<Rates> {
-    let result = match (model, mode, long) {
-        ("gpt-6-astra", "standard", false) => rates(10., 1., 12.5, 12.5, 50.),
-        ("gpt-6-astra", "standard", true) => rates(20., 2., 25., 25., 75.),
-        ("gpt-6-astra", "fast", false) => rates(20., 2., 25., 25., 100.),
-        ("gpt-6-astra", "fast", true) => rates(40., 4., 50., 50., 150.),
-        ("gpt-6-astra", "ultrafast", false) => rates(60., 6., 75., 75., 300.),
-        ("gpt-6-astra", "ultrafast", true) => rates(120., 12., 150., 150., 450.),
-        ("gpt-6.1-sol", "standard", false) => rates(2., 0.1, 2.5, 2.5, 10.),
-        ("gpt-6.1-sol", "standard", true) => rates(4., 0.2, 5., 5., 15.),
-        ("gpt-6.1-sol", "fast", false) => rates(4., 0.2, 5., 5., 20.),
-        ("gpt-6.1-sol", "fast", true) => rates(8., 0.4, 10., 10., 30.),
-        ("gpt-6.1-sol", "ultrafast", false) => rates(12., 0.6, 15., 15., 60.),
-        ("gpt-6.1-sol", "ultrafast", true) => rates(24., 1.2, 30., 30., 90.),
-        ("gpt-6-sol", "standard", false) => rates(2., 0.2, 2.5, 2.5, 10.),
-        ("gpt-6-sol", "standard", true) => rates(4., 0.4, 5., 5., 15.),
-        ("gpt-6-sol", "fast", false) => rates(4., 0.4, 5., 5., 20.),
-        ("gpt-6-sol", "fast", true) => rates(8., 0.8, 10., 10., 30.),
-        ("gpt-6-luna", "standard", false) => rates(0.1, 0.01, 0.125, 0.125, 0.5),
-        ("gpt-6-luna", "standard", true) => rates(0.2, 0.02, 0.25, 0.25, 0.75),
-        ("gpt-6-luna", "fast", false) => rates(0.2, 0.02, 0.25, 0.25, 1.),
-        ("gpt-6-luna", "fast", true) => rates(0.4, 0.04, 0.5, 0.5, 1.5),
-        ("gpt-5.6-sol", "standard", false) => rates(4., 0.4, 5., 5., 20.),
-        ("gpt-5.6-sol", "standard", true) => rates(8., 0.8, 10., 10., 30.),
-        ("gpt-5.6-sol", "fast", false) => rates(8., 0.8, 10., 10., 40.),
-        ("gpt-5.6-sol", "fast", true) => rates(16., 1.6, 20., 20., 60.),
+    let (input, read, output) = match model {
+        "gpt-6-astra" => (10., 1., 50.),
+        "gpt-6.1-sol" => (2., 0.1, 10.),
+        "gpt-6.1-terra" => (1., 0.05, 5.),
+        "gpt-6-sol" => (2., 0.2, 10.),
+        "gpt-6-luna" => (0.1, 0.01, 0.5),
+        "gpt-5.6-sol" => (4., 0.4, 20.),
+        "gpt-5.6-terra" => (2., 0.2, 12.),
+        "gpt-5.6-luna" => (0.2, 0.02, 1.2),
         _ => return None,
     };
-    Some(result)
+    let speed = match mode {
+        "standard" => 1.,
+        "fast" => 2.,
+        "flex" => 0.5,
+        "ultrafast" if matches!(model,"gpt-6-astra" | "gpt-6.1-sol") => 6.,
+        _ => return None,
+    };
+    let input = input * speed * if long { 2. } else { 1. };
+    Some(rates(input, read * speed * if long { 2. } else { 1. },
+        input * 1.25, input * 1.25, output * speed * if long { 1.5 } else { 1. }))
+}
+
+fn reference_modes(model: &str) -> &'static [&'static str] {
+    match model {
+        "gpt-6-astra" | "gpt-6.1-sol" => &["standard", "fast", "ultrafast", "flex"],
+        "codex-auto-review" | "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna"
+        | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => &["standard", "fast", "flex"],
+        _ => &["standard", "fast", "ultrafast"],
+    }
 }
 
 fn anthropic(model: &str, mode: &str, long: bool) -> Option<Rates> {
@@ -105,7 +112,7 @@ fn quote(
         };
         (
             price,
-            OPENAI,
+            if model == "gpt-6.1-terra" { TERRA } else { OPENAI },
             "OpenAI",
             "USD",
             if long {
@@ -114,6 +121,14 @@ fn quote(
                 "<=272000 input tokens"
             },
         )
+    } else if model == "codex-auto-review" {
+        let price = match mode {
+            "standard" => rates(0.2, 0.02, 0., 0., 1.2),
+            "fast" => rates(0.4, 0.04, 0., 0., 2.4),
+            "flex" => rates(0.1, 0.01, 0., 0., 0.6),
+            _ => return Err("unverified_model_or_mode_price"),
+        };
+        (price, SUB2API, "Sub2API", "USD", "full published context window")
     } else if model.starts_with("claude-") {
         let long = model == "claude-haiku-5-5" && input > 100_000;
         let Some(price) = anthropic(model, mode, long) else {
@@ -171,7 +186,11 @@ fn quote(
         evidence: PriceEvidence {
             version: VERSION.into(),
             source_url: source.into(),
-            checked_at: if source == ZAI || source == VOLCENGINE {
+            checked_at: if source == OPENAI || source == TERRA {
+                OPENAI_CHECKED_AT
+            } else if source == SUB2API {
+                NEW_MODELS_CHECKED_AT
+            } else if source == ZAI || source == VOLCENGINE {
                 THIRD_PARTY_CHECKED_AT
             } else {
                 CHECKED_AT
@@ -182,7 +201,7 @@ fn quote(
             context_tier: tier.into(),
             input_per_million: price.input,
             cached_per_million: Some(price.read),
-            cache_write_per_million: (source == OPENAI).then_some(price.write_5m),
+            cache_write_per_million: (source == OPENAI || source == TERRA).then_some(price.write_5m),
             cache_write_5m_per_million: (source == ANTHROPIC).then_some(price.write_5m),
             cache_write_1h_per_million: (source == ANTHROPIC).then_some(price.write_1h),
             output_per_million: price.output,
@@ -194,9 +213,9 @@ fn quote(
                 vec![]
             },
             catalog_revision: None,
-            pricing_basis: Some("official_equivalent".into()),
+            pricing_basis: Some(if source == SUB2API { "sub2api_reference" } else { "official_equivalent" }.into()),
             rule_version: Some(VERSION.into()),
-            rule_sources: vec![source.into()],
+            rule_sources: if source == SUB2API { vec![source.into(), SUB2API_BILLING.into()] } else { vec![source.into()] },
             time_band: None,
         },
     })
@@ -210,7 +229,7 @@ fn estimate_official(record: &UsageRecord) -> CostEstimate {
         return unknown("subscription_routing_alias_needs_model");
     }
     let ordinary_write = model == "glm-5.2" || model == "doubao-seed-2.0-code";
-    let tiered = model != "glm-5.2";
+    let tiered = model != "glm-5.2" && model != "codex-auto-review";
     if record.unknown_fields.iter().any(|s| {
         matches!(
             s.as_str(),
@@ -253,6 +272,12 @@ fn estimate_official(record: &UsageRecord) -> CostEstimate {
     {
         return unknown("invalid_token_breakdown");
     }
+    if model == "codex-auto-review" && record.cache_write_tokens > 0 {
+        return unknown("unverified_cache_write_price");
+    }
+    if record.cache_write_tokens > 0 && openai(model, "standard", false).is_some() {
+        return unknown("unknown_cache_write_ttl");
+    }
     let writes = if model.starts_with("claude-") && record.cache_write_tokens > 0 {
         let (Some(a), Some(b)) = (record.cache_write_5m_tokens, record.cache_write_1h_tokens)
         else {
@@ -265,9 +290,11 @@ fn estimate_official(record: &UsageRecord) -> CostEstimate {
     } else {
         (record.cache_write_tokens, 0)
     };
-    let mut reason =
+    let mut reason = if model == "codex-auto-review" {
+        "current_sub2api_reference_price; not_historical_paid_cost_or_subscription_bill"
+    } else {
         "current_official_price_equivalent; not_historical_paid_cost_or_subscription_bill"
-            .to_owned();
+    }.to_owned();
     if record.model_basis == "turn_context_requested" {
         reason.push_str("; requested_model_not_response_confirmed");
     }
@@ -275,9 +302,9 @@ fn estimate_official(record: &UsageRecord) -> CostEstimate {
         .mode
         .as_deref()
         .filter(|_| record.mode_basis == "response_reported");
-    if (model.starts_with("gpt-") || model.starts_with("claude-")) && actual_mode.is_none() {
-        let scenarios: Vec<_> = ["standard", "fast", "ultrafast"]
-            .into_iter()
+    if (model.starts_with("gpt-") || model.starts_with("claude-") || model == "codex-auto-review") && actual_mode.is_none() {
+        let scenarios: Vec<_> = reference_modes(model)
+            .iter().copied()
             .filter_map(|mode| quote(record, model, mode, input, writes).ok())
             .collect();
         if scenarios.is_empty() {
@@ -357,6 +384,32 @@ fn from_usage(record: &UsageRecord) -> CatalogQuoteInput {
 }
 pub fn estimate_with_catalog(record: &UsageRecord, catalog: &CatalogSnapshot) -> CostEstimate {
     estimate_condition(record, catalog, None)
+}
+
+pub(super) fn subscription_quote(record:&UsageRecord,api:&CostEstimate)->CostEstimate {
+    if record.model.as_deref().and_then(|m|m.rsplit('/').next())!=Some("gpt-6.1-sol") || record.context_tokens.is_none_or(|n|n<=272_000)
+        || record.context_tokens!=Some(record.input_tokens) || record.cache_write_tokens!=0 {return api.clone();}
+    let mut result=api.clone();
+    let mut changed=false;
+    let mut adjust=|e:&mut PriceEvidence,amount:&mut f64| {
+        if e.model!="gpt-6.1-sol" || e.currency!="USD" || !e.pricing_provider.eq_ignore_ascii_case("openai") {return;}
+        let Some(long)=openai("gpt-6.1-sol",normalize_mode(&e.mode),true) else{return};
+        if (e.input_per_million-long.input).abs()>1e-10 || (e.output_per_million-long.output).abs()>1e-10
+            || e.cached_per_million.is_none_or(|v|(v-long.read).abs()>1e-10) {return;}
+        e.input_per_million/=2.;e.output_per_million/=1.5;e.cached_per_million=e.cached_per_million.map(|v|v/2.);
+        e.cache_write_per_million=e.cache_write_per_million.map(|v|v/2.);
+        *amount=((record.input_tokens-record.cache_read_tokens) as f64*e.input_per_million
+            +record.cache_read_tokens as f64*e.cached_per_million.unwrap()+record.output_tokens as f64*e.output_per_million)/1_000_000.;
+        e.context_tier="subscription_no_long_context_surcharge".into();
+        e.pricing_basis=Some("codex_subscription_reference".into());
+        e.rule_version=Some(format!("{VERSION}:subscription-v1"));
+        e.rule_sources.push("https://developers.openai.com/api/docs/models/gpt-6.1-sol".into());
+        changed=true;
+    };
+    if let (Some(e),Some(amount))=(&mut result.evidence,&mut result.usd){adjust(e,amount);}
+    for quote in &mut result.scenarios {adjust(&mut quote.evidence,&mut quote.amount);}
+    if changed {result.reason.get_or_insert_with(String::new).push_str("; codex_subscription_long_context_exempt; reference_value_not_subscription_payment");}
+    result
 }
 
 fn estimate_condition(
@@ -580,7 +633,7 @@ fn catalog_rates(
                     } else {
                         "<=272000 input tokens"
                     },
-                    OPENAI,
+                    if model_id == "gpt-6.1-terra" { TERRA } else { OPENAI },
                 ));
             }
         }
@@ -617,7 +670,7 @@ fn catalog_rates(
         }
         if range.0 > 272_000 && !selected.tiers.iter().any(|tier| tier.tier.size == 272_000) {
             let price = openai(model_id, mode, true).ok_or("unverified_mode_context_price")?;
-            return Ok(supplemental_rates(price, ">272000 input tokens", OPENAI));
+            return Ok(supplemental_rates(price, ">272000 input tokens", if model_id == "gpt-6.1-terra" { TERRA } else { OPENAI }));
         }
     }
     if provider == "anthropic"
@@ -745,6 +798,9 @@ fn catalog_quote(
     {
         return Err("invalid_token_breakdown");
     }
+    if provider == "openai" && write > 0 {
+        return Err("unknown_cache_write_ttl");
+    }
     let range = if cost.tiers.is_empty()
         && !(provider == "openai" && openai(model_id, "standard", false).is_some())
         && !input.aggregate
@@ -766,7 +822,7 @@ fn catalog_quote(
                 .filter(|(_, mode)| mode.cost.is_some())
                 .map(|(mode, _)| mode.clone()),
         );
-        for mode in ["fast", "ultrafast"] {
+        for &mode in reference_modes(model_id) {
             if !modes.iter().any(|m| m == mode)
                 && ((provider == "openai" && openai(model_id, mode, false).is_some())
                     || (provider == "anthropic" && anthropic(model_id, mode, false).is_some()))
@@ -858,6 +914,8 @@ fn catalog_quote(
             let checked = if unit_source == crate::model_catalog::SOURCE_URL {
                 chrono::DateTime::from_timestamp_millis(catalog.fetched_at_ms)
                     .map_or_else(|| CHECKED_AT.into(), |date| date.to_rfc3339())
+            } else if unit_source == TERRA || unit_source == OPENAI {
+                OPENAI_CHECKED_AT.into()
             } else {
                 CHECKED_AT.into()
             };
@@ -973,7 +1031,15 @@ pub fn quote_input(input: &CatalogQuoteInput, catalog: &CatalogSnapshot) -> Cost
     match catalog_quote(input, catalog) {
         Ok(cost) => cost,
         Err(error) => {
-            if input.provider.is_some() || input.aggregate {
+            let terra = input.model == "gpt-6.1-terra";
+            if input.aggregate || input.provider.is_some() && !(terra && input.provider.as_deref() == Some("openai")) {
+                return unknown(error);
+            }
+            if (terra || input.model == "codex-auto-review")
+                && error != "unknown_catalog_model"
+                && !(terra && input.provider.as_deref() == Some("openai")
+                    && matches!(error, "unknown_catalog_provider" | "unknown_model_for_provider"))
+            {
                 return unknown(error);
             }
             let mut unknown_fields = Vec::new();
@@ -1011,7 +1077,7 @@ pub fn quote_input(input: &CatalogQuoteInput, catalog: &CatalogSnapshot) -> Cost
             let fallback = estimate_official(&usage);
             if fallback.usd.is_some() || fallback.cny.is_some() || !fallback.scenarios.is_empty() {
                 fallback
-            } else if catalog.providers.is_empty() {
+            } else if catalog.providers.is_empty() || terra || input.model == "codex-auto-review" {
                 fallback
             } else {
                 unknown(error)
@@ -1023,6 +1089,41 @@ pub fn quote_input(input: &CatalogQuoteInput, catalog: &CatalogSnapshot) -> Cost
 #[cfg(test)]
 mod catalog_tests {
     use super::*;
+    #[test]
+    fn official_openai_price_snapshot_matches_every_supported_speed_and_context_boundary() {
+        let fixture: serde_json::Value=serde_json::from_str(include_str!("testdata/openai-api-prices-20261107.json")).unwrap();
+        let rows=fixture["rows"].as_array().unwrap();
+        let mut models=serde_json::Map::new();
+        for row in rows.iter().filter(|r|r["mode"]=="standard") {
+            let p=&row["short"];
+            models.insert(row["model"].as_str().unwrap().into(),serde_json::json!({"cost":{
+                "input":p[0],"output":p[1],"cache_read":p[2],"cache_write":p[3]}}));
+        }
+        let catalog=CatalogSnapshot::parse(&serde_json::json!({"openai":{"models":models}}).to_string(),"official-price-fixture".into(),1).unwrap();
+        let mut checked=0;
+        for row in rows.iter().filter(|r|r["mode"]!="batch") {
+            for (context,tokens) in [("short",272_000),("long",272_001)] {
+                let mut item=input(row["model"].as_str().unwrap());
+                item.actual_mode=Some(row["mode"].as_str().unwrap().into());
+                item.input_tokens=Some(tokens);item.context_tokens=Some(tokens);item.cache_read_tokens=Some(100_000);
+                for source in [&catalog,&CatalogSnapshot::default()] {
+                    let quote=quote_input(&item,source);
+                    let evidence=quote.evidence.as_ref().unwrap_or_else(||panic!("{} {} {}: {:?}",item.model,item.actual_mode.as_deref().unwrap(),context,quote.reason));
+                    let p=&row[context];
+                    for (actual,index) in [(evidence.input_per_million,0),(evidence.output_per_million,1),(evidence.cached_per_million.unwrap(),2),(evidence.cache_write_per_million.unwrap(),3)] {
+                        assert!((actual-p[index].as_f64().unwrap()).abs()<1e-10,"{} {} {}",item.model,item.actual_mode.as_deref().unwrap(),context);
+                    }
+                    let expected=((tokens-100_000) as f64*p[0].as_f64().unwrap()+100_000.*p[2].as_f64().unwrap()+100.*p[1].as_f64().unwrap())/1_000_000.;
+                    assert!((quote.usd.unwrap()-expected).abs()<1e-10);
+                }
+                checked+=1;
+            }
+        }
+        assert_eq!(checked,52);
+        let mut write=input("gpt-6.1-sol");write.cache_write_tokens=Some(100);
+        assert_eq!(quote_input(&write,&catalog).reason.as_deref(),Some("unknown_cache_write_ttl"));
+    }
+
     fn catalog() -> CatalogSnapshot {
         CatalogSnapshot::parse(r#"{
           "openai":{"models":{
@@ -1053,6 +1154,141 @@ mod catalog_tests {
             .unwrap()
             .timestamp_millis()
     }
+    #[test]
+    fn new_model_reference_prices_use_exact_tokens_tiers_and_sources() {
+        let catalog = catalog();
+        for (context, input_price, read_price, write_price, output_price) in [
+            (272_000, 1., 0.05, 1.25, 5.),
+            (272_001, 2., 0.1, 2.5, 7.5),
+        ] {
+            for (mode, multiplier) in [("standard", 1.), ("priority", 2.), ("flex", 0.5)] {
+                let mut item = input("gpt-6.1-terra");
+                item.provider = Some("openai".into());
+                item.actual_mode = Some(mode.into());
+                item.input_tokens = Some(context);
+                item.context_tokens = Some(context);
+                item.cache_read_tokens = Some(200);
+                item.cache_write_tokens = Some(0);
+                let quote = quote_input(&item, &catalog);
+                let expected = ((context - 200) as f64 * input_price + 200. * read_price
+                    + 100. * output_price) * multiplier / 1_000_000.;
+                assert!((quote.usd.unwrap() - expected).abs() < 1e-12);
+                let evidence = quote.evidence.unwrap();
+                assert_eq!(evidence.source_url, TERRA);
+                assert_eq!(evidence.checked_at, OPENAI_CHECKED_AT);
+                assert_eq!(evidence.cache_write_per_million, Some(write_price * multiplier));
+                assert_eq!(evidence.pricing_basis.as_deref(), Some("official_equivalent"));
+            }
+        }
+        for context in [1000, 300_000] {
+            for (mode, multiplier) in [("standard", 1.), ("fast", 2.), ("flex", 0.5)] {
+                let mut item = input("codex-auto-review");
+                item.input_tokens = Some(context);
+                item.context_tokens = None;
+                item.cache_read_tokens = Some(800);
+                item.actual_mode = Some(mode.into());
+                let quote = quote_input(&item, &catalog);
+                let expected = ((context - 800) as f64 * 0.2 + 800. * 0.02 + 100. * 1.2)
+                    * multiplier / 1_000_000.;
+                assert!((quote.usd.unwrap() - expected).abs() < 1e-12);
+                assert!(quote.reason.unwrap().starts_with("current_sub2api_reference_price;"));
+                let evidence = quote.evidence.unwrap();
+                assert_eq!(evidence.pricing_provider, "Sub2API");
+                assert_eq!(evidence.pricing_basis.as_deref(), Some("sub2api_reference"));
+                assert_eq!(evidence.source_url, SUB2API);
+                assert_eq!(evidence.rule_sources, vec![SUB2API, SUB2API_BILLING]);
+                assert_eq!(evidence.checked_at, NEW_MODELS_CHECKED_AT);
+                assert_eq!(evidence.cache_write_per_million, None);
+            }
+        }
+    }
+
+    #[test]
+    fn new_model_fallbacks_preserve_unknowns_provider_isolation_and_catalog_priority() {
+        let catalog = catalog();
+        for model in ["codex-auto-review", "gpt-6.1-terra"] {
+            let mut item = input(model);
+            item.actual_mode = None;
+            item.requested_mode = Some("standard".into());
+            let unknown_mode = quote_input(&item, &catalog);
+            assert!(unknown_mode.usd.is_none() && unknown_mode.evidence.is_none());
+            assert_eq!(unknown_mode.scenarios.iter().map(|quote| quote.mode.as_str()).collect::<Vec<_>>(),
+                vec!["standard", "fast", "flex"]);
+            assert!(unknown_mode.reason.unwrap().contains("requested_mode_only"));
+            for mode in ["ultrafast", "unknown"] {
+                item.actual_mode = Some(mode.into());
+                let unknown = quote_input(&item, &catalog);
+                assert!(unknown.usd.is_none() && unknown.scenarios.is_empty());
+            }
+            item.actual_mode = Some("standard".into());
+            item.output_tokens = None;
+            assert_eq!(quote_input(&item, &catalog).reason.as_deref(), Some("incomplete_token_breakdown"));
+            item.output_tokens = Some(100);
+            item.provider = Some("vendor".into());
+            assert!(quote_input(&item, &catalog).usd.is_none());
+            item.provider = None;
+            item.aggregate = true;
+            assert!(quote_input(&item, &catalog).usd.is_none());
+            item.aggregate = false;
+            item.model.push_str("-latest");
+            assert!(quote_input(&item, &catalog).usd.is_none());
+        }
+        let mut item = input("codex-auto-review");
+        item.cache_write_tokens = Some(1);
+        assert_eq!(quote_input(&item, &catalog).reason.as_deref(), Some("unverified_cache_write_price"));
+        item.cache_write_tokens = Some(0);
+        item.provider = Some("openai".into());
+        assert!(quote_input(&item, &catalog).usd.is_none());
+        let mut terra = input("gpt-6.1-terra");
+        terra.context_tokens = None;
+        assert_eq!(quote_input(&terra, &catalog).reason.as_deref(), Some("unknown_per_request_context"));
+        let mut record = UsageRecord {
+            model: Some("gpt-6.1-terra".into()),
+            unknown_fields: vec!["unsupported_pricing_modifier:cache_ttl=12h".into()],
+            ..Default::default()
+        };
+        assert_eq!(estimate_with_catalog(&record, &catalog).reason.as_deref(), Some("unsupported_pricing_modifier"));
+        record.model = Some("codex-auto-review".into());
+        record.unknown_fields.clear();
+        record.input_tokens = 1000;
+        record.output_tokens = 100;
+        let standard = standard_reference(&record, &catalog);
+        assert_eq!(standard.usd, Some(0.00032));
+        assert!(record.mode.is_none() && record.requested_mode.is_none());
+        let preferred = CatalogSnapshot::parse(r#"{"openai":{"models":{
+            "codex-auto-review":{"cost":{"input":9,"output":9,"cache_read":9}},
+            "gpt-6.1-terra":{"cost":{"input":9,"output":9,"cache_read":9,"cache_write":9}}
+        }}}"#, "new-catalog".into(), 1000).unwrap();
+        for model in ["codex-auto-review", "gpt-6.1-terra"] {
+            assert_eq!(quote_input(&input(model), &preferred).evidence.unwrap().catalog_revision.as_deref(), Some("new-catalog"));
+        }
+        assert_eq!(quote_input(&input("gpt-6-sol"), &CatalogSnapshot::default()).evidence.unwrap().checked_at, OPENAI_CHECKED_AT);
+    }
+
+    #[test]
+    fn new_model_fallbacks_never_replace_resolved_or_ambiguous_catalog_identity() {
+        for model in ["codex-auto-review", "gpt-6.1-terra"] {
+            let mut item = input(model);
+            item.cache_read_tokens = Some(1);
+            let entry = serde_json::json!({"models":{model:{"cost":{"input":9,"output":9}}}});
+            for provider in ["vendor", "openai"] {
+                let catalog = CatalogSnapshot::parse(&serde_json::json!({provider:entry}).to_string(), "incomplete".into(), 1000).unwrap();
+                let cost = quote_input(&item, &catalog);
+                assert_eq!(cost.reason.as_deref(), Some("missing_cache_read_price"));
+                assert!(cost.usd.is_none() && cost.scenarios.is_empty());
+                if model == "gpt-6.1-terra" && provider == "openai" {
+                    item.provider = Some("openai".into());
+                    assert_eq!(quote_input(&item, &catalog).reason.as_deref(), Some("missing_cache_read_price"));
+                    item.provider = None;
+                }
+            }
+            let ambiguous = CatalogSnapshot::parse(&serde_json::json!({"vendor":entry,"other":entry}).to_string(), "ambiguous".into(), 1000).unwrap();
+            let cost = quote_input(&item, &ambiguous);
+            assert_eq!(cost.reason.as_deref(), Some("ambiguous_model_provider"));
+            assert!(cost.usd.is_none() && cost.scenarios.is_empty());
+        }
+    }
+
     #[test]
     fn exact_provider_missing_cache_and_zero_are_distinct() {
         let catalog = catalog();
@@ -1252,7 +1488,7 @@ mod tests {
             context_tokens: Some(input),
             output_tokens: 100,
             cache_read_tokens: 200,
-            cache_write_tokens: 50,
+            cache_write_tokens: if model.starts_with("gpt-") { 0 } else { 50 },
             ..Default::default()
         }
     }
@@ -1295,10 +1531,12 @@ mod tests {
         r.reasoning_tokens = Some(40);
         assert!(
             (estimate(&r).usd.unwrap()
-                - (750. * 2. + 200. * 0.2 + 50. * 2.5 + 100. * 10.) / 1_000_000.)
+                - (800. * 2. + 200. * 0.2 + 100. * 10.) / 1_000_000.)
                 .abs()
                 < 1e-12
         );
+        r.cache_write_tokens=50;
+        assert_eq!(estimate(&r).reason.as_deref(),Some("unknown_cache_write_ttl"));
         r.model = Some("claude-opus-5-5".into());
         r.cache_write_5m_tokens = Some(30);
         r.cache_write_1h_tokens = Some(20);
@@ -1334,14 +1572,14 @@ mod tests {
                 .iter()
                 .map(|s| s.mode.as_str())
                 .collect::<Vec<_>>(),
-            vec!["standard", "fast"]
+            vec!["standard", "fast", "flex"]
         );
         assert_eq!(r.mode, None);
         r.mode = Some("fast".into());
         r.mode_basis = "requested".into();
         let requested_only = estimate(&r);
         assert!(requested_only.usd.is_none());
-        assert_eq!(requested_only.scenarios.len(), 2);
+        assert_eq!(requested_only.scenarios.len(), 3);
         r = request("gpt-6-sol-latest", "standard", 1000);
         assert!(estimate(&r).usd.is_none());
         r = request("gpt-6-sol", "standard", 1000);
@@ -1386,7 +1624,7 @@ mod tests {
                 .iter()
                 .map(|s| s.mode.as_str())
                 .collect::<Vec<_>>(),
-            vec!["standard", "fast", "ultrafast"]
+            vec!["standard", "fast", "ultrafast", "flex"]
         );
         let standard = cost.scenarios[0].amount;
         assert!((cost.scenarios[1].amount - standard * 2.).abs() < 1e-12);

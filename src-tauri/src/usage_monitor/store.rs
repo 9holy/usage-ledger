@@ -2,6 +2,7 @@ use super::{pricing, types::*};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 pub fn initialize(conn: &Connection) -> Result<(), String> {
+    super::billing::initialize(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS monitor_sessions (
             key TEXT PRIMARY KEY, tool TEXT NOT NULL, meta TEXT NOT NULL,
@@ -784,7 +785,7 @@ pub fn save_session(tx: &Transaction<'_>, meta: &SessionMeta) -> Result<(), Stri
     Ok(())
 }
 
-fn adjust(
+pub(super) fn adjust(
     tx: &Transaction<'_>,
     usage: &UsageRecord,
     cost: &CostEstimate,
@@ -1273,6 +1274,7 @@ fn save_usage_impl(
         merged.runtime_mode =
             evidence.and_then(|evidence| runtime_mode_for_usage(&merged, evidence));
     }
+    merged.billing_scope=super::billing::classify(tx,&merged)?;
     let usage = &merged;
     let json = serde_json::to_string(usage).map_err(|e| e.to_string())?;
     if let Some((ref u, _)) = old {
@@ -1304,11 +1306,19 @@ fn save_usage_impl(
         )?;
     }
     let prior_output = old.as_ref().map_or(0, |(u, _)| u.output_tokens);
-    let cost = old
+    let api_cost = old
         .as_ref()
         .filter(|(known, _)| same_pricing_inputs(known, usage))
         .map(|(_, cost)| cost.clone())
         .unwrap_or_else(|| pricing::estimate_with_catalog(usage, catalog));
+    let original_api=if old.as_ref().is_some_and(|(known,_)|same_pricing_inputs(known,usage)) {
+        super::billing::original_api(tx,&usage.tool,&usage.id)?
+    }else{
+        tx.execute("DELETE FROM monitor_original_api_quotes WHERE tool=?1 AND id=?2",params![usage.tool,usage.id]).map_err(|e|e.to_string())?;
+        None
+    };
+    let api_cost=original_api.as_ref().map(|json|serde_json::from_str(json)).transpose().map_err(|e|e.to_string())?.unwrap_or(api_cost);
+    let cost=super::billing::price(tx,usage,&api_cost,original_api.as_deref())?;
     if let Some((u, c)) = old {
         adjust(tx, &u, &c, -1)?;
     }
@@ -2693,6 +2703,121 @@ mod catalog_tests {
             .unwrap();
         assert_eq!(marker, pricing::revision(&new));
     }
+    #[test]
+    fn new_model_backfill_preserves_saved_quotes_usage_and_quota_boundaries() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let catalog = CatalogSnapshot::default();
+        let tx = conn.transaction().unwrap();
+        save_session(&tx, &SessionMeta { tool: "codex".into(), id: "session".into(), ..Default::default() }).unwrap();
+        for (id, model, mode, cost_json) in [
+            ("auto", "codex-auto-review", None, r#"{"usd":null,"reason":"unknown_catalog_model"}"#),
+            ("terra", "gpt-6.1-terra", Some("standard"), r#"{"usd":null,"reason":"unknown_catalog_model"}"#),
+            ("saved", "codex-auto-review", Some("standard"), r#" { "usd":7, "reason":"saved", "futureQuoteKey":true } "#),
+            ("zero", "gpt-6.1-terra", Some("standard"), r#"{ "usd":0,"reason":"saved-zero" }"#),
+            ("scenarios", "codex-auto-review", None, ""),
+        ] {
+            let mut record = usage(id, model, mode);
+            record.tool = "codex".into();
+            record.provider = None;
+            record.provider_basis.clear();
+            record.requested_mode = Some("standard".into());
+            let cost_json = if cost_json.is_empty() {
+                let mut cost = pricing::estimate_with_catalog(&record, &catalog);
+                for quote in &mut cost.scenarios { quote.amount += 9.; }
+                serde_json::to_string(&cost).unwrap()
+            } else { cost_json.into() };
+            let cost: CostEstimate = serde_json::from_str(&cost_json).unwrap();
+            let mut raw_usage = serde_json::to_value(&record).unwrap();
+            raw_usage["futureUsageKey"] = serde_json::json!({"retained":true});
+            tx.execute("INSERT INTO monitor_requests VALUES(?1,?2,'codex:session',?3,?4,?5)",
+                params![record.tool, record.id, record.timestamp_ms, raw_usage.to_string(), cost_json]).unwrap();
+            adjust(&tx, &record, &cost, 1).unwrap();
+        }
+        tx.execute_batch("INSERT INTO monitor_files VALUES('fixture','codex',42,'signature','{}');
+            INSERT INTO monitor_quotas VALUES(1,'codex','fixture','limit','week',10080,1000,'{}');
+            INSERT INTO monitor_account_cycles VALUES(1,'codex','fixture','week',10080,1000,2000,2000,1500,64,NULL);
+            INSERT INTO monitor_state VALUES('pricing_version','old-model-rules');").unwrap();
+        tx.commit().unwrap();
+        let requests = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT id,usage FROM monitor_requests ORDER BY id").unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+                .collect::<Result<_,_>>().unwrap()
+        };
+        let frozen = |conn: &Connection| -> Vec<(String, String)> {
+            conn.prepare("SELECT id,cost FROM monitor_requests WHERE id IN ('saved','zero','scenarios') ORDER BY id").unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+                .collect::<Result<_,_>>().unwrap()
+        };
+        let boundaries = |conn: &Connection| -> String {
+            conn.query_row("SELECT json_object(
+                'cycle',(SELECT json_array(id,tool,account_key,slot,window_minutes,start_ms,end_ms,reset_ms,observed_ms,used_percent,exhausted_ms) FROM monitor_account_cycles),
+                'quota',(SELECT json_array(id,tool,account_key,limit_id,slot,window_minutes,observed_ms,data) FROM monitor_quotas),
+                'cursor',(SELECT json_array(path,tool,offset,signature,state) FROM monitor_files),
+                'session',(SELECT json_array(key,tool,meta,updated_ms) FROM monitor_sessions))", [], |row| row.get(0)).unwrap()
+        };
+        let totals = |conn: &Connection| -> Totals {
+            let json: String = conn.query_row("SELECT totals FROM monitor_sessions", [], |row| row.get(0)).unwrap();
+            serde_json::from_str(&json).unwrap()
+        };
+        let before = (requests(&conn), frozen(&conn), boundaries(&conn), totals(&conn));
+        backfill_unquoted_with_catalog(&mut conn, &catalog).unwrap();
+        assert_eq!(requests(&conn), before.0);
+        assert_eq!(frozen(&conn), before.1);
+        assert_eq!(boundaries(&conn), before.2);
+        let after = totals(&conn);
+        assert_eq!((after.request_count,after.input_tokens,after.output_tokens,after.cache_read_tokens,after.cache_write_tokens),
+            (before.3.request_count,before.3.input_tokens,before.3.output_tokens,before.3.cache_read_tokens,before.3.cache_write_tokens));
+        assert_eq!(after.automatic_price_summary.by_mode["standard"].covered_requests,
+            before.3.automatic_price_summary.by_mode["standard"].covered_requests + 2);
+        let auto = previous(&conn, "codex", "auto").unwrap().unwrap();
+        assert!(auto.0.mode.is_none() && auto.1.usd.is_none());
+        assert_eq!(auto.1.scenarios.len(), 3);
+        assert_eq!(auto.1.scenarios[0].evidence.pricing_basis.as_deref(), Some("sub2api_reference"));
+        assert_eq!(previous(&conn, "codex", "terra").unwrap().unwrap().1.usd, Some(0.0015));
+        let after_json: String = conn.query_row("SELECT totals FROM monitor_sessions", [], |row| row.get(0)).unwrap();
+        backfill_unquoted_with_catalog(&mut conn, &catalog).unwrap();
+        assert_eq!(conn.query_row("SELECT totals FROM monitor_sessions", [], |row| row.get::<_,String>(0)).unwrap(), after_json);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    #[ignore = "Requires an explicit writable ledger COPY; never uses a production ledger path"]
+    fn backfill_unquoted_on_explicit_ledger_copy() {
+        use std::path::{Path, PathBuf};
+        let copy = PathBuf::from(std::env::var_os("MONITOR_PRICING_BACKFILL_COPY")
+            .expect("Set MONITOR_PRICING_BACKFILL_COPY to an isolated ledger copy")).canonicalize().unwrap();
+        let mut protected = Vec::new();
+        if let Ok(dir) = std::env::var(crate::ledger_db::LEDGER_DIR_ENV) {
+            if !dir.trim().is_empty() { protected.push(crate::ledger_db::ledger_db_path_in(Path::new(dir.trim()))); }
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            for name in [crate::ledger_db::TAURI_APP_ID, crate::ledger_db::FALLBACK_DIR_NAME] {
+                protected.push(crate::ledger_db::ledger_db_path_in(&PathBuf::from(&appdata).join(name)));
+            }
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+            protected.push(crate::ledger_db::ledger_db_path_in(&PathBuf::from(home).join(".local/share").join(crate::ledger_db::FALLBACK_DIR_NAME)));
+        }
+        assert!(!protected.iter().filter_map(|path| path.canonicalize().ok()).any(|path| path == copy),
+            "The explicit COPY must not be a production ledger path");
+        let mut conn = Connection::open_with_flags(copy,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).unwrap();
+        let cached: Option<(String, String, i64)> = conn.query_row(
+            "SELECT json,revision,fetched_at_ms FROM model_catalog_cache WHERE singleton=1", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().unwrap();
+        let catalog = cached.map(|(json, revision, fetched)| CatalogSnapshot::parse(&json, revision, fetched))
+            .transpose().unwrap().unwrap_or_default();
+        let unquoted = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM monitor_requests WHERE json_extract(cost,'$.usd') IS NULL
+                AND json_extract(cost,'$.cny') IS NULL AND COALESCE(json_array_length(cost,'$.scenarios'),0)=0",
+                [], |row| row.get(0)).unwrap()
+        };
+        let before = unquoted(&conn);
+        backfill_unquoted_with_catalog(&mut conn, &catalog).unwrap();
+        println!("pricing_backfill unquoted_before={before} unquoted_after={}", unquoted(&conn));
+    }
+
     #[test]
     fn time_band_scenarios_never_merge_just_because_the_mode_matches() {
         let mut totals = Vec::new();
