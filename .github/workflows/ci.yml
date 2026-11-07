@@ -11,12 +11,14 @@ permissions:
 
 concurrency:
   group: checks-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     env:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
@@ -36,7 +38,10 @@ jobs:
       - run: pnpm test:scripts
       - run: pnpm build:desktop
       - run: pnpm build
-      - run: node scripts/export-source-release.mjs --check
+      - run: node scripts/export-source-release.mjs --check --verify-manifest
+      - name: Check release version and notes
+        id: release
+        run: node scripts/release-desktop.mjs check
       - run: pnpm audit --audit-level=high
 
   headless:
@@ -59,14 +64,23 @@ jobs:
           "$RUNNER_TEMP/cargo-audit-x86_64-unknown-linux-gnu-v0.22.2/cargo-audit" audit --file src-tauri/Cargo.lock
 
   native:
-    name: Native (${{ matrix.os }})
+    name: Native package (${{ matrix.platform }})
     needs: [frontend, headless]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-15, macos-15-intel]
+        include:
+          - os: windows-latest
+            platform: windows-x64
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            platform: macos-arm64
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            platform: macos-x64
+            target: x86_64-apple-darwin
     env:
       CARGO_BUILD_JOBS: '2'
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -74,6 +88,8 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '13.0'
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
+      - name: Preserve the exact published source bytes
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -87,5 +103,66 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: rustup update stable --no-self-update
       - run: rustup default stable
+      - run: rustup target add '${{ matrix.target }}'
+      - run: node scripts/export-source-release.mjs --check --verify-manifest
       - run: pnpm build:desktop
       - run: pnpm test:native
+      - name: Build Windows installer for manual download
+        if: runner.os == 'Windows'
+        run: pnpm desktop:build --config src-tauri/tauri.local.conf.json -- --locked
+      - name: Install and launch the Windows package with an isolated profile
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installers = @(Get-ChildItem -LiteralPath src-tauri/target/release/bundle/nsis -File | Where-Object { $_.Name.EndsWith("_${version}_x64-setup.exe") })
+          if ($installers.Count -ne 1) { throw 'Expected one current-version Windows installer' }
+          & powershell -NoProfile -NonInteractive -File scripts/smoke-windows.ps1 -InstallerPath $installers[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw "Windows installer validation failed: $LASTEXITCODE" }
+      - name: Build and verify native Mac installer
+        if: runner.os == 'macOS'
+        run: pnpm desktop:build:mac --target '${{ matrix.target }}'
+      - name: Launch the packaged Mac app with an isolated profile
+        if: runner.os == 'macOS'
+        shell: bash
+        run: node scripts/smoke-macos.mjs src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
+      - name: Stage installer and exact source evidence
+        run: node scripts/release-desktop.mjs stage '${{ matrix.platform }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: usage-ledger-${{ needs.frontend.outputs.version }}-${{ matrix.platform }}
+          path: release-assets/${{ matrix.platform }}/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: true
+
+  publish:
+    name: Publish verified desktop installers
+    needs: [frontend, headless, native]
+    if: github.repository == '9holy/usage-ledger' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: usage-ledger-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: usage-ledger-${{ needs.frontend.outputs.version }}-*
+          path: .tmp-release-download
+      - run: node scripts/export-source-release.mjs --check --verify-manifest
+      - name: Verify all platforms and prepare checksum manifest
+        run: node scripts/release-desktop.mjs assemble
+      - name: Publish only after the uploaded assets verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-release.mjs

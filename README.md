@@ -2,7 +2,7 @@
 
 # Usage Ledger
 
-**Source version 0.2.36 · AI usage monitoring and cost workspace · English / 中文**
+**Version 0.2.37 · AI usage monitoring and cost workspace · English / 中文**
 
 Usage Ledger is a desktop app for understanding AI-tool activity and the cost of the accounts and services behind it. It combines a local usage monitor with a cost workspace for Sub2API, CLIProxyAPI, and Cockpit.
 
@@ -20,15 +20,17 @@ Amounts calculated by Usage Ledger are estimates based on available usage, prici
 
 ## Get the App
 
-The current source includes the [0.2.36 fixes](docs/release/0.2.36.md). The downloadable installers below remain at 0.2.25; publishing source does not replace those packages.
+Version 0.2.37 includes the three-round fixes for account attribution, usage statistics, ledger consistency, and desktop security. See the [bilingual release notes](docs/release/0.2.37.md) for changes and verification boundaries.
 
-Download v0.2.25 from the [Usage Ledger release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.25):
+The [v0.2.37 release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.37) provides these downloads once the release checks and all three platform builds pass:
 
-- Windows x64 installer: [Usage-Ledger_0.2.25_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_windows_x64-setup.exe).
-- macOS Apple Silicon preview: [Usage-Ledger_0.2.25_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_macos_arm64.dmg).
-- macOS Intel preview: [Usage-Ledger_0.2.25_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/Usage-Ledger_0.2.25_macos_x64.dmg).
+- Windows x64 installer: [Usage-Ledger_0.2.37_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_windows_x64-setup.exe).
+- macOS Apple Silicon preview: [Usage-Ledger_0.2.37_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_macos_arm64.dmg).
+- macOS Intel preview: [Usage-Ledger_0.2.37_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_macos_x64.dmg).
 
-See the release's [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.25/BUILD-INFO.json) for source/build provenance. Downloads are manual only; this release does not provide automatic updates or a portable executable.
+See [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/BUILD-INFO.json) for the source commit and build evidence, and [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/SHA256SUMS.txt) for download checksums. Downloads are manual only: this release supplies no updater `.sig` files, `latest.json` update feed, or portable executable.
+
+To upgrade on Windows, back up important data, fully quit the app from the tray, and run the new installer over the existing installation. This keeps the existing application data; do not uninstall or delete the ledger to update. On Mac, quit the app, choose the DMG for your processor, and replace the application in `/Applications`. Existing data directories remain in use; required database upgrades and evidence-based repairs run when the app starts.
 
 | Platform | Availability |
 | --- | --- |
@@ -164,7 +166,7 @@ Calendar-week usage, subscription-month usage, and a provider's weekly quota cyc
 
 A zero percentage alone does not prove that a new cycle started. At a confirmed 100% quota boundary, later extra-credit usage is kept separate from the included quota-cycle amount, while still contributing to the applicable month total.
 
-Forecasts pair the quota percentage with the accumulated quota amount from the **same timestamp**, for the same account and cycle. A stale but valid pair remains available with its timestamp. Partial priced amounts are labeled and counted; unpriced portions show a human-readable reason. A forecast is not a promised final charge.
+Forecasts require current, verified account attribution and quota evidence, pairing the quota percentage with subscription usage from the **same timestamp** and cycle. Historical snapshots retain their timestamps, but stale, expired, revoked, or incomplete evidence does not support a current forecast. Partial priced amounts are labeled and counted; unpriced portions show a human-readable reason. A forecast is not a promised final charge.
 
 ### Purchase Costs and Rates
 
@@ -252,7 +254,13 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. The default universal target is not validated. macOS 13 runtime behavior, Finder/Dock and full GUI flows, and real-account use have not been checked. See the release's `BUILD-INFO.json` for source/build provenance. Build workflows do not publish GitHub Releases; downloads are manual only.
+The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. Release builds use separate Apple Silicon and Intel targets. The default universal target, macOS 13 runtime behavior, Finder/Dock and full GUI flows, and real-account use remain outside the automated validation.
+
+### Release checks
+
+The main [repository workflow](.github/workflows/ci.yml) runs frontend, headless, and dependency checks, followed by native tests and installer builds for Windows x64, macOS Apple Silicon, and macOS Intel. A push to `main` publishes the versioned GitHub Release only after every required check, build, and package verification succeeds. The release's `BUILD-INFO.json` and linked Actions run record the actual outcome; these instructions do not claim that a pending run has passed.
+
+The separate [Mac preview workflow](.github/workflows/macos-test.yml) still runs on `test/macos-*` branches and uploads test artifacts without publishing a Release. Public downloads remain manual; neither workflow creates a signed automatic-update feed.
 
 ## Documentation and Licensing
 
@@ -260,7 +268,7 @@ The build command creates a universal app/DMG by default; the [macOS guide](docs
   all screenshots use fictional DEMO data, not real account statements.
 - [DeepSeek Harness integration](docs/integrations/deepseek-harness.md).
 - [macOS build and test guide](docs/platforms/macos.md).
-- [0.2.25 release notes](docs/release/0.2.25.md).
+- [0.2.37 release notes](docs/release/0.2.37.md).
 - [2026-11-07 audit and validation report](docs/audit-2026-11-07.md).
 - [2026-11-07 usage statistics and account attribution follow-up](docs/monitor-accuracy-audit-2026-11-07.md).
 - [2026-11-07 third review: concurrency, attribution and ledger accuracy](docs/re-review-2026-11-07.md).

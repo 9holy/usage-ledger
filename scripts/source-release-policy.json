@@ -1,5 +1,5 @@
 {
-  "version": "0.2.36",
+  "version": "0.2.37",
   "repository": "9holy/usage-ledger",
   "directories": ["src", "public", "LICENSES", "src-tauri/src", "src-tauri/icons", "src-tauri/capabilities"],
   "files": [
@@ -14,12 +14,13 @@
     "src-tauri/tauri.macos.conf.json", "src-tauri/tauri.macos.test.conf.json",
     "src-tauri/Info.macos.plist",
     "scripts/build-desktop.sh", "scripts/desktop-command.mjs", "scripts/prepare-desktop-release.mjs",
+    "scripts/release-desktop.mjs", "scripts/publish-release.mjs", "scripts/smoke-windows.ps1", "scripts/__tests__/release-artifacts.test.mjs",
     "scripts/capture-readme-screenshots.mjs", "scripts/test-deepseek-headless.py",
     "scripts/test-native.mjs", "scripts/test-native-headless.py", "scripts/__tests__/vite-security.test.mjs",
     "scripts/export-source-release.mjs", "scripts/source-release-policy.json",
     "scripts/build-macos.mjs", "scripts/test-macos.mjs", "scripts/smoke-macos.mjs", "scripts/__tests__/macos-build-contract.test.mjs",
     "docs/platforms/macos.md", "docs/audit-2026-11-07.md", "docs/monitor-accuracy-audit-2026-11-07.md", "docs/re-review-2026-11-07.md",
-    "docs/PRIVACY.md", "docs/release/0.2.24.md", "docs/release/0.2.25.md", "docs/release/0.2.36.md", "docs/integrations/deepseek-harness.md",
+    "docs/PRIVACY.md", "docs/release/0.2.24.md", "docs/release/0.2.25.md", "docs/release/0.2.36.md", "docs/release/0.2.37.md", "docs/integrations/deepseek-harness.md",
     "docs/legal/admin-compliance.zh.md", "docs/legal/admin-compliance.en.md",
     "docs/demo/readme-fixtures.js", "docs/screenshots/README.md", "docs/screenshots/capture-manifest.json",
     "docs/screenshots/connect-new.png", "docs/screenshots/connect-saved.png",

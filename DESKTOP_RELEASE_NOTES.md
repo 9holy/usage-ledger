@@ -1,8 +1,16 @@
 # Usage Ledger Desktop Release Notes
 
-Current source version: **0.2.36**. See the [latest bilingual source notes](docs/release/0.2.36.md), [English README](README.md), and [Chinese README](README.zh-CN.md). Published installers remain at [0.2.25](docs/release/0.2.25.md).
+## 0.2.37 — Accuracy and desktop security / 统计准确性与桌面安全
 
-当前源码版本为 **0.2.36**，已发布安装包仍为 **0.2.25**。变更、安装方式和验证范围见上述中英文说明。下文保留的是 0.2.22 历史技术记录，不代表本版重复执行的验证。
+Current version: **0.2.37**. See the [bilingual release notes](docs/release/0.2.37.md), [English README](README.md), and [Chinese README](README.zh-CN.md). This release combines the three-round account attribution, usage statistics, ledger consistency, billing evidence, invalid-data handling, and desktop security fixes.
+
+The main repository workflow publishes the Windows x64 and separate Mac Apple Silicon/Intel installers only after all required tests, builds, and package checks pass. Actual evidence is recorded in the release's `BUILD-INFO.json` and linked Actions run. Upgrade manually over the existing application and retain its data; no updater `.sig` files or `latest.json` feed are published. Signing and GUI validation limits are documented in the release notes.
+
+当前版本为 **0.2.37**，包含三轮账号归属、统计、账本一致性、计费证据、异常数据处理和桌面安全修复。主工作流仅在全部必要测试、构建和包验证成功后发布 Windows x64、M 芯片及 Intel Mac 安装包；实际结果见 `BUILD-INFO.json` 与关联 Actions 记录。手动覆盖升级并保留数据，本版不发布 `.sig` 自动更新签名或 `latest.json` 清单；签名与 GUI 验证边界见双语发布说明。
+
+The notes below preserve the v0.2.22 historical record and do not describe this release's update channel or repeated verification.
+
+下文保留 0.2.22 历史技术记录，不代表本版启用其更新通道，也不表示已重复执行其中的验证。
 
 ## Historical Technical Notes: v0.2.22 / 历史技术记录
 

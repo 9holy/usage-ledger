@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "console2api"
-version = "0.2.36"
+version = "0.2.37"
 dependencies = [
  "axum",
  "base64 0.22.1",

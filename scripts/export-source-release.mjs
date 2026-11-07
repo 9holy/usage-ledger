@@ -85,11 +85,42 @@ const tauri = JSON.parse(loaded.find(item => item.file === 'src-tauri/tauri.conf
 const cargo = loaded.find(item => item.file === 'src-tauri/Cargo.toml').bytes.toString('utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1]
 console.log(JSON.stringify({ mode: args.includes('--export') ? 'export' : 'check-only', version: policy.version, actualVersions: { package: pkg.version, tauri: tauri.version, cargo }, files: candidates.length, bytes: loaded.reduce((sum, item) => sum + item.bytes.length, 0), redactedFindings: findings, excludedCategories: policy.excludedCategories }, null, 2))
 assert.equal(findings.length, 0, 'Credential candidates require review; values were not printed')
-if (!args.includes('--export')) process.exit(0)
-assert(arg('freeze'), 'Explicit maintainer freeze marker is required before export')
 assert.equal(pkg.version, policy.version, 'Package version has not reached release freeze')
 assert.equal(tauri.version, policy.version, 'Tauri version has not reached release freeze')
 assert.equal(cargo, policy.version, 'Cargo version has not reached release freeze')
+const records = loaded.map(({ file, bytes }) => ({ path: file, bytes: bytes.length, sha256: hash(bytes) }))
+const manifestPath = path.join(repo, 'SOURCE_MANIFEST.json')
+function sourceManifest() {
+  assert(arg('freeze')?.trim(), 'Explicit maintainer freeze marker is required before writing a manifest or exporting')
+  return { schemaVersion: 1, version: policy.version, repository: policy.repository, freeze: arg('freeze'), createdAt: new Date().toISOString(), gitHistoryIncluded: false, policy, files: records }
+}
+if (args.includes('--write-manifest')) {
+  assert(!args.includes('--export'), 'Write the checked-in manifest and export the archive in separate steps')
+  writeFileSync(manifestPath, JSON.stringify(sourceManifest(), null, 2) + '\n')
+  console.log(`Source manifest written for ${policy.version}: ${records.length} files.`)
+}
+if (args.includes('--verify-manifest')) {
+  const saved = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  assert.equal(saved.schemaVersion, 1, 'Unsupported source manifest schema')
+  assert.equal(saved.version, policy.version, 'Source manifest version is stale')
+  assert.equal(saved.repository, policy.repository, 'Source manifest repository does not match')
+  assert.equal(saved.gitHistoryIncluded, false, 'The source export must exclude private Git metadata')
+  assert.deepEqual(saved.policy, policy, 'Source manifest release policy is stale')
+  assert(Array.isArray(saved.files), 'Source manifest file list is missing')
+  const expected = new Map(records.map(record => [record.path, record]))
+  const seen = new Set()
+  const mismatches = []
+  for (const record of saved.files) {
+    const current = expected.get(record.path)
+    if (seen.has(record.path) || !current || record.bytes !== current.bytes || record.sha256 !== current.sha256) mismatches.push(record.path)
+    seen.add(record.path)
+  }
+  for (const record of records) if (!seen.has(record.path)) mismatches.push(record.path)
+  assert.equal(mismatches.length, 0, `Source manifest does not match current source: ${mismatches.join(', ')}`)
+  console.log(`Source manifest verified for ${policy.version}: ${records.length} exact file hashes.`)
+}
+if (!args.includes('--export')) process.exit(0)
+const manifest = sourceManifest()
 assert.equal(process.platform, 'win32', 'The archive step uses the Windows .NET ZIP toolchain')
 const output = path.resolve(arg('output') || path.join(repo, '..', 'release', `usage-ledger-${policy.version}`))
 const outputRelative = path.relative(repo, output)
@@ -99,7 +130,6 @@ const archive = path.join(output, `usage-ledger-${policy.version}-source.zip`)
 for (const destination of [source, archive, path.join(output, 'SOURCE_MANIFEST.json'), archive + '.sha256']) assert(!existsSync(destination), `Refusing existing destination: ${destination}`)
 mkdirSync(output, { recursive: true })
 mkdirSync(source)
-const manifest = { schemaVersion: 1, version: policy.version, repository: policy.repository, freeze: arg('freeze'), createdAt: new Date().toISOString(), gitHistoryIncluded: false, policy, files: loaded.map(({ file, bytes }) => ({ path: file, bytes: bytes.length, sha256: hash(bytes) })) }
 for (const { file, bytes } of loaded) {
   const destination = path.join(source, file)
   mkdirSync(path.dirname(destination), { recursive: true })
