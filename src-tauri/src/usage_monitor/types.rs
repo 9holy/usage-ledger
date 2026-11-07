@@ -99,6 +99,17 @@ pub struct UsageRecord {
     pub runtime_mode: Option<RuntimeModeEvidence>,
 }
 
+impl UsageRecord {
+    pub(super) fn is_unitemized(&self) -> bool {
+        matches!(self.usage_basis.as_str(), "legacy_initial_cumulative" | "legacy_cumulative_delta")
+    }
+
+    /// A cumulative snapshot's observation time does not date its individual requests.
+    pub(super) fn has_period_timestamp(&self) -> bool {
+        !self.is_unitemized() && !self.unknown_fields.iter().any(|field| field == "timestamp")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PriceEvidence {
@@ -167,6 +178,17 @@ pub struct Totals {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub request_count: i64,
+    /// Stored cumulative records do not establish a count of individual requests.
+    #[serde(default)]
+    pub unitemized_records: i64,
+    #[serde(default)]
+    pub input_unknown_requests: i64,
+    #[serde(default)]
+    pub output_unknown_requests: i64,
+    #[serde(default)]
+    pub cache_read_unknown_requests: i64,
+    #[serde(default)]
+    pub cache_write_unknown_requests: i64,
     pub priced_cost_usd: f64,
     #[serde(default)]
     pub priced_cost_cny: f64,
@@ -394,6 +416,7 @@ pub struct LiveWindow {
     pub covered_ms: i64,
     pub complete: bool,
     pub source_complete: bool,
+    pub output_complete: bool,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -412,6 +435,7 @@ pub struct LiveBucket {
     pub output_tokens: Option<i64>,
     pub covered_ms: i64,
     pub source_complete: bool,
+    pub output_complete: bool,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -507,6 +531,9 @@ pub struct MonitorAnalysis {
     pub start_ms: Option<i64>,
     pub end_ms: i64,
     pub totals: Totals,
+    /// Retained records without a reliable request time or interval, independent of the selected dates.
+    pub unlocated_totals: Totals,
+    pub unlocated_by_tool: std::collections::BTreeMap<String, Totals>,
     pub by_tool: Vec<UsageBreakdown>,
     pub tool_overview: Vec<UsageBreakdown>,
     pub by_model: Vec<UsageBreakdown>,

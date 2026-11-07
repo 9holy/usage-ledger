@@ -19,6 +19,7 @@ const props = defineProps<{
     }>
   }>
   total?: number
+  recordCounts?: boolean
 }>()
 const number = (n: number) => n.toLocaleString(usageLocale())
 const visibleCount = (n: number) =>
@@ -97,7 +98,7 @@ const subtitle = (label: string) =>
           <span class="eyebrow">{{ t('usageMonitor.text.usageAnalysisModeEvidence') }}</span>
           <h2>{{ t('usageMonitor.text.billingModeRecords') }}</h2>
           <p v-if="total != null">
-            {{ t('usageMonitor.text.sameSetOf') }} <b>{{ number(total) }}</b> {{ t('usageMonitor.text.requests9') }}
+            {{ t('usageMonitor.text.sameSetOf') }} <b>{{ number(total) }}</b> {{ t(recordCounts ? 'usageMonitor.text.recordCountSeparator' : 'usageMonitor.text.requests9') }}
             {{ rows.length }} {{ t('usageMonitor.text.views') }}
           </p>
           <p v-else>{{ t('usageMonitor.text.periodRequestCountNotYetAvailable') }}</p>
@@ -158,7 +159,7 @@ const subtitle = (label: string) =>
                       mode.label +
                       ' ' +
                       number(cell(row, mode.key)?.count ?? 0) +
-                      t('usageMonitor.text.requests7'),
+                      t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests7'),
                   )
                   .join(t('usageMonitor.text.label9'))
               "
@@ -174,7 +175,7 @@ const subtitle = (label: string) =>
                 :data-percent="cell(row, mode.key)?.percent"
                 :title="
                   cell(row, mode.key)
-                    ? number(cell(row, mode.key)!.count) + t('usageMonitor.text.requests7')
+                    ? number(cell(row, mode.key)!.count) + t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests7')
                     : t('usageMonitor.text.unavailable')
                 "
                 :style="{ '--tone': mode.color }"
@@ -209,7 +210,7 @@ const subtitle = (label: string) =>
       <footer class="evidence-note">
         <div v-if="unreported != null && total">
           <strong>{{ number(unreported) }}</strong
-          ><span>{{ t('usageMonitor.text.requestsDidNotReturnTheActualMode') }}</span>
+          ><span>{{ t(recordCounts ? 'usageMonitor.text.recordsDidNotReturnTheActualMode' : 'usageMonitor.text.requestsDidNotReturnTheActualMode') }}</span>
         </div>
         <p>{{ t('usageMonitor.text.requestSettingsAndAutoDetectionCannotReplaceResponseConfirmation') }}</p>
         <details>

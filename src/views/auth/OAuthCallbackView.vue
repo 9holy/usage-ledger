@@ -152,7 +152,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClipboard } from '@/composables/useClipboard'
 import { useAppStore, useAuthStore } from '@/stores'
 import { apiClient } from '@/api/client'
-import { buildApiUrl } from '@/api/url'
+import { buildUpstreamApiUrl } from '@/api/url'
 import {
   exchangePendingOAuthCompletion,
   persistOAuthTokenContext,
@@ -268,7 +268,7 @@ function redirectProviderCallbackToBackend(provider: 'github' | 'google'): void 
     }
   }
   const suffix = params.toString() ? `?${params.toString()}` : ''
-  window.location.href = buildApiUrl(`/auth/oauth/${provider}/callback${suffix}`)
+  window.location.href = buildUpstreamApiUrl(`/auth/oauth/${provider}/callback${suffix}`)
 }
 
 async function finalizeTokenResponse(tokenResponse: OAuthTokenResponse, redirect: string) {

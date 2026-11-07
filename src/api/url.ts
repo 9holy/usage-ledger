@@ -11,6 +11,7 @@
  */
 
 import type { ConnectionConfig } from '@/stores/connection'
+import { shallowRef } from 'vue'
 
 const DEFAULT_API_BASE_URL = '/api/v1'
 
@@ -22,22 +23,22 @@ const DESKTOP_PROXY_BASE = `http://127.0.0.1:${PROXY_PORT}`
 const DEFAULT_CLIPROXY_BASE = 'http://127.0.0.1:8317'
 
 /** 当前活跃连接配置(由 connection store 在 connect 时注入) */
-let activeConnection: ConnectionConfig | null = null
+const activeConnectionState = shallowRef<ConnectionConfig | null>(null)
 let connectionRevision = 0
 
 export function setActiveConnection(conn: ConnectionConfig | null): void {
-  if (activeConnection !== conn) connectionRevision += 1
-  activeConnection = conn
+  if (activeConnectionState.value !== conn) connectionRevision += 1
+  activeConnectionState.value = conn
 }
 
 export function captureAuthConnection() {
-  return { connection: activeConnection, revision: connectionRevision, apiBase: getAPIBaseURL(), targetBase: getSub2apiTargetBase() }
+  return { connection: activeConnectionState.value, revision: connectionRevision, apiBase: getAPIBaseURL(), targetBase: getSub2apiTargetBase() }
 }
 
 export type AuthConnectionContext = ReturnType<typeof captureAuthConnection>
 
 export function isAuthConnectionCurrent(context: AuthConnectionContext): boolean {
-  return context.revision === connectionRevision && context.connection === activeConnection
+  return context.revision === connectionRevision && context.connection === activeConnectionState.value
 }
 
 export function persistAuthConnectionBinding(context: AuthConnectionContext): void {
@@ -73,7 +74,7 @@ export async function syncConnectionJwt(context: AuthConnectionContext, token: s
 }
 
 export function getActiveConnection(): ConnectionConfig | null {
-  return activeConnection
+  return activeConnectionState.value
 }
 
 export function isDesktopRuntime(): boolean {
@@ -111,8 +112,8 @@ function joinRemoteBase(baseUrl: string, prefix: string): string {
  * 桌面反代模式:baseURL 指本地,真实远程地址走此 header。
  */
 export function getSub2apiTargetBase(): string {
-  if (activeConnection) {
-    return joinRemoteBase(activeConnection.baseUrl, prefixFor(activeConnection))
+  if (activeConnectionState.value) {
+    return joinRemoteBase(activeConnectionState.value.baseUrl, prefixFor(activeConnectionState.value))
   }
   const configured = import.meta.env.VITE_API_BASE_URL
   return configured ? normalizeAPIBaseURL(configured) : DEFAULT_API_BASE_URL
@@ -124,8 +125,8 @@ export function getSub2apiTargetBase(): string {
  * - 未配 → 回退 sub2api target(cost 挂 sub2api 同域反代场景)
  */
 export function getCostTargetBase(): string {
-  if (activeConnection?.costServiceUrl) {
-    return joinRemoteBase(activeConnection.costServiceUrl, prefixFor(activeConnection))
+  if (activeConnectionState.value?.costServiceUrl) {
+    return joinRemoteBase(activeConnectionState.value.costServiceUrl, prefixFor(activeConnectionState.value))
   }
   return getSub2apiTargetBase()
 }
@@ -135,9 +136,9 @@ export function getCostTargetBase(): string {
  * cliproxy CORS 全开,不走本地反代;管理端点前缀固定 /v0/management(与业务前缀 /v1 不同)。
  */
 export function getCliproxyManagementBase(): string {
-  if (activeConnection) {
+  if (activeConnectionState.value) {
     // baseUrl 留空兜底本地 8317(避免拼成 /api/v1/v0/management 错误路径)
-    const raw = activeConnection.baseUrl?.trim()
+    const raw = activeConnectionState.value.baseUrl?.trim()
     const base = normalizeAPIBaseURL(raw || DEFAULT_CLIPROXY_BASE)
     return base.endsWith('/v0/management') ? base : `${base}/v0/management`
   }
@@ -146,7 +147,7 @@ export function getCliproxyManagementBase(): string {
 
 /** 桌面运行时且 sub2api 连接才走本地反代(cliproxy CORS 全开,直连远程不经反代)。 */
 function shouldUseDesktopProxy(): boolean {
-  return isDesktopRuntime() && activeConnection?.type !== 'cliproxy'
+  return isDesktopRuntime() && activeConnectionState.value?.type !== 'cliproxy'
 }
 
 /**
@@ -161,12 +162,12 @@ export function getAPIBaseURL(): string {
   }
 
   // cliproxy / 非桌面:远程连接已建立,按 type 拼前缀
-  if (activeConnection) {
+  if (activeConnectionState.value) {
     // cliproxy baseUrl 留空兜底本地 8317
-    const base = activeConnection.type === 'cliproxy'
-      ? (activeConnection.baseUrl?.trim() || DEFAULT_CLIPROXY_BASE)
-      : activeConnection.baseUrl
-    return joinRemoteBase(base, prefixFor(activeConnection))
+    const base = activeConnectionState.value.type === 'cliproxy'
+      ? (activeConnectionState.value.baseUrl?.trim() || DEFAULT_CLIPROXY_BASE)
+      : activeConnectionState.value.baseUrl
+    return joinRemoteBase(base, prefixFor(activeConnectionState.value))
   }
 
   // 未连接:环境变量优先,否则默认同源 /api/v1
@@ -186,8 +187,8 @@ export function getCostServiceBaseURL(): string {
   if (shouldUseDesktopProxy()) {
     return DESKTOP_PROXY_BASE
   }
-  if (activeConnection?.costServiceUrl) {
-    return joinRemoteBase(activeConnection.costServiceUrl, prefixFor(activeConnection))
+  if (activeConnectionState.value?.costServiceUrl) {
+    return joinRemoteBase(activeConnectionState.value.costServiceUrl, prefixFor(activeConnectionState.value))
   }
   return getAPIBaseURL()
 }
@@ -202,8 +203,8 @@ export function redirectToAppPath(path: string): void {
   window.location.href = normalized
 }
 
-export function buildApiUrl(path: string): string {
-  const base = getAPIBaseURL().replace(/\/+$/, '')
+function appendApiPath(baseURL: string, path: string): string {
+  const base = baseURL.replace(/\/+$/, '')
   let suffix = normalizePath(path)
   if (suffix === DEFAULT_API_BASE_URL) {
     suffix = ''
@@ -213,15 +214,34 @@ export function buildApiUrl(path: string): string {
   return `${base}${suffix}`
 }
 
+export function buildApiUrl(path: string): string {
+  return appendApiPath(getAPIBaseURL(), path)
+}
+
+/** Navigations and embedded resources cannot carry the native proxy authorization headers. */
+export function buildUpstreamApiUrl(path: string): string {
+  return appendApiPath(getSub2apiTargetBase(), path)
+}
+
+export function getGatewayTargetBase(): string {
+  const connection = getActiveConnection()
+  const apiBase = connection?.type === 'cliproxy'
+    ? joinRemoteBase(connection.baseUrl?.trim() || DEFAULT_CLIPROXY_BASE, '/v1')
+    : getSub2apiTargetBase()
+  const prefix = connection ? prefixFor(connection) : DEFAULT_API_BASE_URL
+  return apiBase.endsWith(prefix) ? apiBase.slice(0, -prefix.length) : apiBase
+}
+
 export function buildGatewayUrl(path: string): string {
   const suffix = normalizePath(path)
+  const target = getGatewayTargetBase()
   try {
-    const origin =
+    const base =
       typeof window === 'undefined'
-        ? new URL(getAPIBaseURL()).origin
-        : new URL(getAPIBaseURL(), window.location.origin).origin
-    return `${origin}${suffix}`
+        ? new URL(target)
+        : new URL(target || '/', window.location.origin)
+    return `${base.toString().replace(/\/+$/, '')}${suffix}`
   } catch {
-    return suffix
+    return `${target.replace(/\/+$/, '')}${suffix}`
   }
 }

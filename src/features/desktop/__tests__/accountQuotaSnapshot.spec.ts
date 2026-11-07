@@ -10,13 +10,14 @@ const snapshot: AccountQuotaSnapshot = {
 
 afterEach(() => localStorage.clear())
 
-it('ignores v1 estimates whose amounts were not observation-aligned and preserves validated v2 coverage', () => {
-  localStorage.setItem('usage-monitor:account-quota-snapshots:v1', JSON.stringify([snapshot]))
+it('ignores old estimates without verified request-account and subscription evidence', () => {
+  const legacyKeys = ['usage-monitor:account-quota-snapshots:v1', 'usage-monitor:account-quota-snapshots:v2', 'usage-monitor:account-quota-snapshots:v3-subscription']
+  for (const key of legacyKeys) localStorage.setItem(key, JSON.stringify([snapshot]))
   expect(loadAccountQuotaSnapshots()).toEqual([])
   expect(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)).toBeNull()
   saveAccountQuotaSnapshots([snapshot])
   expect(loadAccountQuotaSnapshots()).toEqual([snapshot])
-  expect(localStorage.getItem('usage-monitor:account-quota-snapshots:v1')).not.toBeNull()
+  for (const key of legacyKeys) expect(localStorage.getItem(key)).not.toBeNull()
 })
 
 it('rejects invalid coverage and mismatched proportional amounts', () => {

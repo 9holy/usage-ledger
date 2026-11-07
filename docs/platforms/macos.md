@@ -30,7 +30,7 @@ Choose using Apple menu > About This Mac: an M-series chip is `arm64`; an Intel 
 
 - An Apple Silicon or Intel Mac running macOS 13.0 or newer
 - Xcode Command Line Tools
-- Node.js 22 LTS or a compatible newer version, pnpm 9.15.9, and stable Rust
+- Node.js 22 LTS (22.12.0+) or a compatible newer version, pnpm 9.15.9, and stable Rust
 - For the universal default, install both Rust targets; a single-architecture build needs only its matching target:
 
 ```sh
@@ -140,7 +140,7 @@ CI 工作流不会发布 GitHub Release。v0.2.25 Release 仅提供手动下载�
 
 - Apple Silicon 或 Intel Mac，macOS 13.0 或更新版本
 - Xcode Command Line Tools
-- Node.js 22 LTS 或兼容的更新版本、pnpm 9.15.9、Rust stable
+- Node.js 22 LTS（至少 22.12.0）或兼容的更新版本、pnpm 9.15.9、Rust stable
 - 通用默认目标需安装两个 Rust 目标；单架构构建只需安装对应目标：
 
 ```sh

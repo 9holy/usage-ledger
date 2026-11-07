@@ -40,7 +40,7 @@ function parseCachedRate(storage: Storage | null, now: number): UsdCnyExchangeRa
   try {
     const cached = JSON.parse(storage.getItem(CACHE_KEY) || '') as Partial<UsdCnyExchangeRate>
     const fetchedAt = typeof cached.fetchedAt === 'string' ? Date.parse(cached.fetchedAt) : Number.NaN
-    if (!isValidRate(cached.rate) || !Number.isFinite(fetchedAt) || now - fetchedAt > CACHE_TTL_MS) return null
+    if (!isValidRate(cached.rate) || !Number.isFinite(fetchedAt) || fetchedAt > now || now - fetchedAt > CACHE_TTL_MS) return null
     return {
       rate: cached.rate,
       rateDate: typeof cached.rateDate === 'string' ? cached.rateDate : null,
@@ -128,12 +128,14 @@ export async function loadUsdCnyExchangeRate(options: {
         const payload = await response.json() as FrankfurterRateResponse
         const rate = payload.rate ?? payload.rates?.CNY
         // 端点固定 USD(base_code/base 校验,缺字段也接受——端点本身已锁定 USD)
-        const baseOk = payload.base === 'USD' || payload.base_code === 'USD' || payload.base == null
+        const baseOk = (payload.base == null || payload.base === 'USD') && (payload.base_code == null || payload.base_code === 'USD')
+          && (payload.quote == null || payload.quote === 'CNY')
         if (!baseOk || !isValidRate(rate)) {
           throw new Error('exchange-rate response is invalid')
         }
-        const rateDate = typeof payload.time_last_update_utc === 'string'
-          ? payload.time_last_update_utc.slice(0, 10)
+        const updateTimestamp = typeof payload.time_last_update_utc === 'string' ? Date.parse(payload.time_last_update_utc) : NaN
+        const rateDate = Number.isFinite(updateTimestamp)
+          ? new Date(updateTimestamp).toISOString().slice(0, 10)
           : typeof payload.date === 'string' ? payload.date : null
         const result: UsdCnyExchangeRate = {
           rate,

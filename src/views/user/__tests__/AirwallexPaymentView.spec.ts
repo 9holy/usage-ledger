@@ -84,6 +84,32 @@ describe('AirwallexPaymentView', () => {
     window.localStorage.clear()
   })
 
+  it.each(['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'https://checkout.airwallex.com/pay/101'])(
+    'only follows an HTTP(S) SDK checkout target: %s', async (target) => {
+      window.localStorage.setItem(PAYMENT_RECOVERY_STORAGE_KEY, JSON.stringify(airwallexSnapshot()))
+      redirectToCheckout.mockReturnValue(target)
+      const originalLocation = window.location
+      const assign = vi.fn()
+      Object.defineProperty(window, 'location', {
+        configurable: true, value: { origin: originalLocation.origin, assign },
+      })
+      try {
+        const wrapper = mountView()
+        await flushPromises()
+        await flushPromises()
+        if (target.startsWith('https:')) {
+          expect(assign).toHaveBeenCalledWith(target)
+        } else {
+          expect(assign).not.toHaveBeenCalled()
+          expect(wrapper.text()).toContain('payment.airwallexLoadFailed')
+        }
+        wrapper.unmount()
+      } finally {
+        Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
+      }
+    },
+  )
+
   it('从本地恢复快照读取支付参数，避免在 URL 中暴露 client_secret', async () => {
     routeState.query = {
       order_id: '101',

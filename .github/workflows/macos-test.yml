@@ -58,6 +58,9 @@ jobs:
           pnpm desktop:test:mac
       - name: Build and verify test installer
         run: pnpm desktop:build:mac --target '${{ matrix.target }}'
+      - name: Read package version
+        id: package
+        run: node -e "require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + require('./package.json').version + '\n')"
       - name: Launch packaged application with an empty test profile
         run: node scripts/smoke-macos.mjs src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app
       - name: Prepare download and checksum
@@ -69,7 +72,7 @@ jobs:
           printf 'Commit: %s\nArchitecture: %s\nSigning: ad-hoc (not notarized)\nNative tests and packaged background startup passed.\nInteractive Finder/Dock and real-account checks remain pending.\n' "$GITHUB_SHA" '${{ matrix.arch }}' > TEST-RESULT.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: usage-ledger-0.2.25-macos-${{ matrix.arch }}-test
+          name: usage-ledger-${{ steps.package.outputs.version }}-macos-${{ matrix.arch }}-test
           path: mac-test-package/
           if-no-files-found: error
           retention-days: 3

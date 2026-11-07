@@ -10,6 +10,17 @@ function turn(id: string, input: number, output: number): Turn {
 }
 
 describe('UsageTurnTimeline', () => {
+  it('does not show missing token totals or cumulative blocks as measured zeros and exact requests', () => {
+    const partial = turn('unitemized', 0, 0)
+    Object.assign(partial.totals, { inputUnknownRequests: 1, outputUnknownRequests: 1, cacheReadUnknownRequests: 1, cacheWriteUnknownRequests: 1, unitemizedRecords: 1, incompleteRequests: 1 })
+    const wrapper = mount(UsageTurnTimeline, { props: { turns: [partial], selected: null, loading: false } })
+    expect(wrapper.get('.turn-amounts').text()).toContain('未知')
+    expect(wrapper.get('.turn-amounts').text()).not.toContain('0')
+    expect(wrapper.get('.turn-cache').text()).toContain('未知')
+    expect(wrapper.get('.turn-caption').text()).toContain('实际请求次数未知')
+    expect(wrapper.get('.turn-caption').text()).not.toContain('1 次请求')
+    wrapper.unmount()
+  })
   it('compares turns using one token scale and keeps selection tied to the real id', async () => {
     const rows = [turn('large-turn', 80, 20), turn('small-turn', 30, 20)]
     const wrapper = mount(UsageTurnTimeline, { props: { turns: rows, selected: 'small-turn', loading: false } })

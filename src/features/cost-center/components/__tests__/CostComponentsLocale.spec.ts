@@ -17,7 +17,10 @@ const mocks = vi.hoisted(() => ({
   target: 'https://gateway.example/api/v1',
   list: vi.fn(), settings: vi.fn(), copy: vi.fn(), push: vi.fn(), fetch: vi.fn(),
 }))
-vi.mock('@/api/url', () => ({ getActiveConnection: () => ({ baseUrl: mocks.target }) }))
+vi.mock('@/api/url', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/api/url')>(),
+  getActiveConnection: () => ({ baseUrl: mocks.target }),
+}))
 vi.mock('@/api', () => ({ keysAPI: { list: mocks.list }, authAPI: { getPublicSettings: mocks.settings } }))
 vi.mock('@/composables/useClipboard', () => ({ useClipboard: () => ({ copyToClipboard: mocks.copy }) }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: mocks.push }) }))

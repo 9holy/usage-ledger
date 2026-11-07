@@ -311,8 +311,8 @@ import {
   type InstallRequest,
   type SetupProvisionProgress,
 } from '@/api/setup'
-import { buildGatewayUrl } from '@/api/client'
-import { isDesktopRuntime } from '@/api/url'
+import { fetchGateway } from '@/api/fetch'
+import { isDesktopRuntime, redirectToAppPath } from '@/api/url'
 import {
   hasExistingLocalServices,
   quickSetupBlocker,
@@ -538,12 +538,12 @@ async function waitForServiceRestart() {
   await new Promise((resolve) => window.setTimeout(resolve, 3000))
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      const response = await fetch(buildGatewayUrl('/setup/status'), { method: 'GET', cache: 'no-store' })
+      const response = await fetchGateway('/setup/status', { method: 'GET', cache: 'no-store' })
       if (response.ok) {
         const data = await response.json()
         if (data.data && !data.data.needs_setup) {
           serviceReady.value = true
-          window.setTimeout(() => { window.location.href = '/login' }, 1500)
+          window.setTimeout(() => { redirectToAppPath('/login') }, 1500)
           return
         }
       }

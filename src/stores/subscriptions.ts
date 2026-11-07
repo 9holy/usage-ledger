@@ -4,7 +4,8 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { connectionScopeKey } from './connectionScope'
 import subscriptionsAPI from '@/api/subscriptions'
 import type { UserSubscription } from '@/types'
 
@@ -12,9 +13,8 @@ import type { UserSubscription } from '@/types'
 const CACHE_TTL_MS = 60_000
 
 // Request generation counter to invalidate stale in-flight responses
-let requestGeneration = 0
-
 export const useSubscriptionStore = defineStore('subscriptions', () => {
+  let requestGeneration = 0
   // State
   const activeSubscriptions = ref<UserSubscription[]>([])
   const loading = ref(false)
@@ -113,9 +113,12 @@ export const useSubscriptionStore = defineStore('subscriptions', () => {
     activePromise = null
     activeSubscriptions.value = []
     loaded.value = false
+    loading.value = false
     lastFetchedAt.value = null
     stopPolling()
   }
+
+  watch(connectionScopeKey, clear, { flush: 'sync' })
 
   /**
    * Invalidate cache (force next fetch to reload)

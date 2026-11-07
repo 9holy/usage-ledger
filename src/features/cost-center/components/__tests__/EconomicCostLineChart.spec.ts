@@ -1,7 +1,6 @@
 import { shallowMountWithCostI18n as shallowMount, costComponentI18n } from './costI18n'
 import { describe, expect, it, vi } from 'vitest'
 import CostLineChart from '../EconomicCostLineChart.vue'
-import { Bar, Line } from 'vue-chartjs'
 
 // Chart unit tests need a deterministic locale, not the application's lazy router.
 vi.mock('@/i18n', async importOriginal => ({

@@ -28,7 +28,6 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('@/api/url', () => ({ isDesktopRuntime: () => true }))
 vi.mock('@/stores/connection', () => ({ errMsg: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback) }))
 
-const DAY = 86_400_000
 /** 2026-09-10 / 2026-09-11（UTC） */
 const D1 = Date.UTC(2026, 8, 10)
 const D2 = Date.UTC(2026, 8, 11)
@@ -38,7 +37,7 @@ it('switches reconciliation labels without changing evidence, day boundaries or 
   const before = reconcileCellRows(value)
   i18n.global.locale.value = 'en'
   expect(RECONCILE_VERDICT_LABELS.noOverlap).toBe('No overlap between sources')
-  expect(describeReconcile(value)).toContain('Merge basis pending')
+  expect(describeReconcile(value)).toContain('Merge method needs review')
   expect(describeReconcile({ ...value, available: false, reason: '来源诊断原文' })).toContain('来源诊断原文')
   expect(formatDivergence(null)).toBe('Cannot compare')
   expect(formatDivergence(0)).toBe('0.0%')
@@ -190,7 +189,7 @@ describe('结论标签与语气', () => {
 describe('describeReconcile · 一句话摘要', () => {
   it('永远标注"合并口径待定（对账中）"—— 未拍板前不得伪装已定案', () => {
     const text = describeReconcile(result())
-    expect(text).toContain('合并口径待定（对账中）')
+    expect(text).toContain('合并方式待确认')
     expect(text).toContain('同批（逐天吻合）')
     expect(text).toContain('9.1%')
     expect(text).not.toContain('已定案')
@@ -314,12 +313,13 @@ describe('describeLedgerSourceRow · 源清单行', () => {
 
   it('含水位、账本行数、请求数', () => {
     const text = describeLedgerSourceRow(info)
-    expect(text).toContain('水位 181818')
+    expect(text).toContain('读取位置 181818')
     expect(text).toContain('账本 2829 行')
+    expect(text).toContain('请求 181818')
   })
 
   it('源库重建过则提示世代', () => {
-    expect(describeLedgerSourceRow({ ...info, resetGeneration: 3 })).toContain('世代 3')
+    expect(describeLedgerSourceRow({ ...info, resetGeneration: 3 })).toContain('来源数据库重建标记 3')
   })
 })
 

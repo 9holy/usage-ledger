@@ -17,8 +17,11 @@ it('translates the brand and native window controls immediately without changing
   await wrapper.vm.$nextTick()
   expect(wrapper.get('.desktop-titlebar__brand').text()).toBe('Usage Ledger')
   await wrapper.get('[aria-label="Minimize window"]').trigger('click')
+  await vi.dynamicImportSettled()
   await wrapper.get('[aria-label="Maximize or restore window"]').trigger('click')
+  await vi.dynamicImportSettled()
   await wrapper.get('[aria-label="Close window"]').trigger('click')
+  await vi.dynamicImportSettled()
   await vi.waitFor(() => expect(windowActions.close).toHaveBeenCalledOnce())
   expect(windowActions.minimize).toHaveBeenCalledOnce()
   expect(windowActions.toggleMaximize).toHaveBeenCalledOnce()
@@ -26,4 +29,5 @@ it('translates the brand and native window controls immediately without changing
   i18n.global.locale.value = 'zh'
   await wrapper.vm.$nextTick()
   expect(wrapper.get('[aria-label="关闭窗口"]').attributes('title')).toBe('关闭')
+  wrapper.unmount()
 })

@@ -3,6 +3,15 @@ import { mount } from '@vue/test-utils'
 import { describe, it, expect } from 'vitest'
 import UsageTokenComposition from '../UsageTokenComposition.vue'
 describe('Token reservoir data', () => {
+  it('does not describe a zero known subtotal with missing fields as no usage', async () => {
+    const wrapper = mount(UsageTokenComposition, { props: { inputTokens: 0, outputTokens: 0, cacheReadTokens: null, partial: true } })
+    expect(wrapper.text()).toContain('已记录部分为 0')
+    expect(wrapper.text()).toContain('不能确认本周期没有用量')
+    await wrapper.setProps({ inputTokens: null, outputTokens: null })
+    expect(wrapper.text()).not.toContain('已记录部分为 0')
+    expect(wrapper.find('.token-landscape').exists()).toBe(false)
+    wrapper.unmount()
+  })
   it('retains small positive shares and zero quantities', async () => {
     const w = mount(UsageTokenComposition, {
       props: { inputTokens: 443048, cacheReadTokens: 442624, outputTokens: 82 },

@@ -30,6 +30,7 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { sanitizeNavigationUrl } from '@/utils/url'
 import {
   PAYMENT_RECOVERY_STORAGE_KEY,
   readPaymentRecoverySnapshot,
@@ -121,7 +122,9 @@ onMounted(async () => {
     const redirectResult = result.payments.redirectToCheckout(checkoutOptions)
 
     if (typeof redirectResult === 'string' && redirectResult) {
-      window.location.assign(redirectResult)
+      const redirectUrl = sanitizeNavigationUrl(redirectResult, { allowRelative: true })
+      if (!redirectUrl) throw new Error(t('payment.airwallexLoadFailed'))
+      window.location.assign(redirectUrl)
     }
   } catch (err: unknown) {
     loading.value = false

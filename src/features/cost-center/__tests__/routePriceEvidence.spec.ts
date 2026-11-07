@@ -1,3 +1,4 @@
+import './costDataI18n'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { PriceEvidence, MonitorCostEstimate } from '@/api/usageMonitor'
 import type { CliproxyUsageEvent } from '@/api/cliproxy/cpaData'

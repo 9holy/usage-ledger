@@ -153,7 +153,7 @@ describe('mergeCoverageLabel · 覆盖率文案', () => {
   it('没有补全天时说"全部由网关请求口径覆盖"；无覆盖率时说"未知"', () => {
     expect(
       mergeCoverageLabel({ sessionsBackfilledDays: 0, sessionsBackfilledTokens: 0, longRatioObserved: null }),
-    ).toBe('全部由网关请求口径覆盖')
+    ).toBe('所选时段均有网关请求记录')
     expect(mergeCoverageLabel(null)).toBe('覆盖率未知')
   })
 

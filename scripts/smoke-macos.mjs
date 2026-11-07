@@ -67,10 +67,10 @@ try {
       await delay(250)
       continue
     }
-    assert.equal(response.status, 502, 'Expected the local proxy to reject a missing target')
+    assert.equal(response.status, 403, 'Expected the local proxy to reject a request without its IPC capability')
     const body = await response.json()
     assert.equal(body.code, -1)
-    assert.match(body.message, /X-Target-Base/)
+    assert.match(body.message, /Local API bridge access denied/)
     const owner = spawnSync('/usr/sbin/lsof', ['-a', '-p', String(child.pid), '-iTCP:18765', '-sTCP:LISTEN'], { encoding: 'utf8', timeout: 5000 })
     assert(!owner.error && owner.status === 0, owner.error?.message || owner.stderr || 'Spawned application does not own proxy port 18765')
     ready = true
@@ -79,7 +79,7 @@ try {
   assert(ready, 'Local proxy did not become ready within 30 seconds')
   await delay(3000)
   assertAlive()
-  receipt = { arch: process.arch, startup: 'passed', proxy: 'owned-pid-missing-target-rejected', guiInteraction: 'not-checked' }
+  receipt = { arch: process.arch, startup: 'passed', proxy: 'owned-pid-unauthenticated-request-rejected', guiInteraction: 'not-checked' }
 } finally {
   try {
     if (child?.pid && !exited) {

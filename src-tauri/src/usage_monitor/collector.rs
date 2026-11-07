@@ -27,7 +27,7 @@ pub fn roots() -> Result<(Vec<SourceRoot>, Option<String>), String> {
         .map(PathBuf::from)
         .ok_or("Cannot locate user home")?;
     let mut codex = vec![home.join(".codex")];
-    if let Some(p) = std::env::var_os("CODEX_HOME") {
+    if let Some(p) = std::env::var_os("CODEX_HOME").filter(|path| !path.is_empty()) {
         codex.push(PathBuf::from(p));
     }
     let instances = home.join(".antigravity_cockpit/codex_instances.json");
@@ -66,7 +66,7 @@ pub fn roots() -> Result<(Vec<SourceRoot>, Option<String>), String> {
         }
     }
     let mut claude = vec![home.join(".claude")];
-    if let Some(p) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+    if let Some(p) = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|path| !path.is_empty()) {
         claude.push(PathBuf::from(p));
     }
     for base in claude {
@@ -260,7 +260,7 @@ mod account_quota_reconciliation_tests {
             conn.execute("INSERT INTO monitor_files VALUES(?1,'codex',?2,?3,?4)",params![file.to_string_lossy(),offset,format!("{:x}",md5::compute(&text.as_bytes()[..text.len().min(256)])),state]).unwrap();
         }
         backfill_account_quota_evidence(&mut conn,&home,1800000000000).unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence WHERE id='response:known'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence WHERE id='response-v2:6:threadknown'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
         fs::remove_dir_all(home).unwrap();
     }
 
@@ -397,14 +397,12 @@ fn mode_replay_source(
 }
 
 fn upgrade_initial_mode_cursor(
-    conn: &mut Connection,
+    tx: &rusqlite::Transaction<'_>,
     path: &Path,
     offset: u64,
     signature: &str,
     mut state: parser::ParserState,
 ) -> Result<Option<parser::ParserState>, String> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
     for cached in state.recent_usage().cloned().collect::<Vec<_>>() {
         if let Some(proven) = store::stored_requested_mode_for_cursor(&tx, &cached)? {
             state.restore_request_mode(&proven);
@@ -463,13 +461,59 @@ fn upgrade_initial_mode_cursor(
     tx.execute("UPDATE monitor_files SET state=?1 WHERE path=?2",
         params![serde_json::to_string(&state).map_err(|error| error.to_string())?, path.to_string_lossy()])
         .map_err(|error| error.to_string())?;
-    tx.commit().map_err(|error| error.to_string())?;
     Ok(Some(state))
 }
 
+// Only recover the prefix that this ledger previously committed. An archive
+// may include later bytes; neither their usage nor their timestamps are evidence
+// for this cursor. The preserved cursor may also contain extension fields.
+fn replay_archived_response_identity(
+    tx: &rusqlite::Transaction<'_>,
+    path: &Path,
+    offset: u64,
+    signature: &str,
+    saved: &str,
+    replay_key: &str,
+) -> Result<bool, String> {
+    let Some((reader, modified)) = mode_replay_source(path, offset, signature)? else {
+        return Ok(false);
+    };
+    let (original, _) = saved_parser_state(saved, "codex")?;
+    let catalog = crate::model_catalog::snapshot();
+    let mut reader = reader.take(offset);
+    let mut replayed = parser::ParserState::default();
+    let mut line = Vec::new();
+    while reader.limit() > 0 {
+        let position = offset - reader.limit();
+        line.clear();
+        let read = reader.by_ref().take(MAX_LINE_BYTES).read_until(b'\n', &mut line)
+            .map_err(|error| error.to_string())?;
+        let raw = if line.ends_with(b"\n") {
+            Cow::Borrowed(std::str::from_utf8(&line).map_err(|error| format!("UTF-8 at byte {position}: {error}"))?)
+        } else if read as u64 == MAX_LINE_BYTES {
+            Cow::Owned(project_large_body(&mut Cursor::new(line.as_slice()).chain(&mut reader))?
+                .ok_or("Committed Codex archive contains an incomplete oversized record")?)
+        } else {
+            return Err("Committed Codex archive does not end on complete records".into());
+        };
+        let parsed = parser::parse_line(&mut replayed, "codex", path, &raw, modified)
+            .map_err(|error| format!("Codex identity replay at byte {position}: {error}"))?;
+        apply(&tx, parsed, "codex", path, i64::MAX, 0, &catalog)?;
+    }
+    apply(&tx, parser::finish_batch(&mut replayed), "codex", path, i64::MAX, 0, &catalog)?;
+    if original.session.as_ref().map(|session| (&session.tool, &session.id))
+        != replayed.session.as_ref().map(|session| (&session.tool, &session.id))
+    {
+        return Err("Codex identity archive does not match the committed session".into());
+    }
+    tx.execute("DELETE FROM monitor_state WHERE key=?1", [replay_key]).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn saved_parser_state(json: &str, tool: &str) -> Result<(parser::ParserState, bool), String> {
-    let saved: serde_json::Value = serde_json::from_str(json)
+    let mut saved: serde_json::Value = serde_json::from_str(json)
         .map_err(|error| format!("Stored parser state: {error}"))?;
+    if tool == "codex" { parser::scope_cursor_response_ids(&mut saved)?; }
     let legacy = tool == "codex" && saved.get("requested_mode_seen").is_none();
     Ok((serde_json::from_value(saved).map_err(|error| format!("Stored parser state: {error}"))?, legacy))
 }
@@ -480,7 +524,8 @@ fn enqueue_legacy_mode_archives(
     queued: &mut HashSet<PathBuf>,
 ) -> Result<(), String> {
     let mut query = conn.prepare("SELECT path FROM monitor_files WHERE tool='codex'
-        AND CASE WHEN json_valid(state) THEN json_type(state,'$.requested_mode_seen') IS NULL ELSE 0 END")
+        AND (CASE WHEN json_valid(state) THEN json_type(state,'$.requested_mode_seen') IS NULL ELSE 0 END
+          OR EXISTS(SELECT 1 FROM monitor_state WHERE key='codex_identity_replay_v2:'||monitor_files.path))")
         .map_err(|error| error.to_string())?;
     let paths = query.query_map([], |row| row.get::<_, String>(0)).map_err(|error| error.to_string())?;
     for path in paths {
@@ -495,6 +540,17 @@ fn enqueue_legacy_mode_archives(
     Ok(())
 }
 
+// A stable header cannot detect copy-truncate/rewrite when the file regrows
+// before the next poll. Persist a small digest at the committed byte boundary;
+// regular appends keep it unchanged and at most 4 KiB need to be reread.
+fn cursor_tail_digest(reader: &mut (impl Read + Seek), offset: u64) -> Result<String, String> {
+    let length = offset.min(4096);
+    reader.seek(SeekFrom::Start(offset - length)).map_err(|error| error.to_string())?;
+    let mut tail = vec![0; length as usize];
+    reader.read_exact(&mut tail).map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", md5::compute(tail)))
+}
+
 pub fn ingest_file(
     conn: &mut Connection,
     tool: &str,
@@ -504,8 +560,17 @@ pub fn ingest_file(
     if tool == super::deepseek::TOOL {
         return super::deepseek::ingest(conn, path, live_after);
     }
+    // The cursor, replay markers and all derived usage belong to one serialized
+    // write snapshot. Another collector may have committed while this one waited.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
     let key = path.to_string_lossy().to_string();
-    let previous: Option<(u64, String, String)> = conn
+    let replay_key = format!("codex_identity_replay_v2:{key}");
+    let replay_identity = tool == "codex" && tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key=?1)", [&replay_key], |row| row.get::<_,bool>(0),
+    ).map_err(|e| e.to_string())?;
+    let previous: Option<(u64, String, String)> = tx
         .query_row(
             "SELECT offset,signature,state FROM monitor_files WHERE path=?1",
             [&key],
@@ -518,12 +583,16 @@ pub fn ingest_file(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if tool == "codex" {
                 if let Some((offset, signature, saved)) = previous {
+                    if replay_identity {
+                        replay_archived_response_identity(&tx, path, offset, &signature, &saved, &replay_key)?;
+                    }
                     let (state, legacy) = saved_parser_state(&saved, tool)?;
                     if legacy {
-                        upgrade_initial_mode_cursor(conn, path, offset, &signature, state)?;
+                        upgrade_initial_mode_cursor(&tx, path, offset, &signature, state)?;
                     }
                 }
             }
+            tx.commit().map_err(|error| error.to_string())?;
             return Ok(false);
         }
         Err(e) => return Err(e.to_string()),
@@ -540,14 +609,22 @@ pub fn ingest_file(
     // Small prefix identifies replacement/truncation; never hash or reread the whole history.
     let signature = format!("{:x}", md5::compute(&prefix[..n]));
     let (mut offset, mut state, legacy_mode) = match previous {
-        Some((off, sig, json)) if off <= meta.len() && sig == signature => {
+        Some((off, sig, json)) if !replay_identity && off <= meta.len() && sig == signature => {
             let (state, legacy) = saved_parser_state(&json, tool)?;
-            (off, state, legacy)
+            let unchanged = match &state.file_tail_digest {
+                Some(saved) => cursor_tail_digest(&mut reader, off)? == *saved,
+                None => true, // Existing cursors acquire a digest without replaying old history.
+            };
+            if unchanged {
+                (off, state, legacy)
+            } else {
+                (0, parser::ParserState::default(), false)
+            }
         }
         _ => (0, parser::ParserState::default(), false),
     };
     if legacy_mode {
-        let Some(upgraded) = upgrade_initial_mode_cursor(conn, path, offset, &signature, state)? else {
+        let Some(upgraded) = upgrade_initial_mode_cursor(&tx, path, offset, &signature, state)? else {
             return Ok(false);
         };
         state = upgraded;
@@ -558,7 +635,7 @@ pub fn ingest_file(
             Err(error) => state.quota_identity_error = Some(error),
         }
         state.quota_identity_loaded = true;
-        conn.execute(
+        tx.execute(
             "UPDATE monitor_files SET state=?1 WHERE path=?2",
             params![
                 serde_json::to_string(&state).map_err(|e| e.to_string())?,
@@ -568,14 +645,18 @@ pub fn ingest_file(
         .map_err(|e| e.to_string())?;
     }
     if offset == meta.len() {
+        if state.file_tail_digest.is_none() {
+            state.file_tail_digest = Some(cursor_tail_digest(&mut reader, offset)?);
+            tx.execute("UPDATE monitor_files SET state=?1 WHERE path=?2",
+                params![serde_json::to_string(&state).map_err(|error| error.to_string())?, key])
+                .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
         return Ok(false);
     }
     let catalog = crate::model_catalog::snapshot();
     reader
         .seek(SeekFrom::Start(offset))
-        .map_err(|e| e.to_string())?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     let now = crate::ledger_db::now_ms();
     let mut line = Vec::new();
@@ -631,9 +712,13 @@ pub fn ingest_file(
         now,
         &catalog,
     )?;
+    state.file_tail_digest = Some(cursor_tail_digest(&mut reader, offset)?);
     tx.execute("INSERT INTO monitor_files(path,tool,offset,signature,state) VALUES(?1,?2,?3,?4,?5)
         ON CONFLICT(path) DO UPDATE SET offset=excluded.offset,signature=excluded.signature,state=excluded.state",
         params![key,tool,offset,signature,serde_json::to_string(&state).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+    if replay_identity {
+        tx.execute("DELETE FROM monitor_state WHERE key=?1", [&replay_key]).map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(!partial && offset < meta.len())
 }
@@ -686,7 +771,7 @@ mod tests {
             for row in rows {
                 let parsed = parser::parse_line(&mut state, "codex", &path, &row.to_string(), 0).unwrap();
                 for mut record in parsed.usage {
-                    if record.id == "response:first" {
+                    if record.id == "response-v2:6:threadfirst" {
                         first = Some(record.clone());
                         record.requested_mode = None;
                         record.unknown_fields.push("requested_mode_ambiguous".into());
@@ -702,7 +787,7 @@ mod tests {
             object.remove("requested_mode_turn_has_usage");
             object.insert("requested_mode_ambiguous".into(), json!(true));
             for row in object.get_mut("recent").unwrap().as_array_mut().unwrap() {
-                if row["id"] == "response:first" {
+                if row["id"] == "response-v2:6:threadfirst" {
                     row["requestedMode"] = Value::Null;
                     row["unknownFields"].as_array_mut().unwrap().push(json!("requested_mode_ambiguous"));
                 }
@@ -710,9 +795,9 @@ mod tests {
             conn.execute("INSERT INTO monitor_files(path,tool,offset,signature,state) VALUES(?1,'codex',?2,?3,?4)", params![
                 path.to_string_lossy(), source.len() as u64, format!("{:x}", md5::compute(&source.as_bytes()[..256.min(source.len())])), saved.to_string()
             ]).unwrap();
-            conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.extension',json('{\"keep\":true}')) WHERE id='response:first'", []).unwrap();
-            let cost: String = conn.query_row("SELECT cost FROM monitor_requests WHERE id='response:first'", [], |row| row.get(0)).unwrap();
-            conn.execute("UPDATE monitor_requests SET cost=?1 WHERE id='response:first'", [format!(" {cost}\n")]).unwrap();
+            conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.extension',json('{\"keep\":true}')) WHERE id='response-v2:6:threadfirst'", []).unwrap();
+            let cost: String = conn.query_row("SELECT cost FROM monitor_requests WHERE id='response-v2:6:threadfirst'", [], |row| row.get(0)).unwrap();
+            conn.execute("UPDATE monitor_requests SET cost=?1 WHERE id='response-v2:6:threadfirst'", [format!(" {cost}\n")]).unwrap();
             conn.execute("INSERT INTO monitor_account_cycles(tool,account_key,slot,window_minutes,start_ms,reset_ms,observed_ms,used_percent) VALUES('codex','account:a','secondary',10080,100,604800100,200,50)", []).unwrap();
             Self { root, path, source, conn, first: first.unwrap() }
         }
@@ -748,12 +833,12 @@ mod tests {
     #[test]
     fn legacy_initial_mode_repair_preserves_cost_facts_cycles_and_same_id_after_restart() {
         let mut fixture = ModeRepairFixture::new(false);
-        let (before, cost) = fixture.request("response:first");
+        let (before, cost) = fixture.request("response-v2:6:threadfirst");
         let cursor = fixture.cursor();
         let totals = fixture.totals();
         let cycles = fixture.cycles();
         assert!(!ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).unwrap());
-        let (mut expected, unchanged_cost) = fixture.request("response:first");
+        let (mut expected, unchanged_cost) = fixture.request("response-v2:6:threadfirst");
         assert_eq!(unchanged_cost, cost);
         assert_eq!(expected["requestedMode"], "standard");
         expected["requestedMode"] = Value::Null;
@@ -774,15 +859,15 @@ mod tests {
         let duplicate = fixture.source.lines().nth(4).unwrap();
         fs::write(&fixture.path, format!("{}{duplicate}\n", fixture.source)).unwrap();
         assert!(!ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).unwrap());
-        assert_eq!(fixture.request("response:first").1, cost);
-        assert!(!fixture.request("response:first").0["unknownFields"].as_array().unwrap().contains(&json!("requested_mode_ambiguous")));
+        assert_eq!(fixture.request("response-v2:6:threadfirst").1, cost);
+        assert!(!fixture.request("response-v2:6:threadfirst").0["unknownFields"].as_array().unwrap().contains(&json!("requested_mode_ambiguous")));
         assert_eq!(fixture.totals().request_count, totals.request_count);
     }
 
     #[test]
     fn historical_mode_repair_keeps_real_switches_and_rejects_mismatched_facts() {
         let mut fixture = ModeRepairFixture::new(true);
-        let before = fixture.request("response:first");
+        let before = fixture.request("response-v2:6:threadfirst");
         for change in 0..5 {
             let mut wrong = fixture.first.clone();
             match change {
@@ -795,12 +880,12 @@ mod tests {
             let tx = fixture.conn.transaction().unwrap();
             assert!(!store::repair_initial_requested_mode(&tx, &wrong).unwrap());
             tx.commit().unwrap();
-            assert_eq!(fixture.request("response:first"), before);
+            assert_eq!(fixture.request("response-v2:6:threadfirst"), before);
         }
-        let switched = fixture.request("response:switched");
+        let switched = fixture.request("response-v2:6:threadswitched");
         ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).unwrap();
-        assert_eq!(fixture.request("response:switched"), switched);
-        assert_eq!(fixture.request("response:first").0["requestedMode"], "standard");
+        assert_eq!(fixture.request("response-v2:6:threadswitched"), switched);
+        assert_eq!(fixture.request("response-v2:6:threadfirst").0["requestedMode"], "standard");
         assert_eq!(fixture.totals().incomplete_requests, 1);
         let totals = serde_json::to_value(fixture.totals()).unwrap();
         let tx = fixture.conn.transaction().unwrap();
@@ -815,11 +900,11 @@ mod tests {
         let invalid = format!("{}{{invalid}}\n", fixture.source);
         fs::write(&fixture.path, &invalid).unwrap();
         fixture.conn.execute("UPDATE monitor_files SET offset=?1", [invalid.len() as u64]).unwrap();
-        let before = fixture.request("response:first");
+        let before = fixture.request("response-v2:6:threadfirst");
         let cursor = fixture.cursor();
         let totals = serde_json::to_value(fixture.totals()).unwrap();
         assert!(ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).is_err());
-        assert_eq!(fixture.request("response:first"), before);
+        assert_eq!(fixture.request("response-v2:6:threadfirst"), before);
         assert_eq!(fixture.cursor(), cursor);
         assert_eq!(serde_json::to_value(fixture.totals()).unwrap(), totals);
     }
@@ -851,13 +936,13 @@ mod tests {
             let (offset, signature, state) = fixture.cursor();
             fixture.conn.execute("INSERT INTO monitor_files(path,tool,offset,signature,state) VALUES(?1,'codex',?2,?3,?4)",
                 params![duplicate.to_string_lossy(), offset, signature, state]).unwrap();
-            let cost = fixture.request("response:first").1;
+            let cost = fixture.request("response-v2:6:threadfirst").1;
             ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).unwrap();
             ingest_file(&mut fixture.conn, "codex", &duplicate, i64::MAX).unwrap();
             let first_usage = fixture.source.lines().nth(4).unwrap();
             fs::write(&duplicate, format!("{}{first_usage}\n", fixture.source)).unwrap();
             ingest_file(&mut fixture.conn, "codex", &duplicate, i64::MAX).unwrap();
-            let (usage, unchanged_cost) = fixture.request("response:first");
+            let (usage, unchanged_cost) = fixture.request("response-v2:6:threadfirst");
             assert_eq!(unchanged_cost, cost);
             assert_eq!(usage["requestedMode"], "standard");
             assert!(!usage["unknownFields"].as_array().unwrap().contains(&json!("requested_mode_ambiguous")));
@@ -866,7 +951,7 @@ mod tests {
             new_usage["payload"]["response_id"] = json!("brand-new");
             fs::write(&duplicate, format!("{}{first_usage}\n{new_usage}\n", fixture.source)).unwrap();
             ingest_file(&mut fixture.conn, "codex", &duplicate, i64::MAX).unwrap();
-            let new = fixture.request("response:brand-new").0;
+            let new = fixture.request("response-v2:6:threadbrand-new").0;
             assert_eq!(new["requestedMode"], if with_switch { Value::Null } else { json!("standard") });
             assert_eq!(new["unknownFields"].as_array().unwrap().contains(&json!("requested_mode_ambiguous")), with_switch);
         }
@@ -890,7 +975,7 @@ mod tests {
         assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         fs::write(&fixture.path, &fixture.source).unwrap();
         ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).unwrap();
-        assert_eq!(fixture.request("response:first").0["requestedMode"], "standard");
+        assert_eq!(fixture.request("response-v2:6:threadfirst").0["requestedMode"], "standard");
         assert_eq!(fixture.totals().incomplete_requests, 0);
     }
 
@@ -901,11 +986,11 @@ mod tests {
         let compressed = zstd::stream::encode_all(format!("{}{{not_committed}}\n", fixture.source).as_bytes(), 1).unwrap();
         fs::write(&archive, compressed).unwrap();
         fs::remove_file(&fixture.path).unwrap();
-        let cost = fixture.request("response:first").1;
+        let cost = fixture.request("response-v2:6:threadfirst").1;
         let cycles = fixture.cycles();
         ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).unwrap();
-        assert_eq!(fixture.request("response:first").0["requestedMode"], "standard");
-        assert_eq!(fixture.request("response:first").1, cost);
+        assert_eq!(fixture.request("response-v2:6:threadfirst").0["requestedMode"], "standard");
+        assert_eq!(fixture.request("response-v2:6:threadfirst").1, cost);
         assert_eq!(fixture.cycles(), cycles);
         assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM monitor_files", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
         assert_eq!(fixture.totals().request_count, 1);
@@ -929,7 +1014,7 @@ mod tests {
         ingest_file(&mut fixture.conn, "codex", &fixture.path, i64::MAX).unwrap();
         enqueue_legacy_mode_archives(&fixture.conn, &mut pending, &mut queued).unwrap();
         assert!(pending.is_empty());
-        assert_eq!(fixture.request("response:first").0["requestedMode"], "standard");
+        assert_eq!(fixture.request("response-v2:6:threadfirst").0["requestedMode"], "standard");
 
         let mut missing = ModeRepairFixture::new(false);
         fs::remove_file(&missing.path).unwrap();
@@ -938,7 +1023,7 @@ mod tests {
         assert!(pending.is_empty());
         assert!(!ingest_file(&mut missing.conn, "codex", &missing.path, i64::MAX).unwrap());
         assert_eq!(missing.cursor(), cursor);
-        assert!(missing.request("response:first").0["unknownFields"].as_array().unwrap().contains(&json!("requested_mode_ambiguous")));
+        assert!(missing.request("response-v2:6:threadfirst").0["unknownFields"].as_array().unwrap().contains(&json!("requested_mode_ambiguous")));
     }
 
     #[test]
@@ -979,7 +1064,11 @@ mod tests {
         for (index, (path, offset, signature, saved)) in sources.iter().enumerate() {
             let result = (|| {
                 let (state, _) = saved_parser_state(saved, "codex")?;
-                upgrade_initial_mode_cursor(&mut conn, path, *offset, signature, state)
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|error| error.to_string())?;
+                let upgraded = upgrade_initial_mode_cursor(&tx, path, *offset, signature, state)?;
+                tx.commit().map_err(|error| error.to_string())?;
+                Ok::<_, String>(upgraded)
             })();
             match result {
                 Ok(Some(_)) => upgraded += 1,
@@ -990,6 +1079,65 @@ mod tests {
         let after = ambiguous(&conn);
         eprintln!("Copied ledger metadata repair: sources={}, upgraded={upgraded}, repaired={}, retained_missing={retained_missing}, failures={failures}, ambiguous={before}->{after}", sources.len(), before - after);
         assert_eq!(failures, 0, "Some copied sources could not be verified; their transactions were rolled back");
+    }
+
+    #[test]
+    fn concurrent_collector_cannot_rewind_another_collectors_committed_cursor() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WAITING: AtomicBool = AtomicBool::new(false);
+        WAITING.store(false, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("monitor-concurrent-cursor-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout.jsonl");
+        let mut rows = vec![json!({"type":"session_meta","payload":{"id":"thread","padding":"x".repeat(300)}})];
+        rows.extend((0..BATCH_LINES).map(|_| json!({"type":"response_item","payload":{}})));
+        rows.push(json!({"type":"token_usage_record","timestamp":"2026-10-15T17:00:00Z","payload":{
+            "thread_id":"thread","turn_id":"turn","response_id":"complete","usage":{
+                "input_tokens":100,"output_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0}}}));
+        let source = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+        fs::write(&path, &source).unwrap();
+        let db = root.join("ledger.sqlite");
+        let mut conn = Connection::open(&db).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        store::initialize(&conn).unwrap();
+        let mut competing = Connection::open(&db).unwrap();
+        competing.busy_handler(Some(|attempt| {
+            WAITING.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(1));
+            attempt < 10_000
+        })).unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        let worker_path = path.clone();
+        let worker = std::thread::spawn(move || ingest_file(&mut competing, "codex", &worker_path, i64::MAX));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !WAITING.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(WAITING.load(Ordering::SeqCst), "competing collector did not reach the write lock");
+        // The writer already holding the reservation commits the complete file while
+        // the second collector is waiting. The waiter must reload that checkpoint.
+        let mut state = parser::ParserState::default();
+        let catalog = crate::model_catalog::CatalogSnapshot::default();
+        for row in &rows {
+            let parsed = parser::parse_line(&mut state, "codex", &path, &row.to_string(), 0).unwrap();
+            apply(&tx, parsed, "codex", &path, i64::MAX, 0, &catalog).unwrap();
+        }
+        let offset = source.len() as u64;
+        state.file_tail_digest = Some(cursor_tail_digest(&mut Cursor::new(source.as_bytes()), offset).unwrap());
+        tx.execute("INSERT INTO monitor_files(path,tool,offset,signature,state) VALUES(?1,'codex',?2,?3,?4)",
+            params![path.to_string_lossy(), offset, format!("{:x}", md5::compute(&source.as_bytes()[..256])),
+                serde_json::to_string(&state).unwrap()]).unwrap();
+        let before_cost: String = tx.query_row("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap();
+        tx.commit().unwrap();
+        worker.join().unwrap().unwrap();
+        let stored_offset: u64 = conn.query_row("SELECT offset FROM monitor_files", [], |row| row.get(0)).unwrap();
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (1, 100, 10));
+        assert_eq!(conn.query_row::<String, _, _>("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap(), before_cost);
+        drop(conn);
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(stored_offset, offset, "a waiting collector must not overwrite a newer committed cursor");
     }
 
     #[test]
@@ -1024,6 +1172,328 @@ mod tests {
         let _default_home = crate::EnvGuard::set("DSH_HOME", "");
         let (sources, _) = roots().unwrap();
         assert_eq!(sources.iter().find(|source| source.tool == super::super::deepseek::TOOL).unwrap().path, home.join(".dsh/sessions"));
+    }
+
+    #[test]
+    fn explicit_native_response_ids_control_pairing_across_order_batches_and_replay() {
+        use std::io::Write;
+        for (reverse,different,split) in [false,true].into_iter().flat_map(|r| [false,true].into_iter()
+            .flat_map(move |d| [false,true].into_iter().map(move |s| (r,d,s)))) {
+            let root = std::env::temp_dir().join(format!("monitor-native-alias-{}-{}-{reverse}-{different}-{split}",std::process::id(),
+                std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+            let path = root.join("sessions/rollout.jsonl");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let tokens = json!({"input_tokens":100,"output_tokens":20,"cached_input_tokens":0,
+                "cache_write_input_tokens":0,"reasoning_output_tokens":0});
+            let legacy_id = if different { "other-r" } else { "native-r" };
+            let legacy = json!({"type":"event_msg","timestamp":"2026-10-15T17:01:00Z","payload":{
+                "type":"token_count","response_id":legacy_id,"info":{"total_token_usage":tokens,"last_token_usage":tokens},
+                "rate_limits":{"limit_id":"codex","plan_type":"pro","secondary":{"window_minutes":10080,"resets_at":1800000000}}}});
+            let canonical = json!({"type":"token_usage_record","timestamp":"2026-10-15T17:01:00Z","payload":{
+                "thread_id":"thread","turn_id":"turn","response_id":"native-r","response_model":"actual-model",
+                "usage":tokens,"thread_token_usage":tokens}});
+            let headers = [json!({"type":"session_meta","payload":{"id":"thread"}}),
+                json!({"type":"turn_context","payload":{"turn_id":"turn","model":"requested-model"}})];
+            let events = if reverse { [canonical,legacy] } else { [legacy,canonical] };
+            fs::write(&path, headers.iter().map(|row|format!("{row}\n")).collect::<String>()).unwrap();
+            let ledger = root.join("ledger.sqlite");
+            let mut conn = crate::ledger_db::open(&ledger).unwrap();
+            store::initialize(&conn).unwrap();
+            for event in &events {
+                let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+                writeln!(file,"{event}").unwrap();
+                drop(file);
+                if split {
+                    ingest_file(&mut conn,"codex",&path,i64::MAX).unwrap();
+                    drop(conn);
+                    conn = crate::ledger_db::open(&ledger).unwrap();
+                    store::initialize(&conn).unwrap();
+                }
+            }
+            for _ in 0..2 {
+                ingest_file(&mut conn,"codex",&path,i64::MAX).unwrap();
+                let totals = store::sum_sessions(&store::sessions(&conn,None,0).unwrap());
+                let count = if different { 2 } else { 1 };
+                assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens),(count,count*100,count*20),
+                    "reverse={reverse} different={different} split={split}");
+                let (id,model,basis):(String,String,String) = conn.query_row(
+                    "SELECT id,json_extract(usage,'$.model'),json_extract(usage,'$.usageBasis') FROM monitor_requests WHERE json_extract(usage,'$.requestId')='native-r'",[],
+                    |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+                assert_eq!(model,"actual-model");
+                assert_eq!(basis,"token_usage_record");
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_aliases WHERE tool='codex' AND id=?1",[&id],|row|row.get::<_,i64>(0)).unwrap(),0);
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence WHERE id=?1",[&id],|row|row.get::<_,i64>(0)).unwrap(),i64::from(!different));
+                let quota_id = parser::codex_request_id("thread",legacy_id);
+                assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence WHERE id=?1",[quota_id],|row|row.get::<_,i64>(0)).unwrap(),1);
+                // Re-open with a deliberately invalidated file cursor to exercise replay.
+                conn.execute("DELETE FROM monitor_files",[]).unwrap();
+                drop(conn);
+                conn = crate::ledger_db::open(&ledger).unwrap();
+                store::initialize(&conn).unwrap();
+            }
+            drop(conn);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_cumulative_only_events_cannot_replace_request_usage_or_partially_commit() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("monitor-native-cumulative-{}-{}",std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let path = root.join("sessions/known.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let tokens = |input,output| json!({"input_tokens":input,"output_tokens":output,
+            "cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0});
+        let header = json!({"type":"session_meta","payload":{"id":"thread"}});
+        let canonical = json!({"type":"token_usage_record","timestamp":"2026-10-15T17:01:00Z","payload":{
+            "thread_id":"thread","turn_id":"turn","response_id":"native-r","usage":tokens(10,2),"thread_token_usage":tokens(100,20)}});
+        let cumulative = json!({"type":"event_msg","timestamp":"2026-10-15T17:02:00Z","payload":{
+            "type":"token_count","response_id":"native-r","info":{"total_token_usage":tokens(100,20)},
+            "rate_limits":{"limit_id":"codex","plan_type":"pro","secondary":{"window_minutes":10080,"resets_at":1800000000}}}});
+        fs::write(&path,format!("{header}\n{canonical}\n")).unwrap();
+        let ledger = root.join("ledger.sqlite");
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        ingest_file(&mut conn,"codex",&path,i64::MAX).unwrap();
+        drop(conn);
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file,"{cumulative}").unwrap();drop(file);
+        ingest_file(&mut conn,"codex",&path,i64::MAX).unwrap();
+        let totals = store::sum_sessions(&store::sessions(&conn,None,0).unwrap());
+        assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens),(1,10,2));
+        assert_eq!(conn.query_row("SELECT json_extract(usage,'$.usageBasis') FROM monitor_requests",[],|row|row.get::<_,String>(0)).unwrap(),"token_usage_record");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+        let ambiguous = root.join("sessions/ambiguous.jsonl");
+        fs::write(&ambiguous,format!("{header}\n")).unwrap();
+        ingest_file(&mut conn,"codex",&ambiguous,i64::MAX).unwrap();
+        let before:(u64,String,String) = conn.query_row("SELECT offset,signature,state FROM monitor_files WHERE path=?1",[ambiguous.to_string_lossy()],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        let mut file = fs::OpenOptions::new().append(true).open(&ambiguous).unwrap();
+        writeln!(file,"{cumulative}\n{canonical}").unwrap();drop(file);
+        assert!(ingest_file(&mut conn,"codex",&ambiguous,i64::MAX).unwrap_err().contains("cumulative-only usage"));
+        let after:(u64,String,String) = conn.query_row("SELECT offset,signature,state FROM monitor_files WHERE path=?1",[ambiguous.to_string_lossy()],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(before,after,"an ambiguous source must leave the committed cursor untouched");
+        let totals = store::sum_sessions(&store::sessions(&conn,None,0).unwrap());
+        assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens),(1,10,2));
+        let sibling = root.join("sessions/sibling.jsonl");
+        let mut other=canonical;
+        other["payload"]["response_id"]=json!("sibling-r");
+        fs::write(&sibling,format!("{header}\n{other}\n")).unwrap();
+        ingest_file(&mut conn,"codex",&sibling,i64::MAX).unwrap();
+        let totals = store::sum_sessions(&store::sessions(&conn,None,0).unwrap());
+        assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens),(2,20,4));
+        drop(conn);fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn response_namespace_upgrade_recovers_colliding_threads_from_sources_and_survives_restart() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("monitor-response-namespace-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let ledger = root.join("ledger.sqlite");
+        let event = |thread: &str, input, output, minute| json!({"type":"token_usage_record",
+            "timestamp":format!("2026-10-15T17:{minute:02}:00Z"),"payload":{
+                "thread_id":thread,"turn_id":format!("turn-{thread}"),"response_id":"local-response-id",
+                "usage":{"input_tokens":input,"output_tokens":output,"cached_input_tokens":0,
+                    "cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        let mut paths = Vec::new();
+        for (thread, input, output) in [("one",10,2),("two",20,4)] {
+            let path = root.join(format!("{thread}.jsonl"));
+            let rows = [json!({"type":"session_meta","timestamp":"2026-10-15T17:00:00Z","payload":{"id":thread}}),
+                json!({"type":"turn_context","payload":{"turn_id":format!("turn-{thread}"),"model":"gpt-6.1-sol"}}),
+                event(thread,input,output,1)];
+            let source = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+            fs::write(&path, &source).unwrap();
+            let mut state = parser::ParserState::default();
+            let mut usage = None;
+            for row in rows {
+                usage = parser::parse_line(&mut state, "codex", &path, &row.to_string(), 0).unwrap().usage.into_iter().next().or(usage);
+            }
+            // Simulate the previous release: only the second thread survived
+            // its global response-ID overwrite; both files were fully consumed.
+            if thread == "two" {
+                let mut old = usage.unwrap();
+                old.id = "response:local-response-id".into();
+                let tx = conn.transaction().unwrap();
+                store::save_usage_with_catalog(&tx, &old, i64::MAX, 0, &crate::model_catalog::CatalogSnapshot::default()).unwrap();
+                tx.commit().unwrap();
+            }
+            let old_cursor = serde_json::to_string(&state).unwrap().replace(
+                &parser::codex_request_id(thread,"local-response-id"), "response:local-response-id");
+            conn.execute("INSERT INTO monitor_files VALUES(?1,'codex',?2,?3,?4)", params![path.to_string_lossy(),source.len(),
+                format!("{:x}",md5::compute(&source.as_bytes()[..source.len().min(256)])),old_cursor]).unwrap();
+            paths.push(path);
+        }
+        conn.execute("DELETE FROM monitor_state WHERE key='codex_response_namespace_v2'", []).unwrap();
+        drop(conn);
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+        for path in &paths { ingest_file(&mut conn, "codex", path, i64::MAX).unwrap(); }
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens), (2,30,6));
+        for thread in ["one","two"] {
+            let id = parser::codex_request_id(thread,"local-response-id");
+            let (session, native): (String,String) = conn.query_row("SELECT session_key,json_extract(usage,'$.requestId') FROM monitor_requests WHERE id=?1", [&id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(session, format!("codex:{thread}"));
+            assert_eq!(native, "local-response-id");
+        }
+        drop(conn);
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        for path in &paths { ingest_file(&mut conn, "codex", path, i64::MAX).unwrap(); }
+        let mut file = fs::OpenOptions::new().append(true).open(&paths[0]).unwrap();
+        writeln!(file,"{}",event("one",10,5,2)).unwrap();
+        drop(file);
+        ingest_file(&mut conn,"codex",&paths[0],i64::MAX).unwrap();
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens), (2,30,9));
+        assert_eq!(conn.query_row("SELECT json_extract(usage,'$.outputTokens') FROM monitor_requests WHERE id=?1", [parser::codex_request_id("two","local-response-id")], |row| row.get::<_,i64>(0)).unwrap(), 4);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_state WHERE key LIKE 'codex_identity_replay_v2:%'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn response_namespace_upgrade_recovers_only_committed_archives_and_preserves_cursors() {
+        let root = std::env::temp_dir().join(format!("monitor-response-archive-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let ledger = root.join("ledger.sqlite");
+        let event = |thread: &str, input, output, minute| json!({"type":"token_usage_record",
+            "timestamp":format!("2026-10-15T17:{minute:02}:00Z"),"payload":{
+                "thread_id":thread,"turn_id":format!("turn-{thread}"),"response_id":"local-response-id",
+                "usage":{"input_tokens":input,"output_tokens":output,"cached_input_tokens":0,
+                    "cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        let mut paths = Vec::new();
+        for (thread, input, output) in [("one",10,2),("two",20,4)] {
+            let path = root.join(format!("{thread}.jsonl"));
+            let rows = [json!({"type":"session_meta","timestamp":"2026-10-15T17:00:00Z","payload":{"id":thread}}),
+                json!({"type":"turn_context","payload":{"turn_id":format!("turn-{thread}"),"model":"gpt-6.1-sol"}}),
+                event(thread,input,output,1)];
+            let source = rows.iter().map(|row| format!("{row}\n")).collect::<String>();
+            fs::write(mode_archive_path(&path), zstd::stream::encode_all(
+                format!("{source}{{not_committed}}\n").as_bytes(), 1).unwrap()).unwrap();
+            let mut state = parser::ParserState::default();
+            let mut usage = None;
+            for row in rows {
+                usage = parser::parse_line(&mut state, "codex", &path, &row.to_string(), 0).unwrap().usage.into_iter().next().or(usage);
+            }
+            // Simulate the previous release: only the second thread survived
+            // its global response-ID overwrite; both files were fully consumed.
+            if thread == "two" {
+                let mut old = usage.unwrap();
+                old.id = "response:local-response-id".into();
+                let tx = conn.transaction().unwrap();
+                store::save_usage_with_catalog(&tx, &old, i64::MAX, 0, &crate::model_catalog::CatalogSnapshot::default()).unwrap();
+                tx.commit().unwrap();
+            }
+            let old_cursor = serde_json::to_string(&state).unwrap().replace(
+                &parser::codex_request_id(thread,"local-response-id"), "response:local-response-id");
+            conn.execute("INSERT INTO monitor_files VALUES(?1,'codex',?2,?3,?4)", params![path.to_string_lossy(),source.len(),
+                format!("{:x}",md5::compute(&source.as_bytes()[..source.len().min(256)])),old_cursor]).unwrap();
+            paths.push(path);
+        }
+        conn.execute("UPDATE monitor_files SET state=json_set(state,'$.cursorExtension',json_object('keep',json('true')))", []).unwrap();
+        conn.execute("DELETE FROM monitor_state WHERE key='codex_response_namespace_v2'", []).unwrap();
+        drop(conn);
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+        let saved_cursors: Vec<_> = paths.iter().map(|path| conn.query_row(
+            "SELECT offset,signature,state FROM monitor_files WHERE path=?1", [path.to_string_lossy()],
+            |row| Ok((row.get::<_,u64>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?))).unwrap()).collect();
+        let (mut pending, mut queued) = (VecDeque::new(), HashSet::new());
+        enqueue_legacy_mode_archives(&conn, &mut pending, &mut queued).unwrap();
+        assert_eq!(pending.len(), 2, "modern cursors still need identity archive recovery");
+        while let Some((tool,path)) = pending.pop_front() {
+            ingest_file(&mut conn, &tool, &path, 0).unwrap();
+        }
+        for (path, before) in paths.iter().zip(&saved_cursors) {
+            let after = conn.query_row("SELECT offset,signature,state FROM monitor_files WHERE path=?1", [path.to_string_lossy()],
+                |row| Ok((row.get::<_,u64>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?))).unwrap();
+            assert_eq!(&after, before, "committed cursor and its extension must be preserved");
+            assert_eq!(serde_json::from_str::<Value>(&after.2).unwrap()["cursorExtension"]["keep"], true);
+        }
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens), (2,30,6));
+        for thread in ["one","two"] {
+            let id = parser::codex_request_id(thread,"local-response-id");
+            let (session, native): (String,String) = conn.query_row("SELECT session_key,json_extract(usage,'$.requestId') FROM monitor_requests WHERE id=?1", [&id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(session, format!("codex:{thread}"));
+            assert_eq!(native, "local-response-id");
+        }
+        drop(conn);
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        for path in &paths { ingest_file(&mut conn, "codex", path, i64::MAX).unwrap(); }
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count,totals.input_tokens,totals.output_tokens), (2,30,6));
+        assert!(paths.iter().all(|path| !path.exists()));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_state WHERE key LIKE 'codex_identity_replay_v2:%'", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rewritten_file_with_the_same_header_and_size_replays_new_requests() {
+        let root = std::env::temp_dir().join(format!("monitor-cursor-rewrite-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("rollout.jsonl");
+        let ledger = root.join("ledger.sqlite");
+        let header = json!({"type":"session_meta","timestamp":"2026-10-26T07:50:00Z",
+            "payload":{"id":"thread","padding":"x".repeat(300)}});
+        let usage = |id: &str| json!({"type":"event_msg","timestamp":"2026-10-26T07:50:00Z","payload":{
+            "type":"token_usage_record","thread_id":"thread","turn_id":"turn","response_id":id,
+            "usage":{"input_tokens":1000,"cached_input_tokens":100,"output_tokens":50,
+                "cache_write_input_tokens":0,"reasoning_output_tokens":0}}});
+        let original = format!("{header}\n{}\n", usage("old"));
+        let rewritten = format!("{header}\n{}\n", usage("new"));
+        assert_eq!(original.len(), rewritten.len());
+        assert_eq!(&original.as_bytes()[..256], &rewritten.as_bytes()[..256]);
+        fs::write(&path, original).unwrap();
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        ingest_file(&mut conn, "codex", &path, i64::MAX).unwrap();
+        drop(conn);
+        fs::write(&path, rewritten).unwrap();
+        let mut conn = crate::ledger_db::open(&ledger).unwrap();
+        store::initialize(&conn).unwrap();
+        ingest_file(&mut conn, "codex", &path, i64::MAX).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM monitor_requests WHERE id='response-v2:6:threadnew'", [], |row| row.get(0)).unwrap();
+        // Re-reading the unchanged replacement is idempotent and retains the old history.
+        ingest_file(&mut conn, "codex", &path, i64::MAX).unwrap();
+        let requests: i64 = conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |row| row.get(0)).unwrap();
+        drop(conn);
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(requests, 2);
+    }
+
+    #[test]
+    fn empty_client_home_overrides_do_not_collect_from_the_working_directory() {
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("ledger-empty-client-home-{}", std::process::id()));
+        let _home = crate::EnvGuard::set("USERPROFILE", &home);
+        let _codex = crate::EnvGuard::set("CODEX_HOME", "");
+        let _claude = crate::EnvGuard::set("CLAUDE_CONFIG_DIR", "");
+        let (sources, _) = roots().unwrap();
+        let paths = |tool: &str| sources.iter().filter(|source| source.tool == tool)
+            .map(|source| source.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths("codex"), [home.join(".codex/sessions"), home.join(".codex/archived_sessions")]);
+        assert_eq!(paths("claude"), [home.join(".claude/projects")]);
     }
 
     #[test]
@@ -1119,6 +1589,11 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
                 Ok(n) if n>0 => if let Err(error)=super::billing::seed_proxy_requests(&mut conn){eprintln!("API billing evidence unavailable: {error}");},
                 Err(error) => eprintln!("Request account evidence unavailable: {error}"),
                 _ => {},
+            }
+            // JSONL can arrive after its proxy metadata. Reconcile dirty usage
+            // even when this refresh imported no new proxy rows (or the source is offline).
+            if let Err(error) = super::billing::reconcile_proxy_requests(&mut conn) {
+                eprintln!("API billing evidence reconciliation unavailable: {error}");
             }
             if let Err(error) = super::accounts::capture_subscription_dates(&conn) {
                 eprintln!("Subscription date cache unavailable: {error}");

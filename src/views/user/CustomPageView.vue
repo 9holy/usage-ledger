@@ -107,6 +107,8 @@
           <iframe
             :src="embeddedUrl"
             class="custom-embed-frame"
+            :sandbox="getEmbeddedSandbox(embeddedUrl)"
+            referrerpolicy="no-referrer"
             allowfullscreen
           ></iframe>
         </div>
@@ -124,8 +126,9 @@ import { useAuthStore } from '@/stores/auth'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
-import { buildApiUrl } from '@/api/client'
-import { buildEmbeddedUrl, detectTheme } from '@/utils/embedded-url'
+import { buildUpstreamApiUrl } from '@/api/url'
+import { fetchApi } from '@/api/fetch'
+import { buildEmbeddedUrl, detectTheme, getEmbeddedSandbox } from '@/utils/embedded-url'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 
@@ -218,7 +221,7 @@ function buildPageImageUrl(slug: string, src: string): string {
     .filter((part) => part && part !== '.')
     .map((part) => encodeURIComponent(part))
     .join('/')
-  return buildApiUrl(`/pages/${encodeURIComponent(slug)}/images/${encodedPath}${suffix}`)
+  return buildUpstreamApiUrl(`/pages/${encodeURIComponent(slug)}/images/${encodedPath}${suffix}`)
 }
 
 async function fetchAndRenderMarkdown(slug: string) {
@@ -226,7 +229,7 @@ async function fetchAndRenderMarkdown(slug: string) {
   tocItems.value = []
   activeHeadingId.value = ''
   try {
-    const resp = await fetch(buildApiUrl(`/pages/${encodeURIComponent(slug)}`), {
+    const resp = await fetchApi(`/pages/${encodeURIComponent(slug)}`, {
       headers: authStore.token ? { Authorization: `Bearer ${authStore.token}` } : {},
     })
     if (!resp.ok) {
@@ -241,10 +244,7 @@ async function fetchAndRenderMarkdown(slug: string) {
     )
 
     const html = marked.parse(raw) as string
-    const sanitized = DOMPurify.sanitize(html, {
-      ADD_TAGS: ['iframe'],
-      ADD_ATTR: ['allowfullscreen', 'frameborder', 'src'],
-    })
+    const sanitized = DOMPurify.sanitize(html)
 
     // Inject IDs into headings and build TOC
     const toc: TocItem[] = []

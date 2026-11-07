@@ -4,6 +4,20 @@ import { describe, expect, it } from 'vitest'
 import UsagePricingCoveragePanel from '../UsagePricingCoveragePanel.vue'
 import UsageCoverageAssembly from '../UsageCoverageAssembly.vue'
 describe('pricing coverage panel', () => {
+  it('labels coverage counts as records when the scope contains unsplit cumulative usage', () => {
+    const wrapper = mount(UsagePricingCoveragePanel, { props: {
+      rows: [
+        { state: 'known', label: '可估算', count: 2, percent: 50, color: '#111' },
+        { state: 'unknown', label: '未识别', count: 1, percent: 25, color: '#222' },
+        { state: 'missing', label: '缺价格', count: 1, percent: 25, color: '#333' },
+      ], total: 4, recordCounts: true, available: 50, loaded: true, period: '全部记录', reasons: [], unquoted: 2,
+    } })
+    const assembly = wrapper.getComponent(UsageCoverageAssembly)
+    expect(assembly.text()).toContain('用量记录')
+    expect(assembly.text()).not.toContain('次请求')
+    expect(assembly.find('[role="img"]').attributes('aria-label')).toContain('4 条用量记录')
+    wrapper.unmount()
+  })
   it('keeps current eligibility separate from historical reasons and preserves filters', async () => {
     const wrapper = mount(UsagePricingCoveragePanel, {
       props: {

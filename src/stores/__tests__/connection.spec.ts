@@ -185,8 +185,7 @@ describe('connection store — 2FA 流程', () => {
     if (change === 'removed') store.removeConnection(id)
     else store.clearActiveOnly()
     const result = await store.complete2FA('123456')
-    expect(result.requiresLogin).toBe(true)
-    expect(result.error).toContain(change === 'removed' ? '不存在' : '已切换')
+    expect(result).toEqual({ ok: false, requiresLogin: true, error: '无待完成的 2FA 流程' })
     expect(authStore.login2FA).not.toHaveBeenCalled()
   })
 
@@ -212,6 +211,19 @@ describe('connection store — 2FA 流程', () => {
     expect(conn?.apiKey).toBe('direct-jwt')
     expect(conn?.authMode).toBe('login')
     expect(store.connected).toBe(true)
+  })
+
+  it.each([true, false])('honors remember-password=%s after the second authentication factor', async (rememberPassword) => {
+    const store = await loadStore()
+    const id = store.addConnection({ name: 's2', type: 'sub2api', baseUrl: 'https://s2.example.com', apiKey: '', authMode: 'login', email: 'old@example.test', password: 'old-password' })
+    authAPI.login.mockResolvedValueOnce(make2FAResponse('temp-remember'))
+    await store.connectWithLogin(id, 'new@example.test', 'new-password', rememberPassword)
+    authStore.login2FA.mockImplementationOnce(async () => { localStorage.setItem('auth_token', 'final-jwt') })
+    expect((await store.complete2FA('123456')).ok).toBe(true)
+    expect(store.active?.email).toBe('new@example.test')
+    expect(store.active?.password).toBe(rememberPassword ? 'new-password' : undefined)
+    const saved = JSON.parse(localStorage.getItem('2api-console.connections')!)[0]
+    expect(saved.password).toBe(rememberPassword ? btoa(encodeURIComponent('new-password')) : undefined)
   })
 })
 

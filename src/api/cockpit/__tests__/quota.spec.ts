@@ -32,8 +32,8 @@ import {
 it('switches quota provenance and age labels without changing unknowns, timestamps or measured zero', () => {
   i18n.global.locale.value = 'en'
   expect(quotaSourceLabel('live')).toBe('Live')
-  expect(quotaWindowLabel('weekly')).toBe('Weekly window')
-  expect(quotaStampLabel(snapshot({ updatedAtMs: null }))).toContain('source does not provide its save time')
+  expect(quotaWindowLabel('weekly')).toBe('Weekly quota')
+  expect(quotaStampLabel(snapshot({ updatedAtMs: null }))).toContain('source does not provide a saved time')
   expect(formatAgeMs(12 * 60_000)).toBe('12 minutes ago')
   expect(quotaPercentLabel(snapshot({ percent: null }))).toBe('Usage unavailable')
   expect(quotaPercentLabel(snapshot({ percent: 0 }))).toBe('0.0%')
@@ -99,7 +99,7 @@ describe('quotaPercentLabel · 不可得绝不显示 0%', () => {
 describe('quotaStampLabel · 必须标注来源类型与时间戳（P0-21 验收②）', () => {
   it('落盘快照 → 含"落盘快照"与 MM-DD HH:mm', () => {
     const label = quotaStampLabel(snapshot({ source: 'snapshot', updatedAtMs: new Date(2026, 8, 11, 3, 20).getTime() }))
-    expect(label).toContain('落盘快照')
+    expect(label).toContain('已保存的数据')
     expect(label).toContain('09-11 03:20')
   })
 
@@ -118,7 +118,7 @@ describe('quotaStampLabel · 必须标注来源类型与时间戳（P0-21 验收
     const label = quotaStampLabel(snapshot({ updatedAtMs: null, fetchedAtMs: new Date(2026, 8, 11, 3, 20).getTime() }))
     expect(label).toContain('读取于')
     expect(label).toContain('09-11 03:20')
-    expect(label).not.toContain('落盘快照')
+    expect(label).not.toContain('已保存的数据')
     expect(label).not.toContain('可能过期')
     expect(label).not.toContain('NaN')
   })
@@ -127,14 +127,14 @@ describe('quotaStampLabel · 必须标注来源类型与时间戳（P0-21 验收
 describe('标签映射', () => {
   it('来源类型', () => {
     expect(quotaSourceLabel('live')).toBe('实时')
-    expect(quotaSourceLabel('snapshot')).toBe('落盘快照')
+    expect(quotaSourceLabel('snapshot')).toBe('已保存的数据')
   })
 
   it('窗口类型', () => {
-    expect(quotaWindowLabel('fiveHour')).toBe('5 小时窗口')
-    expect(quotaWindowLabel('weekly')).toBe('周窗口')
-    expect(quotaWindowLabel('monthly')).toBe('月窗口')
-    expect(quotaWindowLabel('unknown')).toBe('窗口未知')
+    expect(quotaWindowLabel('fiveHour')).toBe('5 小时额度')
+    expect(quotaWindowLabel('weekly')).toBe('周额度')
+    expect(quotaWindowLabel('monthly')).toBe('月额度')
+    expect(quotaWindowLabel('unknown')).toBe('周期未知')
   })
 })
 
@@ -254,7 +254,7 @@ describe('quotaStampLabel · 落盘时刻未知时改称「读取于」（2026-0
     // 数据的落盘时刻我们不知道 → 只能说"读于"，不能说"落盘于"。
     const label = quotaStampLabel(snapshot({ updatedAtMs: null, fetchedAtMs: READ_AT, stale: false }))
     expect(label).toContain('读取于')
-    expect(label).not.toContain('落盘快照')
+    expect(label).not.toContain('已保存的数据')
     expect(label).not.toContain('可能过期')
   })
 
@@ -266,7 +266,7 @@ describe('quotaStampLabel · 落盘时刻未知时改称「读取于」（2026-0
 
   it('updatedAtMs 有值且 stale=false → 文案仍是"落盘快照·…"，无"可能过期"（既有行为不变）', () => {
     const label = quotaStampLabel(snapshot({ updatedAtMs: READ_AT, stale: false }))
-    expect(label).toContain('落盘快照')
+    expect(label).toContain('已保存的数据')
     expect(label).toContain('09-11 03:20')
     expect(label).not.toContain('可能过期')
     expect(label).not.toContain('读取于')
@@ -274,7 +274,7 @@ describe('quotaStampLabel · 落盘时刻未知时改称「读取于」（2026-0
 
   it('updatedAtMs 有值且 stale=true → 仍追加"（可能过期）"（既有行为不变）', () => {
     const label = quotaStampLabel(snapshot({ updatedAtMs: READ_AT, stale: true }))
-    expect(label).toContain('落盘快照·09-11 03:20')
+    expect(label).toContain('已保存的数据·09-11 03:20')
     expect(label).toContain('可能过期')
   })
 

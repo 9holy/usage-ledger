@@ -1,3 +1,4 @@
+import './costDataI18n'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
@@ -336,12 +337,11 @@ describe('useCostCenterData · 模型区独立窗口回退(源码扫描)', () =>
   })
 
   it('★ 模型区来源标记必须在**两条**装载路径都写(否则分离后判定悬空)', () => {
-    // ★ 2026-09-25:写法从 `rlModels.length > 0` 改为「链路可用」(同族回退病根),
-    //   本守卫钉的**语义**不变:两条装载路径都必须设置这个标记。
-    //   ⇒ 断言"非 false 的赋值"出现 2 次,不再钉死某个具体字面量。
-    const hits = store.match(/modelCostFromRequestLog\.value = (?!false)[^\n]+/g) ?? []
-    // ① loadFromCockpit(主窗口) ② loadCockpitModelWindow(独立窗口)
-    expect(hits.length, '主路径 + 独立窗口路径各写一次').toBe(2)
+    // 两条装载路径按各自请求记录的可用性判来源；失败回滚也会恢复此标记，
+    // 不能用全文件赋值总数限制合法的恢复路径。
+    expect(store, '主路径按链路可用性设置来源').toContain('modelCostFromRequestLog.value = rlAvailable')
+    expect(store, '独立窗口按自己的链路设置来源').toContain('modelCostFromRequestLog.value = !!requestLog?.available')
+    expect(store, '失败恢复来源时必须与保留的模型数据一致').toContain('modelCostFromRequestLog.value = retainedModelWindow.fromRequestLog')
     // ★ 反向:两处都**不得**再用「窗口内有没有模型行」来判来源 ——
     //   那会把「该窗口 0 行」当成「该回退日历快照」,模型表就会画出 daily 快照的模型行。
     const legacy = store.match(/modelCostFromRequestLog\.value = rlModels\.length/g) ?? []

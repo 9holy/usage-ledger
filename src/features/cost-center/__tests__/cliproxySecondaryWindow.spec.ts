@@ -23,6 +23,8 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { authIndexToAccountId, cliproxyEventsToAccountUsage } from '../cliproxyAdapter'
+import { quotaWindowState } from '../quotaWindowState'
+import { formatUtilization } from '../honestValues'
 import type { CliproxyUsageEvent } from '@/api/cliproxy/cpaData'
 
 /** 固定的 7d 重置时刻(unix 秒),避免用 Date.now() 让断言漂移。 */
@@ -223,17 +225,21 @@ describe('CostCenterView · 7d 窗口无数据时的显式占位', () => {
   // 也不能落 0%。这里用源码断言钉住 —— 与 uiShellContract / cliproxyWordingContract 同款做法。
   const view = readFileSync(resolve(process.cwd(), 'src/views/admin/CostCenterView.vue'), 'utf8')
 
-  it('7d 有值渲染百分比;seven_day 为 null 且 5h 存在时渲染「无数据」占位', () => {
-    expect(view).toContain('v-if="row.usage.seven_day"')
-    expect(view).toContain('v-else-if="row.usage.five_hour" data-usage-window="7d-unavailable"')
-    expect(view).toContain('>无数据</strong>')
+  it('5h 存在时仍创建独立的7d格，并标注来源未提供该周期', () => {
+    expect(view).toContain('if (usage.five_hour || usage.seven_day || usage.seven_day_sonnet)')
+    expect(view).toContain("periods.push({ key: '5h', label: '5h', reading: usage.five_hour }, { key: '7d', label: '7d', reading: usage.seven_day })")
+    expect(view).toContain('provided: !!period.reading, state: quotaWindowState(period.reading, now.value.getTime())')
+    expect(view).toContain('v-for="quota in row.quotaWindows"')
+    expect(view).toContain("!quota.provided ? t('costCenter.integration.quotaPeriodNotReported')")
   })
 
-  it('占位分支不得出现 0% 之类的假数值', () => {
-    const placeholder = view.split('data-usage-window="7d-unavailable"')[1]?.split('</span>')[0] ?? ''
+  it('缺失窗口渲染未知符号，真实零利用率仍显示0%', () => {
+    const placeholder = view.split(':data-usage-window="quota.key"')[1]?.split('</span>')[0] ?? ''
     expect(placeholder).not.toBe('')
-    expect(placeholder).toContain('无数据')
+    expect(placeholder).toContain('formatUtilization(quota.state.utilization)')
+    expect(placeholder).toContain('costCenter.integration.quotaPeriodNotReported')
     expect(placeholder).not.toContain('0%')
-    expect(placeholder).not.toContain('formatUtilization')
+    expect(formatUtilization(quotaWindowState(null).utilization)).toBe('—')
+    expect(formatUtilization(quotaWindowState({ utilization: 0 }).utilization)).toBe('0%')
   })
 })

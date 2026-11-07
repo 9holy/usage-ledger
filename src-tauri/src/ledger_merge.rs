@@ -264,19 +264,19 @@ fn scan(
                 day: row.get::<_, i64>(0)?,
                 model_id: row.get::<_, String>(1)?,
                 source_name: row.get::<_, String>(2)?,
-                account: row.get::<_, String>(3).unwrap_or_default(),
-                key: row.get::<_, String>(4).unwrap_or_default(),
+                account: row.get::<_, String>(3)?,
+                key: row.get::<_, String>(4)?,
                 tokens: TierVector {
-                    std_normal_input: row.get::<_, i64>(5).unwrap_or(0),
-                    std_cached: row.get::<_, i64>(6).unwrap_or(0),
-                    std_output: row.get::<_, i64>(7).unwrap_or(0),
-                    long_normal_input: row.get::<_, i64>(8).unwrap_or(0),
-                    long_cached: row.get::<_, i64>(9).unwrap_or(0),
-                    long_output: row.get::<_, i64>(10).unwrap_or(0),
+                    std_normal_input: row.get::<_, i64>(5)?,
+                    std_cached: row.get::<_, i64>(6)?,
+                    std_output: row.get::<_, i64>(7)?,
+                    long_normal_input: row.get::<_, i64>(8)?,
+                    long_cached: row.get::<_, i64>(9)?,
+                    long_output: row.get::<_, i64>(10)?,
                 },
-                requests: row.get::<_, i64>(11).unwrap_or(0),
-                success: row.get::<_, i64>(12).unwrap_or(0),
-                error: row.get::<_, i64>(13).unwrap_or(0),
+                requests: row.get::<_, i64>(11)?,
+                success: row.get::<_, i64>(12)?,
+                error: row.get::<_, i64>(13)?,
             })
         })
         .map_err(|e| format!("合并查询失败: {e}"))?
@@ -310,11 +310,18 @@ pub fn merged_usage(
     conn: &Connection,
     window_days: Option<i64>,
 ) -> Result<MergedUsageResult, String> {
+    if conn.is_autocommit() {
+        let transaction = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        let result = merged_usage(&transaction, window_days)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(result);
+    }
+
     // 窗口起点 = 现在 − N 天（按 UTC 日对齐，与天桶同口径；与 ledger_query::reconcile 同式）
     let end_ms = ledger_db::now_ms();
-    let start_ms = window_days
-        .filter(|d| *d > 0)
-        .map(|d| (end_ms / DAY_MS) * DAY_MS - (d - 1) * DAY_MS);
+    let start_ms = ledger_db::window_start_ms(end_ms, window_days, DAY_MS)?;
+    ledger_db::validate_rollup_timestamps(conn)?;
+    ledger_db::validate_rollup_counts(conn, start_ms, None)?;
 
     let rows = scan(conn, start_ms, None)?;
     if rows.is_empty() {
@@ -1011,4 +1018,32 @@ mod tests {
         assert!(!m.cells.is_empty(), "真实两源应有合并明细");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn review3_merge_rejects_corrupt_or_inexact_counts() {
+        let dir = temp_dir("review3-merge-invalid");
+        let conn = ledger_conn(&dir);
+        insert_rollup(&conn, day(1), "codex_logs", "m", std_vec(100, 0, 0), 1);
+        for value in ["0.5", "'invalid'", "-1", "9007199254740992"] {
+            conn.execute(&format!("UPDATE usage_rollup SET std_normal_input={value}"), []).unwrap();
+            assert!(merged_usage(&conn, None).is_err(), "must reject malformed token count {value}");
+        }
+        conn.execute("UPDATE usage_rollup SET std_normal_input=100", []).unwrap();
+        assert_eq!(cell_tokens_sum(&merged_usage(&conn, None).unwrap().cells), 100);
+        conn.execute("UPDATE usage_rollup SET std_normal_input=4503599627370496", []).unwrap();
+        insert_rollup(&conn, day(2), "codex_logs", "m", std_vec(4_503_599_627_370_496, 0, 0), 1);
+        assert!(merged_usage(&conn, None).is_err(), "cross-day totals must also remain exact");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_merge_rejects_unrepresentable_time_windows() {
+        let dir = temp_dir("review3-merge-window");
+        let conn = ledger_conn(&dir);
+        assert!(merged_usage(&conn, Some(i64::MAX)).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

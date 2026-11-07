@@ -66,7 +66,7 @@ const attributionRows = computed(() => {
   for (const row of modelRows.value) {
     let group = groups.get(row.model)
     if (!group) {
-      group = { model: row.model, tools: new Set(), hasWindow: false, window: { seconds: seconds.value, observedOutputTokens: 0, outputTokensPerSecond: 0, coveredMs: seconds.value * 1000, complete: true, sourceComplete: true } }
+      group = { model: row.model, tools: new Set(), hasWindow: false, window: { seconds: seconds.value, observedOutputTokens: 0, outputTokensPerSecond: 0, coveredMs: seconds.value * 1000, complete: true, sourceComplete: true, outputComplete: true } }
       groups.set(row.model, group)
     }
     const window = windowOf(row.windows)
@@ -76,6 +76,7 @@ const attributionRows = computed(() => {
     group.window.outputTokensPerSecond = group.window.outputTokensPerSecond == null || window?.outputTokensPerSecond == null ? null : group.window.outputTokensPerSecond + window.outputTokensPerSecond
     group.window.coveredMs = Math.min(group.window.coveredMs, window?.coveredMs ?? 0)
     group.window.complete &&= window?.complete === true
+    group.window.outputComplete = group.window.outputComplete !== false && window?.outputComplete !== false
     group.window.sourceComplete = group.window.sourceComplete !== false && window != null && window.sourceComplete !== false
   }
   return [...groups.values()].map(group => ({ model: group.model, tool: group.tools.size === 1 ? [...group.tools][0] : null, window: group.hasWindow ? group.window : undefined }))

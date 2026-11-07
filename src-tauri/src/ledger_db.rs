@@ -35,6 +35,8 @@
 //! | v1–v7 | 一期 7 张表(单源) |
 //! | v8–v12 | 二期多源化:`source_name` 进 `usage_rollup` / `rollup_bucket_state` / `bucket_latency` 三个 PK,`ingest_state` 主键改为 `source_name`,新增 `price_book_version` |
 //! | v13 | 显式录入的本地财务事件,不从成本配置生成采购历史 |
+//! | v14–v15 | 财务事件关联和模型目录缓存 |
+//! | v16 | 复合水位边界的已计入请求键、未封桶源键及归属快照,防同秒漏记与来源清理抹账 |
 //!
 //! 建表常量(`SQL_CREATE_*`)本身写成 **v8 终态**,所以空库与 v7 老库走完
 //! `MIGRATIONS` 后 `sqlite_master` 完全一致(由单测守住)。
@@ -42,7 +44,7 @@
 
 #![allow(dead_code)] // T02/T03 尚未接入,先容忍未使用的导出项;接入后请删除本行
 
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -76,7 +78,7 @@ pub const FALLBACK_DIR_NAME: &str = "2api-console";
 /// (由 `latest_constant_matches_last_migration` 单测守住)。
 ///
 /// v1–v7 = 一期 7 张表;v8–v12 = 二期多源化(见 `docs/architecture/ledger-schema-v8.sql`)。
-pub const SCHEMA_VERSION_LATEST: u32 = 15;
+pub const SCHEMA_VERSION_LATEST: u32 = 16;
 
 /// 一期唯一已知源:cockpit 单请求用量库 `codex_local_access_logs.sqlite`。
 ///
@@ -229,7 +231,10 @@ CREATE TABLE IF NOT EXISTS identity_override (
 /// 5. 桶级摄取状态:幂等的唯一依据(v10:★ `source_name` 进 PK)。
 ///
 /// `max_source_id` = 该桶已计入的源库最大 id;
-/// `sealed=0` → 整桶重扫后覆盖(replace);`sealed=1` → 只累加 id > max_source_id(add)。
+/// `sealed=0` → 完整源快照重扫后覆盖(replace),源行缺失则提前封存;
+/// `sealed=1` → 只累加数值水位之后或同值复合边界的新请求(add)。
+/// v16 增加 `max_source_keys` 与 `provisional_snapshot`,历史 DDL 下方保持原样,
+/// 两列由末尾的增量迁移添加。
 ///
 /// ⚠️ **漏了 `source_name` 就会两源共用一个 `max_source_id`** —— session 源的 `rowid`
 /// 与 logs 源的 `id` 混为一谈,幂等直接崩坏(二期难点 N2)。`sealed` 按
@@ -513,13 +518,15 @@ pub const MIGRATIONS: &[(u32, &str, &str)] = &[
     (13, "显式录入的本地财务事件", crate::finance_ledger::SCHEMA_SQL),
     (14, "采购批次与财务事件关联", crate::finance_ledger::MIGRATION_V14),
     (15, "models.dev 本地目录缓存", crate::model_catalog::MIGRATION_V15),
+    (16, "复合水位边界与未封桶来源快照", "ALTER TABLE rollup_bucket_state ADD COLUMN max_source_keys TEXT;
+        ALTER TABLE rollup_bucket_state ADD COLUMN provisional_snapshot TEXT;"),
 ];
 
 /// 开库后立即生效的 PRAGMA(与 `docs/architecture/ledger-schema.sql` 头部一致)。
 pub const SQL_PRAGMAS: &str = "
+PRAGMA busy_timeout = 5000;
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = NORMAL;
-PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = ON;
 ";
 
@@ -610,6 +617,69 @@ pub fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+
+/// Largest count JavaScript can represent exactly. All token/count responses
+/// must either stay within this range or return a visible error.
+pub(crate) const MAX_EXACT_COUNT: i64 = 9_007_199_254_740_991;
+
+/// Check raw SQLite values before SQL arithmetic can coerce malformed fields
+/// or promote overflowing INTEGER sums to REAL. Callers keep this check and
+/// their projections in the same read/write transaction.
+pub(crate) fn validate_rollup_counts(
+    conn: &Connection,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+) -> Result<(), String> {
+    const COLUMNS: [&str; 12] = [
+        "std_normal_input", "std_cached", "std_output",
+        "long_normal_input", "long_cached", "long_output",
+        "requests", "success", "error", "rate_limited", "upstream_error", "client_canceled",
+    ];
+    let invalid = COLUMNS.iter().map(|column|
+        format!("typeof({column})!='integer' OR {column}<0")
+    ).collect::<Vec<_>>().join(" OR ");
+    let sums = COLUMNS.iter().map(|column| format!("COALESCE(SUM({column}),0)"))
+        .collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT COALESCE(SUM(CASE WHEN {invalid} THEN 1 ELSE 0 END),0),{sums}
+        FROM usage_rollup WHERE hour_bucket>=?1 AND hour_bucket<=?2");
+    let (invalid_rows, sums) = conn.query_row(
+        &sql, rusqlite::params![start_ms.unwrap_or(i64::MIN), end_ms.unwrap_or(i64::MAX)],
+        |row| Ok((row.get::<_, i64>(0)?,
+            (1..=COLUMNS.len()).map(|index| row.get::<_, i64>(index)).collect::<rusqlite::Result<Vec<_>>>()?)),
+    ).map_err(|error| format!("账本数值校验失败: {error}"))?;
+    if invalid_rows > 0 || sums.iter().any(|value| !(0..=MAX_EXACT_COUNT).contains(value)) {
+        return Err("账本包含负数、错误类型或超出精确范围的计数，未发布不准确统计".to_string());
+    }
+    let tokens = sums[..6].iter().try_fold(0i64, |sum, value| sum.checked_add(*value));
+    if tokens.is_none_or(|value| value > MAX_EXACT_COUNT) {
+        return Err("账本 Token 合计超出精确范围，未发布不准确统计".to_string());
+    }
+    Ok(())
+}
+
+
+/// Invalid SQLite storage classes must not disappear in the range predicate.
+/// Run once per report, outside per-bucket writes, so indexed ingestion remains
+/// bounded by the touched hour.
+pub(crate) fn validate_rollup_timestamps(conn: &Connection) -> Result<(), String> {
+    let invalid: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_rollup WHERE typeof(hour_bucket)!='integer')",
+        [], |row| row.get(0),
+    ).map_err(|error| format!("账本时间校验失败: {error}"))?;
+    if invalid {
+        return Err("账本包含错误类型的时间桶，未发布缺失数据的统计".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn window_start_ms(now: i64, days: Option<i64>, day_ms: i64) -> Result<Option<i64>, String> {
+    days.filter(|days| *days > 0).map(|days| {
+        (days - 1).checked_mul(day_ms)
+            .and_then(|offset| (now / day_ms * day_ms).checked_sub(offset))
+            .ok_or_else(|| "统计天数超出可表示的时间范围".to_string())
+    }).transpose()
 }
 
 // -----------------------------------------------------------------------------
@@ -706,6 +776,7 @@ pub fn assert_not_cockpit_path(path: &Path) -> Result<(), LedgerError> {
 ///
 /// 每次调用返回**独立连接**,调用方用完即弃;不要缓存 `Connection`。
 pub fn open(path: &Path) -> Result<Connection, LedgerError> {
+    assert_not_cockpit_path(path)?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -747,14 +818,20 @@ pub fn open_read_only(path: &Path) -> Result<Connection, LedgerError> {
     }
     let conn = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     // 只读路径**只**设 busy_timeout:
     //  - `journal_mode` 库里已是 WAL,重复设置属于写动作,可能触发不必要的锁;
     //  - `foreign_keys` 对纯 SELECT 无意义。
     // WAL 下读者不阻塞写者、写者也不阻塞读者,所以只要求"等"就够了。
-    conn.execute_batch("PRAGMA busy_timeout = 10000;")?;
+    conn.execute_batch("PRAGMA busy_timeout = 10000; PRAGMA query_only = ON;")?;
     let found = current_version(&conn)?;
+    if found > SCHEMA_VERSION_LATEST {
+        return Err(LedgerError::FutureSchemaVersion {
+            found,
+            supported: SCHEMA_VERSION_LATEST,
+        });
+    }
     if found < SCHEMA_VERSION_LATEST {
         return Err(LedgerError::SchemaOutdated {
             found,
@@ -788,12 +865,20 @@ pub fn current_version(conn: &Connection) -> Result<u32, LedgerError> {
 ///   重复调用是幂等的。
 /// - 库里版本**高于**代码已知最新版本时直接报错,不做任何猜测式降级迁移。
 pub fn migrate(conn: &mut Connection) -> Result<u32, LedgerError> {
-    let user_version = current_version(conn)?;
-    let applied_max: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| {
-            row.get(0)
-        })
-        .unwrap_or(0);
+    // Serialize before reading the baseline: another opener may finish an
+    // upgrade while this connection waits. A deferred transaction after the
+    // reads would replay ALTER TABLE statements against that newer schema.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let user_version = current_version(&tx)?;
+    let has_versions: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')",
+        [], |row| row.get(0),
+    )?;
+    let applied_max: i64 = if has_versions {
+        tx.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| row.get(0))?
+    } else {
+        0
+    };
     let base = user_version.max(applied_max.max(0) as u32);
 
     if base > SCHEMA_VERSION_LATEST {
@@ -803,7 +888,6 @@ pub fn migrate(conn: &mut Connection) -> Result<u32, LedgerError> {
         });
     }
 
-    let tx = conn.transaction()?;
     let mut applied = 0u32;
     for (version, description, sql) in MIGRATIONS {
         if *version <= base {
@@ -816,10 +900,11 @@ pub fn migrate(conn: &mut Connection) -> Result<u32, LedgerError> {
         )?;
         applied += 1;
     }
+    // The schema, audit rows and fast version check form one atomic commit.
+    if user_version != SCHEMA_VERSION_LATEST {
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION_LATEST as i64)?;
+    }
     tx.commit()?;
-
-    // user_version 与 schema_version 表保持同步:前者给"快速判版本"用,后者给审计看。
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION_LATEST as i64)?;
     Ok(applied)
 }
 
@@ -872,7 +957,7 @@ mod tests {
         for w in MIGRATIONS.windows(2) {
             assert!(w[0].0 < w[1].0, "迁移版本号必须严格递增: {} vs {}", w[0].0, w[1].0);
         }
-        assert_eq!(MIGRATIONS.len(), 15, "用量、财务及目录缓存增量迁移");
+        assert_eq!(MIGRATIONS.len(), 16, "用量、财务、目录缓存及复合水位增量迁移");
         assert_eq!(LEDGER_TABLES.len(), 10, "用量、财务及目录缓存");
         assert!(
             LEDGER_TABLES.contains(&"price_book_version"),
@@ -1656,4 +1741,50 @@ CREATE TABLE IF NOT EXISTS identity_override (
         writer.join().expect("写线程不该 panic");
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn read_only_connections_reject_writes_and_future_schema() {
+        let dir = temp_dir("ro-enforced");
+        let path = ledger_db_path_in(&dir);
+        let writable = open(&path).unwrap();
+        let reader = open_read_only(&path).unwrap();
+        assert!(reader.execute("DELETE FROM finance_events", []).is_err());
+        drop(reader);
+        writable.pragma_update(None, "user_version", SCHEMA_VERSION_LATEST + 1).unwrap();
+        assert!(matches!(open_read_only(&path), Err(LedgerError::FutureSchemaVersion { .. })));
+        drop(writable);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_migrations_recheck_the_version_after_waiting_for_the_writer() {
+        use std::sync::{Arc, Barrier};
+        let dir = temp_dir("concurrent-migration");
+        let path = ledger_db_path_in(&dir);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SQL_PRAGMAS).unwrap();
+        // An actual v13 database makes v14 ALTER TABLE replay observable.
+        for (version, description, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 13) {
+            conn.execute_batch(sql).unwrap();
+            conn.execute("INSERT INTO schema_version(version,applied_at,description) VALUES(?1,0,?2)", params![version, description]).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 13).unwrap();
+        drop(conn);
+        let start = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8).map(|_| {
+            let path = path.clone();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                let mut conn = Connection::open(path).unwrap();
+                conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                start.wait();
+                let count = migrate(&mut conn).unwrap();
+                assert_eq!(current_version(&conn).unwrap(), SCHEMA_VERSION_LATEST);
+                count
+            })
+        }).collect();
+        let applied: u32 = threads.into_iter().map(|thread| thread.join().unwrap()).sum();
+        assert_eq!(applied, SCHEMA_VERSION_LATEST - 13);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

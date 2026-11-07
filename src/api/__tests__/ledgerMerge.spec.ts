@@ -187,7 +187,7 @@ describe('describeMergedUsage · 口径文案', () => {
   })
 
   it('未执行 / 不可用 / 空账本分别如实说明', () => {
-    expect(describeMergedUsage(null)).toContain('未执行')
+    expect(describeMergedUsage(null)).toContain('未合并用量')
     expect(describeMergedUsage(result({ available: false, reason: '账本尚未生成' }))).toContain('账本尚未生成')
     expect(describeMergedUsage(result({ cells: [], reason: '账本里没有用量数据' }))).toContain('账本里没有用量数据')
   })

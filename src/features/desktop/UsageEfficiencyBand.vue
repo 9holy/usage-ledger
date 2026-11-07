@@ -5,6 +5,8 @@ import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import {
   monitorAutomaticPriceSummary,
   monitorCacheCoverage,
+  monitorKnownTokenTotal,
+  monitorRequestCountLabel,
   monitorCacheRatio,
   type MonitorTotals
 } from '@/api/usageMonitor'
@@ -153,14 +155,14 @@ const cacheAnchors = ref<Record<string, Anchor>>({})
       <dl class="cache-token-ledger">
         <div>
           <dt>{{ t('usageMonitor.text.cacheRead') }}</dt>
-          <dd :title="count(totals?.cacheReadTokens) + ' Token'">
-            {{ compact(totals?.cacheReadTokens) }}<small v-if="totals?.cacheReadTokens != null">Token</small>
+          <dd :title="count(monitorKnownTokenTotal(totals, 'cacheReadTokens')) + ' Token'">
+            {{ compact(monitorKnownTokenTotal(totals, 'cacheReadTokens')) }}<small v-if="monitorKnownTokenTotal(totals, 'cacheReadTokens') != null">Token</small>
           </dd>
         </div>
         <div>
           <dt>{{ t('usageMonitor.text.cacheWrite') }}</dt>
-          <dd :title="count(totals?.cacheWriteTokens) + ' Token'">
-            {{ compact(totals?.cacheWriteTokens) }}
+          <dd :title="count(monitorKnownTokenTotal(totals, 'cacheWriteTokens')) + ' Token'">
+            {{ compact(monitorKnownTokenTotal(totals, 'cacheWriteTokens')) }}
           </dd>
         </div>
       </dl>
@@ -170,8 +172,8 @@ const cacheAnchors = ref<Record<string, Anchor>>({})
     </article>
 
     <article class="pricing-visual">
-      <header class="efficiency-heading"><h2>{{ t('usageMonitor.text.costEstimationCoverage') }}</h2><small>{{ t('usageMonitor.text.all') }} {{ count(totals?.requestCount) }} {{ t('usageMonitor.text.requests4') }}</small></header>
-      <UsagePricePrism v-if="positiveParts.length" :parts="parts" :total="totals?.requestCount" compact />
+      <header class="efficiency-heading"><h2>{{ t('usageMonitor.text.costEstimationCoverage') }}</h2><small>{{ t('usageMonitor.text.all') }} {{ monitorRequestCountLabel(totals) }}</small></header>
+      <UsagePricePrism v-if="positiveParts.length" :parts="parts" :total="totals?.requestCount" :record-counts="!!totals?.unitemizedRecords" compact />
       <div v-else class="efficiency-graphic">
         <p class="efficiency-empty">
           {{ totals ? t('usageMonitor.text.noRequestsInTheSelectedPeriod') : t('usageMonitor.text.costStatisticsNotYetAvailable') }}

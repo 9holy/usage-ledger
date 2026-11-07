@@ -6,7 +6,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed, readonly } from 'vue'
 import { authAPI, isTotp2FARequired, passkeyAPI, type LoginResponse } from '@/api'
-import { captureAuthConnection, getActiveConnection, isAuthConnectionCurrent, type AuthConnectionContext } from '@/api/url'
+import { captureAuthConnection, getActiveConnection, isAuthConnectionCurrent, isDesktopRuntime, type AuthConnectionContext } from '@/api/url'
 import type {
   User,
   LoginRequest,
@@ -141,6 +141,7 @@ export const useAuthStore = defineStore('auth', () => {
   function checkAuth(): void {
     const savedToken = localStorage.getItem(AUTH_TOKEN_KEY)
     const connection = getActiveConnection()
+    if (!connection && isDesktopRuntime()) return
     if (connection && (connection.type !== 'sub2api' || connection.authMode !== 'login' || connection.apiKey !== savedToken)) return
     const savedUser = localStorage.getItem(AUTH_USER_KEY)
     const savedRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
@@ -452,6 +453,9 @@ export const useAuthStore = defineStore('auth', () => {
     authMode.value = 'apikey'
     token.value = apiKey
     user.value = APIKEY_PLACEHOLDER_USER
+    refreshTokenValue.value = null
+    tokenExpiresAt.value = null
+    runMode.value = 'standard'
     // 不写 localStorage 的 auth_token/auth_user:那是 JWT 模式的持久化路径,
     // 与连接凭证(connection store 管理)语义不同,避免 checkAuth 误恢复。
     clearPendingAuthSession()
@@ -477,15 +481,14 @@ export const useAuthStore = defineStore('auth', () => {
    * Clears all authentication state and persisted data
    */
   async function logout(): Promise<void> {
+    // Capture the outgoing JWT session before clearing it; API-key sessions have no token to revoke.
+    const revocation = authMode.value === 'jwt' ? authAPI.logout() : Promise.resolve()
+    clearAuth()
     try {
-      // Call API logout (revokes refresh token on server)
-      await authAPI.logout()
+      await revocation
     } catch (err) {
       // 服务端吊销失败（网络/5xx/超时）不应阻止本地登出，否则用户点了退出仍处于登录态。
       console.warn('Logout API call failed, clearing local session anyway', err)
-    } finally {
-      // Always clear local state (tokens, user data, refresh timers)
-      clearAuth()
     }
   }
 
@@ -505,6 +508,13 @@ export const useAuthStore = defineStore('auth', () => {
     }
     const context = captureAuthConnection()
     const sessionToken = token.value
+    const connection = context.connection
+    if ((!connection && isDesktopRuntime()) || (connection && (connection.type !== 'sub2api'
+      || connection.authMode !== 'login' || connection.apiKey !== sessionToken))) {
+      // An old session's timer can fire while another connection is being verified.
+      // It must not probe /auth/me with the new source's admin key or update its user cache.
+      throw new Error('Session is not bound to the current connection')
+    }
 
     try {
       const response = await authAPI.getCurrentUser()
@@ -543,10 +553,12 @@ export const useAuthStore = defineStore('auth', () => {
     tokenExpiresAt.value = null
     user.value = null
     authMode.value = 'jwt'
+    runMode.value = 'standard'
     localStorage.removeItem(AUTH_TOKEN_KEY)
     localStorage.removeItem(AUTH_USER_KEY)
     localStorage.removeItem(REFRESH_TOKEN_KEY)
     localStorage.removeItem(TOKEN_EXPIRES_AT_KEY)
+    localStorage.removeItem('2api-console.auth-connection')
 
     if (options?.preservePendingAuthSession) {
       pendingAuthSession.value = getPersistedPendingAuthSession()

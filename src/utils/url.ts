@@ -41,3 +41,26 @@ export function sanitizeUrl(value: string, options: SanitizeOptions = {}): strin
     return ''
   }
 }
+
+/** Validate an untrusted browser navigation target. QR payloads and the app's
+ * explicitly constructed native deep links are not browser navigation URLs. */
+export function sanitizeNavigationUrl(
+  value: unknown,
+  options: Pick<SanitizeOptions, 'allowRelative'> = {},
+): string {
+  if (typeof value !== 'string') return ''
+  // Browsers strip some control characters and interpret backslashes as URL
+  // separators. Reject these before checking a root-relative path or scheme.
+  if (value.includes('\\')) return ''
+  for (const character of value) {
+    const code = character.charCodeAt(0)
+    if (code < 32 || code === 127) return ''
+  }
+  // Tauri uses hash history: router.resolve() returns a same-document route.
+  const trimmed = value.trim()
+  if (options.allowRelative && trimmed.startsWith('#/')) return trimmed
+  const sanitized = sanitizeUrl(value, options)
+  if (!sanitized || sanitized.startsWith('/')) return sanitized
+  const parsed = new URL(sanitized)
+  return parsed.username || parsed.password ? '' : sanitized
+}

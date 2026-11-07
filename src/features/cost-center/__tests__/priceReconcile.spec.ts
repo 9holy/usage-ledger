@@ -201,7 +201,7 @@ describe('边界与排序', () => {
     for (const input of [null, undefined, []]) {
       const r = reconcileCockpitPrices(input)
       expect(r.rows).toEqual([])
-      expect(r.summary).toContain('无可对账模型')
+      expect(r.summary).toBe('来源未提供历史单价，暂无可比较的模型')
       expect(r.issueCount).toBe(0)
     }
   })

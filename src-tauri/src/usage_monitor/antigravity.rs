@@ -263,7 +263,7 @@ fn tokens(value: &Value, key: &str) -> Result<Option<i64>, String> {
     let n = value
         .as_i64()
         .or_else(|| value.as_str().and_then(|v| v.parse().ok()));
-    n.filter(|n| *n >= 0)
+    n.filter(|n| (0..=super::store::MAX_EXACT_TOKENS).contains(n))
         .map(Some)
         .ok_or_else(|| format!("Antigravity LS {key} 不是非负 token 整数"))
 }
@@ -363,6 +363,9 @@ fn parse_metadata(
     let model = text(chat, "responseModel");
     session.model = model.clone();
     let started_at_ms = timestamp(&chat["chatStartMetadata"]["createdAt"]);
+    if started_at_ms.is_none() {
+        unknown.push("timestamp".into());
+    }
     let ttft_ms = duration(&chat["timeToFirstToken"]);
     let streaming_duration_ms = duration(&chat["streamingDuration"]);
     let duration_ms = ttft_ms
@@ -655,7 +658,21 @@ mod tests {
         let line = parse_metadata("antigravity", "s", 0, &json!({}), &value).unwrap();
         assert!(line.usage[0].model.is_none());
         assert!(line.usage[0].mode.is_none());
-        assert!(line.usage[0].unknown_fields.is_empty());
+        assert_eq!(line.usage[0].unknown_fields, ["timestamp"]);
+    }
+
+    #[test]
+    fn missing_or_invalid_request_time_stays_unknown_in_usage_metadata() {
+        for created_at in [Value::Null, json!("invalid timestamp")] {
+            let mut row = metadata();
+            row["chatModel"]["chatStartMetadata"]["createdAt"] = created_at;
+            row["chatModel"]["usage"]["cacheReadTokens"] = json!("0");
+            let usage = parse_metadata("antigravity", "s", 0, &json!({}), &row)
+                .unwrap().usage.remove(0);
+            assert_eq!(usage.timestamp_ms, 0);
+            assert_eq!(usage.unknown_fields, ["timestamp"]);
+            assert!(usage.request_timing.unwrap().started_at_ms.is_none());
+        }
     }
 
     #[test]
@@ -679,6 +696,17 @@ mod tests {
         let mut bad = metadata();
         bad["chatModel"]["usage"]["inputTokens"] = json!("18446744073709551615");
         assert!(parse_metadata("antigravity", "s", 0, &json!({}), &bad).is_err());
+    }
+
+    #[test]
+    fn token_integers_must_remain_exact_in_the_ui() {
+        let limit = super::super::store::MAX_EXACT_TOKENS;
+        for value in [json!(limit), json!(limit.to_string())] {
+            assert_eq!(tokens(&json!({"inputTokens":value}), "inputTokens").unwrap(), Some(limit));
+        }
+        for value in [json!(limit + 1), json!((limit + 1).to_string()), json!(-1), json!(1.5)] {
+            assert!(tokens(&json!({"inputTokens":value}), "inputTokens").is_err());
+        }
     }
 
     #[test]

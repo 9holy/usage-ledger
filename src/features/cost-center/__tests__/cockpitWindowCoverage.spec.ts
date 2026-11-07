@@ -1,3 +1,4 @@
+import './costDataI18n'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'

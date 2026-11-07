@@ -9,7 +9,7 @@ import App from '@/App.vue'
 import en from '@/i18n/locales/en/desktop'
 
 const runtime = vi.hoisted(() => ({ desktop: true }))
-vi.mock('@/api/url', () => ({ isDesktopRuntime: () => runtime.desktop }))
+vi.mock('@/api/url', () => ({ isDesktopRuntime: () => runtime.desktop, getActiveConnection: () => null }))
 vi.mock('@/stores', () => ({
   useAppStore: () => ({ siteName: 'Usage Ledger', siteLogo: '', cachedPublicSettings: null, fetchPublicSettings: vi.fn() }),
   useAuthStore: () => ({ isAuthenticated: false, isAdmin: false }),

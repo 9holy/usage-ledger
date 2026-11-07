@@ -1,4 +1,5 @@
 import { apiClient } from '../client'
+import { sanitizeNavigationUrl } from '@/utils/url'
 
 export interface BackupS3Config {
   endpoint: string
@@ -158,7 +159,20 @@ export async function deleteBackup(id: string): Promise<void> {
 
 export async function getDownloadURL(id: string): Promise<BackupDownloadResponse> {
   const { data } = await apiClient.get<BackupDownloadResponse>(`/admin/backups/${id}/download-url`)
-  return data
+  const validateURL = (value: unknown): string => {
+    const url = sanitizeNavigationUrl(value)
+    if (!url) throw new Error('Invalid backup download URL')
+    return url
+  }
+  const response = { ...data }
+  if (data.url !== undefined && data.url !== '') response.url = validateURL(data.url)
+  if (data.parts !== undefined) {
+    if (!Array.isArray(data.parts)) throw new Error('Invalid backup download parts')
+    // Validate every part before exposing the response. Silently dropping a bad
+    // URL could leave the user with an incomplete, unrestorable backup.
+    response.parts = data.parts.map(part => ({ ...part, url: validateURL(part?.url) }))
+  }
+  return response
 }
 
 // Restore

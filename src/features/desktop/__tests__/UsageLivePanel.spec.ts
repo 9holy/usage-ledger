@@ -17,6 +17,23 @@ function snapshot(): MonitorSnapshot {
 }
 
 describe('UsageLivePanel', () => {
+  it('propagates unknown output through same-model cross-tool aggregation without losing its known lower bound', () => {
+    const data = snapshot()
+    const incomplete = { ...window(60, 90, false), outputComplete: false }
+    data.live!.windows = [incomplete]
+    data.live!.byModel = [
+      { tool: 'codex', model: 'shared-model', sessionKey: null, windows: [{ ...window(60, 60), outputComplete: true }] },
+      { tool: 'claude', model: 'shared-model', sessionKey: null, windows: [incomplete] },
+    ]
+    const wrapper = mount(UsageLivePanel, { props: { snapshot: data, tool: null } })
+    expect(wrapper.get('.global-rate strong').text()).toBe('输出不完整，速率未知')
+    const legend = wrapper.get('.spectrum-legend button')
+    expect(legend.get('b').text()).toContain('输出不完整，速率未知')
+    expect(legend.get('.spectrum-output').text()).toContain('150')
+    expect(legend.find('.fastest-label').exists()).toBe(false)
+    expect(wrapper.get('.model-spectrum').getComponent(Chart).props('data').datasets[0].data).toEqual([150])
+    wrapper.unmount()
+  })
   it('indexes session windows once with first-match semantics and reacts to missing/null keys and new snapshots', async () => {
     const data = snapshot()
     data.rateSessions = Array.from({ length: 24 }, (_, index) => ({ key: `codex:${index}`, tool: 'codex', id: String(index), parentId: null, project: null, model: 'gpt-6-astra', status: 'active', startedAtMs: 1, updatedAtMs: 100000, totals: data.totals }))

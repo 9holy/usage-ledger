@@ -371,7 +371,7 @@ describe('cockpit 多天窗口快照回退:缺失账号的成本必须是 null,�
     expect(data.rangeAccountStats.value[UNATTRIBUTED_USAGE_ACCOUNT_ID]).toMatchObject({ requests: 263, tokens: 1_000_000, cost: 2, standard_cost: 10, user_cost: null })
     expect(data.accounts.value).toEqual([])
     expect(data.sourceStates.value.rangeStats.status).toBe('partial')
-    expect(data.sourceStates.value.rangeStats.reason).toContain('263 条请求未归属账号')
+    expect(data.sourceStates.value.rangeStats.reason).toContain('263 条请求还不能确定所属账号')
     expect(data.rangeAccountStatsScope.value).toEqual({ source: 'cockpit', instanceId: 'local' })
   })
 

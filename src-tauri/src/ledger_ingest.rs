@@ -5,16 +5,18 @@
 //!
 //! | 桶状态 | 判据 | 写入方式 |
 //! |---|---|---|
-//! | 未封桶 | `hour_bucket + 3_600_000 + SEAL_LAG_MS > now_ms` | 整桶重扫 → **覆盖**(replace) |
-//! | 已封桶 | 反之 | 只取 `id > bucket.max_source_id` → **累加**(add) |
+//! | 未封桶 | 持久化状态未封存、仍在桶末尾的延迟窗口内、已观察源行完整 | 整桶重扫 → **覆盖**(replace),只清理本快照的旧归属 |
+//! | 已封桶 | 延迟窗口结束、发现源行缺失或旧世代已封存 | 只取数值水位之后的新行及复合边界同值的新键 → **累加**(add) |
 //!
 //! 为什么必须是二态而不是"一律累加"或"一律覆盖":
 //! - 一律累加 → 尾部乱序写、后置补写 token 会重复计数;
 //! - 一律覆盖 → cockpit 保留策略删掉旧行后,重扫会读到"少了几行"的桶,把**老账抹掉**
 //!   ——这恰恰是本项目存在的理由(用户诉求:cockpit 删数据不能删我们的账)。
 //!
-//! 二态的分界(3 小时)保证"还可能被改的行"落在未封桶侧走覆盖,
-//! "已经不会再变的行"落在已封桶侧走累加。
+//! 每轮独立刷新全部已知未封桶,不依赖 200 行重叠是否还能覆盖它们;
+//! 到期时源行仍完整的桶先做最后一次刷新再封存。v16 为未封桶保存源键与归属快照,
+//! 发现部分源行被清理后提前封存,保留已有账目。已封桶的复合水位另外保存边界请求键,
+//! 即使全局扫描水位已走远,同秒新请求也能独立检查并在重启后幂等计入。
 //!
 //! # 红线
 //!
@@ -33,12 +35,15 @@
 //!
 //! # 已知限制(必须在 UI/文档如实标注)
 //!
-//! 超出封桶延迟(3 小时)之后源库才发生的行更新**不追溯**(架构文档 §3.2 明确列为已知限制)。
-//! 源库重建且新库首行时间落在与老数据**同一个小时桶**时,该桶可能被多计一次;
-//! 这是"已封桶永不覆盖"这条硬保险的代价,边界极窄,选择保账不保精确。
+//! 已封桶已有请求的更新**不追溯**;来源清理导致提前封桶时也遵循此规则。
+//! 已封桶的数值水位之前的历史请求回填不自动重算;v16 的复合键集合只补齐水位同值边界。
+//! v16 之前没有保存完整边界键或未封桶归属快照的历史,只能建立保守基线,
+//! 无法从聚合量反推出此前已漏记的请求,也不会猜测删除无法证明归属的旧 grain。
+//! 源库重建且新旧世代实际包含同一请求时,缺少跨世代身份凭据会导致重复累计;
+//! 保留旧聚合并追加新世代,不会为猜测去重而覆盖已保留的历史。
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -46,13 +51,15 @@ use std::sync::Mutex;
 use crate::cockpit_logs_db::{TokenSplit, REQUEST_LOG_DB_NAME, SESSION_USAGE_DB_NAME};
 use crate::ledger_db;
 
-/// 重叠扫描行数。实测日均 4,156 行 ⇒ ≈1.2 小时,已覆盖 PRD 说的"10 分钟内可能补写"。
+/// 自增 ID 源的重叠扫描行数。它只影响扫描入口,不作为补写覆盖时长的保证;
+/// 所有已知未封桶另行刷新,与该行数和源流量无关。
 pub const OVERLAP_ROWS: i64 = 200;
 
-/// 封桶延迟。必须 > 重叠窗口覆盖的时长 + 安全余量(实测重叠窗口 ≈1.2h)。
+/// 从小时桶结束时刻起计算的允许回填时长。源行缺失或世代重建可提前封存。
 pub const SEAL_LAG_MS: i64 = 3 * 3_600_000;
 
-/// 单个事务最多处理的行数。太大则单次持锁过久,太小则提交次数过多。
+/// 每批顺序扫描的源行数上限。桶首次被处理时仍会扫描完整桶,
+/// 因而该值不是事务内全部源行或内存用量的上限。
 pub const BATCH_MAX_ROWS: i64 = 50_000;
 
 /// 摄取互斥锁。5 分钟一次的后台触发 + 用户手动"立即摄取"可能撞车,
@@ -180,8 +187,8 @@ pub struct IngestSource {
     ///
     /// - 第 1 列必须是**整型**(它的值要持久化进 `ingest_state.last_id` /
     ///   `rollup_bucket_state.max_source_id`,两张表的列都是 INTEGER);
-    /// - 第 2 列起是同值时的次级排序键(文本),**不持久化**(账本 INTEGER 列存不下文本),
-    ///   跨进程恢复时取空串,由桶级二态写入吸收重复投递(见 [`Watermark`])。
+    /// - 第 2 列起是同值时的次级排序键(文本),按桶把边界的完整键存为 JSON;
+    ///   全局水位仍存首列,桶级持久化键吸收跨进程重复投递(见 [`Watermark`])。
     ///
     /// 生成的是**行值比较** SQL `(c1, c2) > (?1, ?2)`(SQLite 3.15+,rusqlite 内置版本足够新)。
     ///
@@ -324,10 +331,10 @@ impl IngestSource {
 
     /// 该源的重叠扫描量(**水位列的原生单位**)。
     ///
-    /// - 水位是时间列(会话源 `timestamp`,单位秒)⇒ 重叠整整一个封桶延迟
-    ///   ([`SEAL_LAG_MS`] 换算成秒 = 10,800),保证"还可能被改的整个未封桶窗口"
-    ///   每轮都被重扫 —— 否则按 200 行/200 秒的旧口径,3 小时窗口内的迟到回填会漏掉;
-    /// - 水位是自增 id(单请求源)⇒ 沿用行数口径 200 行 ≈ 1.2 小时。
+    /// - 时间水位(会话源 `timestamp`)按 [`SEAL_LAG_MS`] 换算为原生时间单位,
+    ///   用于发现全局水位附近的新行;
+    /// - 自增 ID 水位(单请求源)沿用调用方指定的行数,默认 200。
+    /// 已知未封桶和已封桶的复合边界另行检查,不依赖该重叠范围才能得到刷新。
     pub fn overlap_for(&self, overlap_rows: i64) -> i64 {
         if self.is_time_watermark() {
             SEAL_LAG_MS / self.ts_unit.ms_per_unit().max(1)
@@ -612,7 +619,7 @@ impl SourceRow {
 }
 
 /// 事实表 grain(v8:6 列,与 `usage_rollup` 主键一致,含 `source_name`)。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BucketKey {
     pub hour_bucket: i64,
@@ -646,7 +653,18 @@ pub struct RollupAgg {
 
 impl RollupAgg {
     /// 累加一条源行。分档判定**必须**走 `TokenSplit::add`(红线 3)。
-    pub fn add(&mut self, row: &SourceRow) {
+    pub fn add(&mut self, row: &SourceRow) -> Result<(), String> {
+        // TokenSplit keeps the shared tier rules; validate before calling its
+        // unchecked additions so neither debug panic nor release wrap is possible.
+        let total = [
+            self.split.std_normal_input, self.split.std_cached, self.split.std_output,
+            self.split.long_normal_input, self.split.long_cached, self.split.long_output,
+            row.input, row.output,
+        ].into_iter().try_fold(0i64, |sum, value| sum.checked_add(value));
+        if total.is_none_or(|value| value > ledger_db::MAX_EXACT_COUNT)
+            || self.split.requests >= ledger_db::MAX_EXACT_COUNT {
+            return Err("账本桶聚合超出精确范围，摄取事务已回滚".to_string());
+        }
         self.split.add(
             row.input,
             row.output,
@@ -671,6 +689,7 @@ impl RollupAgg {
                 self.model_pricing_version = Some(version.clone());
             }
         }
+        Ok(())
     }
 
     /// 最近秩分位数(与 `cockpit_logs_db::percentile()` 同实现,保证口径一致)。
@@ -869,19 +888,15 @@ impl SourceFingerprint {
 
 /// 摄取水位游标:数值首列 + 次级文本列。
 ///
-/// 为什么拆成"能持久化的"和"只能活一轮的"两部分:
-/// 账本的水位列(`ingest_state.last_id` / `rollup_bucket_state.max_source_id`)是
-/// **INTEGER**,`request_id` 是文本,塞不进去 —— 而 ledger_db 的表结构不允许为
-/// 一个源新增列。所以跨轮只恢复 `numeric`,次级列取空串,代价是"与首列值相同的行
-/// 会被重新投递一次"。这个重复投递由桶级二态写入**完全吸收**:
-/// - 未封桶 → 整桶重算覆盖(重投多少都一样);
-/// - 已封桶 → `id <= max_source_id` 直接跳过(重投的必然 <= 水位)。
-/// 因此"只存数值"不会重复计数,只是多读几行。
+/// `ingest_state.last_id` stores the numeric scan position. The complete cursor
+/// is kept while paging; `rollup_bucket_state.max_source_keys` separately stores
+/// every request key at each bucket's numeric boundary. Repeated scans therefore
+/// remain idempotent without dropping late same-second requests after a restart.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Watermark {
     /// 水位首列的值(整型,**可持久化**)。
     pub numeric: i64,
-    /// 次级列的值。**不持久化**,跨轮为空。
+    /// 批内次级游标不写入 ingest_state,跨轮为空;边界去重键另存于桶状态。
     pub text: Vec<String>,
 }
 
@@ -1247,7 +1262,7 @@ fn read_source_facts(
             max_id: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
             min_id: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
             min_ts_ms: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            row_count: row.get::<_, i64>(3).unwrap_or(0),
+            row_count: row.get::<_, i64>(3)?,
             first_event_key: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         })
     })
@@ -1261,7 +1276,17 @@ fn read_source_facts(
 /// ② 复合水位的次级列;③ 实例级身份派生。
 fn read_row(row: &rusqlite::Row<'_>, source: &IngestSource) -> rusqlite::Result<SourceRow> {
     use SourceColumns as C;
-    let pricing: Option<String> = row.get::<_, Option<String>>(C::IDX_PRICING_VERSION).unwrap_or(None);
+    let token_count = |index| -> rusqlite::Result<i64> {
+        let value = row.get::<_, Option<i64>>(index)?.unwrap_or(0);
+        if !(0..=ledger_db::MAX_EXACT_COUNT).contains(&value) {
+            return Err(rusqlite::Error::FromSqlConversionFailure(index,
+                rusqlite::types::Type::Integer,
+                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                    "Token count is negative or outside the exact integer range"))));
+        }
+        Ok(value)
+    };
+    let pricing: Option<String> = row.get::<_, Option<String>>(C::IDX_PRICING_VERSION)?;
     let raw_account = row.get::<_, Option<String>>(C::IDX_ACCOUNT)?.unwrap_or_default();
     let mut id_text: Vec<String> = Vec::with_capacity(source.id_columns().len().saturating_sub(1));
     for offset in 0..source.id_columns().len().saturating_sub(1) {
@@ -1278,22 +1303,21 @@ fn read_row(row: &rusqlite::Row<'_>, source: &IngestSource) -> rusqlite::Result<
         },
         api_key_id: row.get::<_, Option<String>>(C::IDX_API_KEY)?.unwrap_or_default(),
         model_id: row.get::<_, Option<String>>(C::IDX_MODEL)?.unwrap_or_default(),
-        input: row.get::<_, Option<i64>>(C::IDX_INPUT).unwrap_or(Some(0)).unwrap_or(0),
-        output: row.get::<_, Option<i64>>(C::IDX_OUTPUT).unwrap_or(Some(0)).unwrap_or(0),
-        cached: row.get::<_, Option<i64>>(C::IDX_CACHED).unwrap_or(Some(0)).unwrap_or(0),
-        success: row.get::<_, Option<i64>>(C::IDX_SUCCESS).unwrap_or(Some(0)).unwrap_or(0) != 0,
+        input: token_count(C::IDX_INPUT)?,
+        output: token_count(C::IDX_OUTPUT)?,
+        cached: token_count(C::IDX_CACHED)?,
+        success: row.get::<_, Option<i64>>(C::IDX_SUCCESS)?.unwrap_or(0) != 0,
         estimated_cost_usd: row
-            .get::<_, Option<f64>>(C::IDX_ESTIMATED)
-            .unwrap_or(Some(0.0))
+            .get::<_, Option<f64>>(C::IDX_ESTIMATED)?
             .unwrap_or(0.0),
-        latency_ms: row.get::<_, Option<i64>>(C::IDX_LATENCY).unwrap_or(Some(0)).unwrap_or(0),
-        error_category: row.get::<_, Option<String>>(C::IDX_ERROR_CAT).unwrap_or_default().unwrap_or_default(),
-        http_status: row.get::<_, Option<i64>>(C::IDX_HTTP_STATUS).unwrap_or(None),
+        latency_ms: row.get::<_, Option<i64>>(C::IDX_LATENCY)?.unwrap_or(0),
+        error_category: row.get::<_, Option<String>>(C::IDX_ERROR_CAT)?.unwrap_or_default(),
+        http_status: row.get::<_, Option<i64>>(C::IDX_HTTP_STATUS)?,
         model_pricing_version: pricing.filter(|s| !s.is_empty()),
-        event_key: row.get::<_, Option<String>>(C::IDX_EVENT_KEY).unwrap_or_default().unwrap_or_default(),
-        email: row.get::<_, Option<String>>(C::IDX_EMAIL).unwrap_or_default().unwrap_or_default(),
-        official_account_id: row.get::<_, Option<String>>(C::IDX_OFFICIAL).unwrap_or_default().unwrap_or_default(),
-        client_instance_id: row.get::<_, Option<String>>(C::IDX_INSTANCE).unwrap_or_default().unwrap_or_default(),
+        event_key: row.get::<_, Option<String>>(C::IDX_EVENT_KEY)?.unwrap_or_default(),
+        email: row.get::<_, Option<String>>(C::IDX_EMAIL)?.unwrap_or_default(),
+        official_account_id: row.get::<_, Option<String>>(C::IDX_OFFICIAL)?.unwrap_or_default(),
+        client_instance_id: row.get::<_, Option<String>>(C::IDX_INSTANCE)?.unwrap_or_default(),
     })
 }
 
@@ -1320,7 +1344,7 @@ pub(crate) fn scan_batch_sql(source: &IngestSource, columns: &SourceColumns) -> 
 }
 
 /// 整桶重扫 SQL:`[bucket, bucket + 1h)`。**只按时间范围过滤,不带水位条件** ——
-/// 否则 3 小时窗口内迟到回填进来的行(时间戳早于当前水位)永远落不进账本。
+/// 否则已知未封桶内早于当前水位的迟到回填无法参与整桶重算。
 ///
 /// 边界用**裸时间列**比较(单位换算见 [`IngestSource::bucket_bounds`]),
 /// 这样源库的 `timestamp` 索引才吃得上;桶内的毫秒归一仍走 `SELECT` 里的 `ts_expr`。
@@ -1496,18 +1520,20 @@ ON CONFLICT(source_name, hour_bucket, client_instance_id) DO UPDATE SET
   updated_at_ms = excluded.updated_at_ms";
 
 const BUCKET_STATE_UPSERT_SQL: &str = "\
-INSERT INTO rollup_bucket_state (source_name, hour_bucket, client_instance_id, max_source_id, source_rows, sealed, updated_at_ms)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+INSERT INTO rollup_bucket_state (source_name, hour_bucket, client_instance_id, max_source_id, source_rows, sealed, updated_at_ms, max_source_keys, provisional_snapshot)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 ON CONFLICT(source_name, hour_bucket, client_instance_id) DO UPDATE SET
+  max_source_keys = CASE WHEN excluded.max_source_id >= rollup_bucket_state.max_source_id THEN excluded.max_source_keys ELSE rollup_bucket_state.max_source_keys END,
   max_source_id = MAX(rollup_bucket_state.max_source_id, excluded.max_source_id),
   source_rows   = excluded.source_rows,
+  provisional_snapshot = excluded.provisional_snapshot,
   sealed        = MAX(rollup_bucket_state.sealed, excluded.sealed),
   updated_at_ms = excluded.updated_at_ms";
 
-/// 源库重建:`max_source_id` 归零让新库的小 id 能计入,**`sealed` 绝不重置**(硬保险)。
+/// 源库重建:`max_source_id` 归零让新库的小 id 能计入,旧桶封存以保留前一世代事实。
 /// 只作用于**当前源**:不加 `source_name` 谓词会把另一个源的桶水位一起清掉。
 const BUCKET_STATE_RESET_SQL: &str = "\
-UPDATE rollup_bucket_state SET max_source_id = 0, updated_at_ms = ?2
+UPDATE rollup_bucket_state SET max_source_id = 0, max_source_keys = NULL, provisional_snapshot = NULL, sealed = 1, updated_at_ms = ?2
 WHERE source_name = ?1 AND hour_bucket >= ?3 AND client_instance_id = ?4";
 
 /// 水位按 `source_name` 分源存储(v9 起主键就是 `source_name`,不再是 `id = 1`)。
@@ -1560,7 +1586,11 @@ pub fn read_state(conn: &Connection, source_name: &str) -> Result<IngestState, S
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(format!("读取摄取水位失败: {other}")),
         })?;
-    Ok(found.unwrap_or_default())
+    let state = found.unwrap_or_default();
+    if !(0..=ledger_db::MAX_EXACT_COUNT).contains(&state.total_rows_seen) {
+        return Err("摄取累计行数为负数或超出精确范围".into());
+    }
+    Ok(state)
 }
 
 /// 写水位(与数据同一事务)。
@@ -1585,34 +1615,101 @@ fn write_state(tx: &Transaction<'_>, state: &IngestState) -> Result<(), String> 
     Ok(())
 }
 
-/// 读桶级水位:`(max_source_id, sealed)`。无记录 = `(0, false)`。
-///
-/// 按 `(source_name, hour_bucket, instance)` 查:两源水位独立(二期难点 N2)。
+#[derive(Default)]
+struct BucketState {
+    max_source_id: i64,
+    source_rows: i64,
+    sealed: bool,
+    // None means a pre-v16 checkpoint: no evidence identifies which same-second
+    // requests were already counted. Establish a baseline without re-adding them.
+    max_source_keys: Option<BTreeSet<Vec<String>>>,
+    provisional_snapshot: Option<ProvisionalSnapshot>,
+}
+
+/// Retained only while a bucket can be replaced. The full key set detects
+/// partial source retention even when newly appended rows hide the count drop;
+/// the grain set limits attribution cleanup to facts this checkpoint produced.
+#[derive(Default, Serialize, Deserialize)]
+struct ProvisionalSnapshot {
+    keys: BTreeSet<(i64, Vec<String>)>,
+    grains: BTreeSet<BucketKey>,
+}
+
+fn decode_boundary_keys(json: Option<String>) -> Result<Option<BTreeSet<Vec<String>>>, String> {
+    json.map(|json| serde_json::from_str(&json)
+        .map_err(|error| format!("Invalid source watermark keys: {error}"))).transpose()
+}
+
+/// Persist both the numeric watermark and every complete key at that boundary.
 fn read_bucket_state(
     tx: &Transaction<'_>,
     source_name: &str,
     bucket: i64,
     instance: &str,
-) -> Result<(i64, bool), String> {
-    let mut stmt = tx
-        .prepare_cached(
-            "SELECT max_source_id, sealed FROM rollup_bucket_state
-             WHERE source_name = ?1 AND hour_bucket = ?2 AND client_instance_id = ?3",
-        )
-        .map_err(|e| format!("读取桶水位失败: {e}"))?;
-    let found = stmt
-        .query_row(rusqlite::params![source_name, bucket, instance], |row| {
-            Ok((
-                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                row.get::<_, Option<i64>>(1)?.unwrap_or(0) != 0,
-            ))
-        })
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(format!("读取桶水位失败: {other}")),
-        })?;
-    Ok(found.unwrap_or((0, false)))
+) -> Result<Option<BucketState>, String> {
+    let mut stmt = tx.prepare_cached(
+        "SELECT max_source_id, sealed, max_source_keys, source_rows, provisional_snapshot FROM rollup_bucket_state
+         WHERE source_name=?1 AND hour_bucket=?2 AND client_instance_id=?3",
+    ).map_err(|error| error.to_string())?;
+    let row = stmt.query_row(rusqlite::params![source_name, bucket, instance], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?, row.get::<_, Option<String>>(2)?,
+            row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?))
+    });
+    match row {
+        Ok((max_source_id, sealed, keys, source_rows, snapshot)) => Ok(Some(BucketState {
+            max_source_id, source_rows, sealed, max_source_keys: decode_boundary_keys(keys)?,
+            provisional_snapshot: snapshot.map(|json| serde_json::from_str(&json)
+                .map_err(|error| format!("Invalid provisional source snapshot: {error}"))).transpose()?,
+        })),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(format!("读取桶水位失败: {error}")),
+    }
+}
+
+/// Check sealed same-second boundaries even when newer traffic has moved the
+/// global timestamp overlap beyond them. Indexed IN queries avoid a full source
+/// scan; only a bucket with a new boundary key needs to be aggregated again.
+fn changed_composite_boundaries(
+    tx: &Transaction<'_>,
+    src: &Connection,
+    source: &IngestSource,
+    columns: &SourceColumns,
+    instance: &str,
+) -> Result<BTreeSet<i64>, String> {
+    if source.id_columns().len() <= 1 {
+        return Ok(BTreeSet::new());
+    }
+    let mut checkpoints = BTreeMap::new();
+    let mut statement = tx.prepare(
+        "SELECT hour_bucket,max_source_id,max_source_keys FROM rollup_bucket_state
+         WHERE source_name=?1 AND client_instance_id=?2 AND sealed=1 AND max_source_id>0",
+    ).map_err(|error| error.to_string())?;
+    let rows = statement.query_map(rusqlite::params![source.source_name, instance], |row|
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?)))
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (bucket, max_id, keys) = row.map_err(|error| error.to_string())?;
+        checkpoints.insert(bucket, (max_id, decode_boundary_keys(keys)?));
+    }
+    let ids: Vec<_> = checkpoints.values().map(|(id, _)| *id).collect();
+    let mut changed = BTreeSet::new();
+    for chunk in ids.chunks(500) {
+        let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!("{} WHERE {} IN ({placeholders})", columns.select_sql(source), source.id_column());
+        let mut query = src.prepare(&sql).map_err(|error| error.to_string())?;
+        let rows = query.query_map(rusqlite::params_from_iter(chunk), |row| read_row(row, source))
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let row = row.map_err(|error| error.to_string())?;
+            let bucket = row.hour_bucket();
+            if checkpoints.get(&bucket).is_some_and(|(id, keys)| {
+                *id == row.id && keys.as_ref().is_none_or(|keys| !keys.contains(&row.id_text))
+            }) {
+                changed.insert(bucket);
+            }
+        }
+    }
+    Ok(changed)
 }
 
 /// 读既有的 `error_categories` JSON(add 模式要"读旧 → 合并 → 写回")。
@@ -1643,10 +1740,17 @@ fn read_error_categories(
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(format!("读取失败细分失败: {other}")),
         })?;
-    Ok(raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<BTreeMap<String, i64>>(s).ok())
-        .unwrap_or_default())
+    let Some(raw) = raw else { return Ok(BTreeMap::new()); };
+    let categories = serde_json::from_str::<BTreeMap<String, i64>>(&raw)
+        .map_err(|error| format!("账本失败细分格式错误，未修改保留历史: {error}"))?;
+    let total = categories.values().try_fold(0i64, |sum, value| {
+        (0..=ledger_db::MAX_EXACT_COUNT).contains(value)
+            .then(|| sum.checked_add(*value)).flatten()
+    });
+    if total.is_none_or(|value| value > ledger_db::MAX_EXACT_COUNT) {
+        return Err("账本失败细分包含负数或超出精确范围的计数".into());
+    }
+    Ok(categories)
 }
 
 /// 合并失败细分分布(add 模式:旧 + 新)。
@@ -1657,9 +1761,15 @@ fn merge_error_categories(
 ) -> Result<String, String> {
     let mut merged = read_error_categories(tx, key)?;
     for (name, count) in &agg.error_categories {
-        *merged.entry(name.clone()).or_insert(0) += *count;
+        let target = merged.entry(name.clone()).or_insert(0);
+        *target = target.checked_add(*count).filter(|value| *value <= ledger_db::MAX_EXACT_COUNT)
+            .ok_or("账本失败细分累加超出精确范围")?;
     }
-    Ok(serde_json::to_string(&merged).unwrap_or_else(|_| "{}".to_string()))
+    let total = merged.values().try_fold(0i64, |sum, value| sum.checked_add(*value));
+    if total.is_none_or(|value| value > ledger_db::MAX_EXACT_COUNT) {
+        return Err("账本失败细分合计超出精确范围".into());
+    }
+    serde_json::to_string(&merged).map_err(|error| error.to_string())
 }
 
 /// UPSERT 一个 grain。分位数**只覆盖、不累加**(共享知识第 9 条)。
@@ -1748,7 +1858,7 @@ fn upsert_bucket_latency(
 }
 
 /// 写桶级水位。`sealed` 用 `MAX` 合并,**永不从 1 退回 0**(§5 硬保险)。
-#[allow(clippy::too_many_arguments)] // 8 个参数逐一对应 `bucket_state` 表的列,封成结构体只是把同样的值挪个地方
+#[allow(clippy::too_many_arguments)] // 参数逐一对应 bucket_state 的持久化字段
 fn upsert_bucket_state(
     tx: &Transaction<'_>,
     source_name: &str,
@@ -1758,10 +1868,14 @@ fn upsert_bucket_state(
     source_rows: i64,
     sealed: bool,
     now: i64,
+    max_source_keys: Option<&BTreeSet<Vec<String>>>,
+    provisional_snapshot: Option<&ProvisionalSnapshot>,
 ) -> Result<(), String> {
+    let keys = max_source_keys.map(serde_json::to_string).transpose().map_err(|error| error.to_string())?;
+    let snapshot = provisional_snapshot.map(serde_json::to_string).transpose().map_err(|error| error.to_string())?;
     tx.execute(
         BUCKET_STATE_UPSERT_SQL,
-        rusqlite::params![source_name, bucket, instance, max_source_id, source_rows, sealed as i64, now],
+        rusqlite::params![source_name, bucket, instance, max_source_id, source_rows, sealed as i64, now, keys, snapshot],
     )
     .map_err(|e| format!("UPSERT rollup_bucket_state 失败: {e}"))?;
     Ok(())
@@ -1948,33 +2062,59 @@ fn ingest_bucket(
     now: i64,
     default_instance: &str,
 ) -> Result<i64, String> {
-    let (bucket_max_source_id, bucket_sealed) =
-        read_bucket_state(tx, &source.source_name, bucket, default_instance)?;
+    let previous = read_bucket_state(tx, &source.source_name, bucket, default_instance)?;
+    let bucket_max_source_id = previous.as_ref().map_or(0, |state| state.max_source_id);
+    let bucket_sealed = previous.as_ref().is_some_and(|state| state.sealed);
     let unsealed = is_unsealed(bucket, now);
     let rows = scan_bucket(src, source, columns, bucket)?;
+    let mut snapshot = ProvisionalSnapshot {
+        keys: rows.iter().map(|row| (row.id, row.id_text.clone())).collect(),
+        grains: BTreeSet::new(),
+    };
+    let source_rows_missing = !bucket_sealed && previous.as_ref().is_some_and(|state| {
+        match &state.provisional_snapshot {
+            Some(prior) => !prior.keys.is_subset(&snapshot.keys),
+            // A pre-v16 bucket has only a count and numeric watermark. Newer
+            // IDs must not mask a decrease in the previously observed rows.
+            None => rows.iter().filter(|row| row.id <= state.max_source_id).count() < state.source_rows.max(0) as usize,
+        }
+    });
 
     // 分位数:整桶重采样(与 add/replace 无关),一律覆盖写
     let mut samples: Vec<i64> = rows.iter().filter(|r| r.latency_ms > 0).map(|r| r.latency_ms).collect();
     samples.sort_unstable();
 
-    // 已封桶只取增量(水位 > 桶水位);未封桶整桶重算。`sealed` 字段是硬保险:
+    // 已封桶只取增量(数值水位之后,或同值复合边界的新键);未封桶整桶重算。
+    // `sealed` 字段是硬保险:
     // 即使源库指纹变化也**只累加、永不覆盖**(§5.4)。
     //
-    // 复合水位下比较的只是**数值首列**(`timestamp` 秒):次级列是文本,
-    // `rollup_bucket_state.max_source_id` 是 INTEGER 存不下。含义是"该桶已计入到
-    // 哪个秒为止",同一秒内后到的行(水位元组更大但首列相同)在已封桶里不再补记 ——
-    // 这是本设计唯一已知的量差窗口,宽度 = 1 秒,且只在"迟到回填落进已封桶"时触发。
-    // 反向(改成 `<`)会让每次重叠重扫都把边界行重复累加,那是**翻倍**,比漏记严重得多。
-    let take_increment_only = bucket_sealed || !unsealed;
+    // Composite sources can append a different request at the same timestamp.
+    // The persisted key set distinguishes those requests from repeated scans.
+    // A previously provisional bucket gets one final full refresh before it
+    // seals. Otherwise the final token/account backfill would be frozen out.
+    // Retention can remove part of a still-open bucket. Without the deleted raw
+    // facts a full recomputation would erase durable history, so seal early and
+    // retain the previous aggregate, admitting only genuinely new source keys.
+    let take_increment_only = bucket_sealed || source_rows_missing || (!unsealed && previous.is_none());
     let mode = if take_increment_only { WriteMode::Add } else { WriteMode::Replace };
+    if rows.is_empty() {
+        // Upstream retention/rebuild is not a deletion request for our history.
+        if previous.is_some() {
+            tx.execute("UPDATE rollup_bucket_state SET sealed=1,provisional_snapshot=NULL WHERE source_name=?1 AND hour_bucket=?2 AND client_instance_id=?3",
+                rusqlite::params![source.source_name, bucket, default_instance]).map_err(|e| e.to_string())?;
+        }
+        return Ok(0);
+    }
 
     let mut aggs: BTreeMap<BucketKey, RollupAgg> = BTreeMap::new();
-    let mut max_source_id_in_bucket = bucket_max_source_id;
+    let max_source_id_in_bucket = rows.iter().map(|row| row.id).max().unwrap_or(0).max(bucket_max_source_id);
+    let prior_keys = previous.as_ref().and_then(|state| state.max_source_keys.as_ref());
+    let mut boundary_keys = if max_source_id_in_bucket == bucket_max_source_id {
+        prior_keys.cloned().unwrap_or_default()
+    } else {
+        BTreeSet::new()
+    };
     for row in &rows {
-        max_source_id_in_bucket = max_source_id_in_bucket.max(row.id);
-        if take_increment_only && row.id <= bucket_max_source_id {
-            continue;
-        }
         let key = BucketKey {
             hour_bucket: bucket,
             source_name: source.source_name.clone(),
@@ -1983,13 +2123,45 @@ fn ingest_bucket(
             api_key_id: row.api_key_id.clone(),
             client_instance_id: instance_of(row, default_instance),
         };
-        aggs.entry(key).or_default().add(row);
+        snapshot.grains.insert(key.clone());
+        if row.id == max_source_id_in_bucket {
+            boundary_keys.insert(row.id_text.clone());
+        }
+        if take_increment_only && (row.id < bucket_max_source_id
+            || (row.id == bucket_max_source_id && (source.id_columns().len() <= 1
+                || prior_keys.is_none_or(|keys| keys.contains(&row.id_text))))) {
+            continue;
+        }
+        aggs.entry(key).or_default().add(row)?;
     }
 
+    if mode == WriteMode::Replace {
+        // Remove former attribution only when this checkpoint proves ownership.
+        // Other sources/instances sharing the hour are not part of this scan's
+        // replacement. Legacy checkpoints establish ownership on this pass;
+        // unknown historical grains cannot safely be inferred or deleted.
+        if let Some(prior) = previous.as_ref().and_then(|state| state.provisional_snapshot.as_ref()) {
+            for key in prior.grains.difference(&snapshot.grains) {
+                tx.execute("DELETE FROM usage_rollup WHERE source_name=?1 AND hour_bucket=?2
+                    AND source_account_id=?3 AND model_id=?4 AND api_key_id=?5 AND client_instance_id=?6",
+                    rusqlite::params![key.source_name, key.hour_bucket, key.source_account_id,
+                        key.model_id, key.api_key_id, key.client_instance_id])
+                    .map_err(|error| format!("替换未封桶归属失败: {error}"))?;
+            }
+        }
+    }
+    if mode == WriteMode::Add {
+        // SQL addition would coerce a malformed retained value before the
+        // post-write guard can see it. Validate preserved history first.
+        ledger_db::validate_rollup_counts(tx, Some(bucket), Some(bucket))?;
+    }
     for (key, agg) in &aggs {
         upsert_rollup(tx, key, agg, mode, now)?;
     }
 
+    // This also checks SQL ADD against retained sealed history before the
+    // transaction can publish data or advance its checkpoint.
+    ledger_db::validate_rollup_counts(tx, Some(bucket), Some(bucket))?;
     upsert_bucket_latency(tx, &source.source_name, bucket, default_instance, &samples, now)?;
     upsert_bucket_state(
         tx,
@@ -1999,8 +2171,10 @@ fn ingest_bucket(
         max_source_id_in_bucket,
         rows.len() as i64,
         // 未封桶 → 0;已封桶 → 1。MAX 合并保证永不回退
-        !unsealed,
+        !unsealed || source_rows_missing,
         now,
+        (source.id_columns().len() > 1).then_some(&boundary_keys),
+        (unsealed && !take_increment_only).then_some(&snapshot),
     )?;
 
     // 身份只增不删:整桶观测(不因 add/replace 而少记)
@@ -2093,8 +2267,8 @@ pub fn ingest_all_guarded(opts: &IngestOptions) -> Result<IngestAllResult, Strin
 /// ## 设计约束
 /// - 走 [`ingest_all_guarded`]:整轮只持一次 `INGEST_LOCK`,与前端触发/手工触发
 ///   互不穿插;抢不到锁就本轮跳过(返回 `skipped_all`),**绝不阻塞、绝不重复扫**。
-/// - **增量**:按 `ingest_state.last_id` 水位只扫新行,稳态开销极小(实测二次摄取
-///   只扫 200 行 / 7 桶),不需要为省事调大间隔。
+/// - **增量**:全局水位加重叠扫描发现新行,独立刷新已知未封桶并检查复合边界;
+///   不会为了刷新一个未封桶而重新聚合全部已封历史。
 /// - 失败**只记日志不 panic**:源库临时不可用(B5)下一轮自动重试。
 /// - 首次等待**一个完整间隔**再跑,避免与启动时的前端首次摄取抢锁。
 pub fn spawn_periodic_ingest(interval: std::time::Duration) {
@@ -2154,7 +2328,18 @@ pub fn ingest_into(
             source.db_path.display()
         )));
     }
-    let src = open_source_readonly(&source.db_path)?;
+    // The process mutex does not cover a second desktop process. Own the
+    // ledger writer lock before opening the source snapshot or reading its
+    // checkpoint, so a waiter cannot repeat another importer's rebuild reset.
+    let mut tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|e| format!("开启账本事务失败: {e}"))?;
+    let source_conn = open_source_readonly(&source.db_path)?;
+    // Facts, batches and complete bucket scans must see the same source view.
+    // Otherwise a later batch can advance the watermark past new rows in a
+    // bucket already processed by an earlier batch, permanently skipping them.
+    let src = source_conn.unchecked_transaction()
+        .map_err(|error| format!("开启源库读取快照失败: {error}"))?;
     if !source_table_exists(&src, &source.table)? {
         return Ok(IngestResult::source_unavailable(format!(
             "{} 缺少 {} 表（cockpit 版本不兼容）",
@@ -2178,7 +2363,7 @@ pub fn ingest_into(
     }
 
     let facts = read_source_facts(&src, source, &columns)?;
-    let mut state = read_state(conn, &source.source_name)?;
+    let mut state = read_state(&tx, &source.source_name)?;
     let recorded = SourceFingerprint::parse(&state.source_fingerprint);
 
     // ── 2. 重建判定 ──
@@ -2196,7 +2381,8 @@ pub fn ingest_into(
     let mut rescan = opts.full_rescan;
     let mut reset_detected = false;
     let mut generation = recorded.generation;
-    if has_history && (facts.max_id < state.last_id || (facts.min_id == 1 && fingerprint_changed)) {
+    if has_history && facts.row_count > 0
+        && (facts.max_id < state.last_id || (facts.min_id == 1 && fingerprint_changed)) {
         rescan = true;
         reset_detected = true;
         generation = recorded.generation + 1;
@@ -2215,19 +2401,20 @@ pub fn ingest_into(
     state.client_instance_id = instance.clone();
     state.source_path = source.db_path.to_string_lossy().to_string();
     state.schema_version = ledger_db::SCHEMA_VERSION_LATEST;
-    state.source_fingerprint = SourceFingerprint {
-        generation,
-        reset_detected,
-        min_id: facts.min_id,
-        first_event_key: facts.first_event_key.clone(),
+    // An empty source proves neither a new generation nor a new identity.
+    // Preserve the last nonempty checkpoint until actual rows can distinguish
+    // retention from a rebuild; otherwise every empty poll resets the watermarks.
+    if facts.row_count > 0 {
+        state.source_fingerprint = SourceFingerprint {
+            generation,
+            reset_detected,
+            min_id: facts.min_id,
+            first_event_key: facts.first_event_key.clone(),
+        }
+        .encode();
     }
-    .encode();
 
-    let mut tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|e| format!("开启账本事务失败: {e}"))?;
-
-    // ── 3. 源库重建:新库时间范围内的桶水位归零,`sealed` 保持原值 ──
+    // ── 3. 源库重建:新库时间范围内的桶水位归零,前一世代的桶封存 ──
     if reset_detected {
         let threshold = ledger_db::hour_bucket(facts.min_ts_ms);
         tx.execute(
@@ -2254,10 +2441,30 @@ pub fn ingest_into(
     let mut cursor =
         if rescan { Watermark::default() } else { Watermark::at((state.last_id - overlap).max(0)) };
     let mut processed: BTreeSet<i64> = BTreeSet::new();
+    // Revisit every previously provisional bucket, not merely the last 200 IDs.
+    // Busy traffic can push a recently backfilled request out of that overlap.
+    let mut pending_buckets = {
+        let mut statement = tx.prepare("SELECT hour_bucket FROM rollup_bucket_state WHERE source_name=?1 AND client_instance_id=?2 AND sealed=0 ORDER BY hour_bucket")
+            .map_err(|error| error.to_string())?;
+        let rows = statement.query_map(rusqlite::params![source.source_name, instance], |row| row.get::<_, i64>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<BTreeSet<_>, _>>().map_err(|error| error.to_string())?
+    };
+    pending_buckets.extend(changed_composite_boundaries(&tx, &src, source, &columns, &instance)?);
+    for bucket in pending_buckets {
+        result.upserted_buckets += ingest_bucket(&tx, &src, source, &columns, bucket, now, &instance)?;
+        processed.insert(bucket);
+    }
 
     loop {
         let batch = scan_batch(&src, source, &columns, &cursor, BATCH_MAX_ROWS)?;
         if batch.is_empty() {
+            // There may be provisional bucket updates even without new IDs.
+            state.last_ingest_ms = now;
+            state.last_batch_rows = 0;
+            state.last_duration_ms = (ledger_db::now_ms() - started_ms).max(0);
+            write_state(&tx, &state)?;
+            tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
             break;
         }
         result.batches += 1;
@@ -2279,7 +2486,7 @@ pub fn ingest_into(
             )?;
         }
 
-        // 复合水位:批内推进完整游标(含次级列),但只有**数值首列**能落账本
+        // 全局扫描位置存数值首列;各桶边界的完整键已在 ingest_bucket 中持久化。
         cursor.advance(&batch);
         let batch_max_id = cursor.numeric;
         let batch_max_ts = batch
@@ -2294,7 +2501,9 @@ pub fn ingest_into(
         state.last_ingest_ms = now;
         state.last_batch_rows = batch.len() as i64;
         state.last_duration_ms = (ledger_db::now_ms() - started_ms).max(0);
-        state.total_rows_seen += batch.len() as i64;
+        state.total_rows_seen = state.total_rows_seen.checked_add(batch.len() as i64)
+            .filter(|value| *value <= ledger_db::MAX_EXACT_COUNT)
+            .ok_or("摄取累计行数超出精确范围，当前批次已回滚")?;
         write_state(&tx, &state)?;
         tx.commit().map_err(|e| format!("提交事务失败: {e}"))?;
 
@@ -4132,4 +4341,456 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn provisional_bucket_replaces_former_account_model_key_and_instance_grains() {
+        let dir = temp_dir("changed-grain");
+        let path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&path);
+        insert_full(&src, 1, NOW - 300_000, "old-model", "old-account", "old@x.com", "old-key", 1_000, 100, 0, true, 10, "");
+        src.execute("UPDATE request_logs SET client_instance_id='old-instance'", []).unwrap();
+        let mut conn = ledger_conn(&dir);
+        let options = opts_now();
+        run(&mut conn, &path, &options);
+        src.execute("UPDATE request_logs SET model_id='new-model',account_id='new-account',api_key_id='new-key',client_instance_id='new-instance',input_tokens=700 WHERE id=1", []).unwrap();
+        run(&mut conn, &path, &options);
+        assert_eq!(rollup_totals(&conn)[6], 1);
+        assert_eq!(rollup_totals(&conn)[0], 700);
+        assert_eq!(dump(&conn, "SELECT source_account_id,model_id,api_key_id,client_instance_id FROM usage_rollup"), vec!["new-account|new-model|new-key|new-instance"]);
+        drop(src);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn partial_source_retention_preserves_provisional_history_after_restart() {
+        for legacy_checkpoint in [false, true] {
+            for same_grain in [false, true] {
+                let dir = temp_dir(&format!("partial-retention-{legacy_checkpoint}-{same_grain}"));
+                let path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+                let src = open_source(&path);
+                insert_full(&src, 1, NOW - 300_000, "first", "account", "a@x.com", "key", 1_000, 100, 0, true, 10, "");
+                insert_full(&src, 2, NOW - 300_000, if same_grain { "first" } else { "second" }, "account", "a@x.com", "key", 2_000, 200, 0, true, 20, "");
+                let options = opts_now();
+                {
+                    let mut conn = ledger_conn(&dir);
+                    run(&mut conn, &path, &options);
+                    if legacy_checkpoint {
+                        conn.execute("UPDATE rollup_bucket_state SET provisional_snapshot=NULL", []).unwrap();
+                    }
+                }
+                src.execute("DELETE FROM request_logs WHERE id=1", []).unwrap();
+                // Same total row count: a plain COUNT(*) check would miss this
+                // partial truncation and erase the first observed request.
+                insert_full(&src, 3, NOW - 300_000, "third", "account", "a@x.com", "key", 3_000, 300, 0, true, 30, "");
+                for _restart in 0..2 {
+                    let mut conn = ledger_conn(&dir);
+                    let result = run(&mut conn, &path, &options);
+                    assert!(!result.source_reset_detected);
+                    assert_eq!(rollup_totals(&conn)[0], 6_000);
+                    assert_eq!(rollup_totals(&conn)[6], 3);
+                    assert_eq!(scalar_i64(&conn, "SELECT sealed FROM rollup_bucket_state"), 1);
+                    assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM rollup_bucket_state WHERE provisional_snapshot IS NOT NULL"), 0);
+                }
+                drop(src);
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    #[test]
+    fn attribution_cleanup_does_not_delete_other_instances_or_sources_in_the_hour() {
+        let dir = temp_dir("attribution-scope");
+        let path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&path);
+        insert_full(&src, 1, NOW - 300_000, "old", "account", "a@x.com", "key", 1_000, 100, 0, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        let mut options = opts_now();
+        options.client_instance_id = "first-instance".into();
+        run(&mut conn, &path, &options);
+        options.client_instance_id = "other-instance".into();
+        run(&mut conn, &path, &options);
+        let mut other_source = source_of(&path);
+        other_source.source_name = "other-source".into();
+        ingest_into(&mut conn, &other_source, &options, NOW).unwrap();
+        let preserved = dump(&conn, "SELECT source_name,client_instance_id,model_id,requests,std_normal_input FROM usage_rollup
+            WHERE client_instance_id='other-instance' ORDER BY source_name");
+        assert_eq!(preserved.len(), 2);
+        src.execute("UPDATE request_logs SET model_id='new',input_tokens=700", []).unwrap();
+        options.client_instance_id = "first-instance".into();
+        run(&mut conn, &path, &options);
+        assert_eq!(dump(&conn, "SELECT source_name,client_instance_id,model_id,requests,std_normal_input FROM usage_rollup
+            WHERE client_instance_id='other-instance' ORDER BY source_name"), preserved);
+        assert_eq!(dump(&conn, "SELECT model_id,requests,std_normal_input FROM usage_rollup WHERE client_instance_id='first-instance'"), vec!["new|1|700"]);
+        drop(src);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_source_preserves_checkpoints_until_real_rows_identify_a_rebuild() {
+        let dir = temp_dir("empty-source-checkpoint");
+        let path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&path);
+        for id in 1..=2 {
+            insert_full(&src, id, NOW - 300_000, "model", "account", "a@x.com", "key", 1_000, 100, 0, true, 10, "");
+        }
+        let mut conn = ledger_conn(&dir);
+        let options = opts_now();
+        run(&mut conn, &path, &options);
+        let state = read_state(&conn, &source_of(&path).source_name).unwrap();
+        let buckets = dump(&conn, "SELECT max_source_id,sealed,source_rows,provisional_snapshot FROM rollup_bucket_state");
+        src.execute("DELETE FROM request_logs", []).unwrap();
+        for _poll in 0..2 {
+            let result = run(&mut conn, &path, &options);
+            assert!(!result.source_reset_detected);
+            assert_eq!(result.source_generation, 0);
+            assert_eq!(result.last_id, 2);
+            assert_eq!(read_state(&conn, &source_of(&path).source_name).unwrap().source_fingerprint, state.source_fingerprint);
+            assert_eq!(dump(&conn, "SELECT max_source_id,sealed,source_rows,provisional_snapshot FROM rollup_bucket_state"), buckets);
+            assert_eq!(rollup_totals(&conn)[6], 2);
+        }
+        insert_full(&src, 3, NOW - 300_000, "model", "account", "a@x.com", "key", 1_000, 100, 0, true, 10, "");
+        for _poll in 0..2 {
+            let result = run(&mut conn, &path, &options);
+            assert!(!result.source_reset_detected);
+            assert_eq!(rollup_totals(&conn)[0], 3_000);
+            assert_eq!(rollup_totals(&conn)[6], 3);
+        }
+        drop(src);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn provisional_buckets_refresh_outside_id_overlap_and_before_sealing() {
+        let dir = temp_dir("old-provisional");
+        let path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&path);
+        insert_full(&src, 1, hour_at(-2) + 1_000, "backfilled", "account", "a@x.com", "key", 1_000, 100, 0, true, 10, "");
+        for id in 2..=250 {
+            insert_full(&src, id, NOW - 300_000, "newer", "account", "a@x.com", "key", 1, 1, 0, true, 10, "");
+        }
+        let mut conn = ledger_conn(&dir);
+        let mut options = opts_now();
+        run(&mut conn, &path, &options);
+        src.execute("UPDATE request_logs SET input_tokens=700 WHERE id=1", []).unwrap();
+        run(&mut conn, &path, &options);
+        assert_eq!(scalar_i64(&conn, "SELECT std_normal_input FROM usage_rollup WHERE model_id='backfilled'"), 700);
+        src.execute("UPDATE request_logs SET input_tokens=600 WHERE id=1", []).unwrap();
+        options.now_ms = Some(NOW + 5 * ledger_db::HOUR_MS);
+        options.overlap_rows = 0; // No new IDs: the final refresh still commits.
+        run(&mut conn, &path, &options);
+        assert_eq!(scalar_i64(&conn, "SELECT std_normal_input FROM usage_rollup WHERE model_id='backfilled'"), 600);
+        assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM rollup_bucket_state WHERE sealed=0"), 0);
+        assert_eq!(rollup_totals(&conn)[6], 250);
+        drop(src);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn source_rebuild_in_a_provisional_hour_preserves_prior_generation() {
+        let dir = temp_dir("rebuild-live-hour");
+        let path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&path);
+        insert_full(&src, 1, NOW - 300_000, "same", "account", "a@x.com", "key", 1_000, 100, 0, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        let options = opts_now();
+        run(&mut conn, &path, &options);
+        src.execute("UPDATE request_logs SET event_key='new-generation', input_tokens=300, output_tokens=30 WHERE id=1", []).unwrap();
+        let result = run(&mut conn, &path, &options);
+        assert!(result.source_reset_detected);
+        assert_eq!(rollup_totals(&conn)[0], 1_300);
+        assert_eq!(rollup_totals(&conn)[6], 2);
+        run(&mut conn, &path, &options);
+        assert_eq!(rollup_totals(&conn)[6], 2);
+        drop(src);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn independent_importers_do_not_repeat_the_same_source_rebuild_reset() {
+        use std::{cell::RefCell, sync::mpsc, time::Duration};
+        thread_local! {
+            static WAIT_SIGNAL: RefCell<Option<mpsc::Sender<()>>> = const { RefCell::new(None) };
+        }
+        let dir = temp_dir("concurrent-rebuild");
+        let path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&path);
+        insert_full(&src, 1, hour_at(-10) + 1_000, "model", "account", "a@x.com", "key", 1_000, 100, 0, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        let options = opts_now();
+        run(&mut conn, &path, &options);
+        src.execute("UPDATE request_logs SET event_key='new-generation',input_tokens=300", []).unwrap();
+
+        // Both independent connections must actually reach the contested write
+        // lock before it is released; scheduling sleeps cannot prove that race.
+        let blocker = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let (waiting, observed_wait) = mpsc::channel();
+        let workers: Vec<_> = (0..2).map(|_| {
+            let ledger_path = ledger_db::ledger_db_path_in(&dir);
+            let source = source_of(&path);
+            let options = options.clone();
+            let waiting = waiting.clone();
+            std::thread::spawn(move || {
+                let mut conn = Connection::open(ledger_path).unwrap();
+                WAIT_SIGNAL.with(|signal| *signal.borrow_mut() = Some(waiting));
+                conn.busy_handler(Some(|attempt| {
+                    WAIT_SIGNAL.with(|signal| {
+                        if let Some(sender) = signal.borrow_mut().take() {
+                            let _ = sender.send(());
+                        }
+                    });
+                    std::thread::sleep(Duration::from_millis(1));
+                    attempt < 10_000
+                })).unwrap();
+                ingest_into(&mut conn, &source, &options, NOW).unwrap()
+            })
+        }).collect();
+        for _ in 0..2 {
+            observed_wait.recv_timeout(Duration::from_secs(10)).expect("both importers must wait on the writer lock");
+        }
+        blocker.commit().unwrap();
+        let results: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|result| result.source_reset_detected).count(), 1);
+        assert_eq!(rollup_totals(&conn)[0], 1_300);
+        assert_eq!(rollup_totals(&conn)[6], 2);
+        drop(src);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn same_second_requests_are_ingested_after_restart_outside_the_global_overlap() {
+        let dir = temp_dir("same-second-boundary");
+        let path = seed_source(&dir, "sessions.sqlite", SESSION_DDL);
+        let src = open_source(&path);
+        let old_second = hour_at(-10) / 1000 + 10;
+        insert_session(&src, 20, old_second, "old-model", "__default__", 100, 10, 20);
+        insert_session(&src, 99, NOW / 1000 - 60, "new-model", "__default__", 100, 10, 20);
+        let source = session_source_of(&path);
+        let options = opts_now();
+        {
+            let mut conn = ledger_conn(&dir);
+            ingest_into(&mut conn, &source, &options, NOW).unwrap();
+            assert_eq!(rollup_totals(&conn)[6], 2);
+        }
+        // A lexicographically smaller key is just as new as a larger one.
+        insert_session(&src, 10, old_second, "old-model", "__default__", 100, 10, 20);
+        insert_session(&src, 30, old_second, "old-model", "__default__", 100, 10, 20);
+        for _restart in 0..3 {
+            let mut conn = ledger_conn(&dir);
+            ingest_into(&mut conn, &source, &options, NOW).unwrap();
+            assert_eq!(rollup_totals(&conn)[6], 4, "boundary keys must survive reopening and remain idempotent");
+            assert_eq!(scalar_i64(&conn, "SELECT requests FROM usage_rollup WHERE model_id='old-model'"), 3);
+        }
+        drop(src);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_boundary_establishes_a_baseline_without_duplicating_prior_history() {
+        let dir = temp_dir("legacy-boundary");
+        let path = seed_source(&dir, "sessions.sqlite", SESSION_DDL);
+        let src = open_source(&path);
+        let old_second = hour_at(-10) / 1000 + 10;
+        insert_session(&src, 1, old_second, "model", "__default__", 100, 10, 20);
+        let source = session_source_of(&path);
+        let options = opts_now();
+        let mut conn = ledger_conn(&dir);
+        ingest_into(&mut conn, &source, &options, NOW).unwrap();
+        conn.execute("UPDATE rollup_bucket_state SET max_source_keys=NULL", []).unwrap();
+        ingest_into(&mut conn, &source, &options, NOW).unwrap();
+        assert_eq!(rollup_totals(&conn)[6], 1);
+        assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM rollup_bucket_state WHERE max_source_keys IS NULL"), 0);
+        insert_session(&src, 2, old_second, "model", "__default__", 100, 10, 20);
+        ingest_into(&mut conn, &source, &options, NOW).unwrap();
+        assert_eq!(rollup_totals(&conn)[6], 2);
+        ingest_into(&mut conn, &source, &options, NOW).unwrap();
+        assert_eq!(rollup_totals(&conn)[6], 2);
+        drop(src);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+
+    #[test]
+    fn review3_invalid_source_values_do_not_erase_usage_or_advance_watermarks() {
+        let dir = temp_dir("review3-invalid-source");
+        let source_path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&source_path);
+        insert_full(&src, 1, NOW - 60_000, "m", "codex_a", "a@x.test", "k", 120, 20, 30, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        let source = source_of(&source_path);
+        let options = opts_now();
+        ingest_into(&mut conn, &source, &options, NOW).unwrap();
+        let before = snapshot(&conn);
+        let state_before = dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name");
+        insert_full(&src, 2, NOW - 30_000, "m", "codex_a", "a@x.test", "k", 40, 10, 0, true, 10, "");
+        for (column, invalid) in [
+            ("input_tokens", "'invalid'"), ("output_tokens", "2.5"),
+            ("cached_tokens", "'invalid'"), ("success", "'invalid'"),
+            ("latency_ms", "2.5"), ("estimated_cost_usd", "'invalid'"),
+            ("event_key", "X'ff'"), ("email", "X'ff'"),
+            ("official_account_id", "X'ff'"), ("client_instance_id", "X'ff'"),
+            ("model_pricing_version", "X'ff'"), ("http_status", "'invalid'"),
+            ("error_category", "X'ff'"),
+        ] {
+            let original: rusqlite::types::Value = src.query_row(
+                &format!("SELECT {column} FROM request_logs WHERE id=1"), [], |row| row.get(0)
+            ).unwrap();
+            src.execute(&format!("UPDATE request_logs SET {column}={invalid} WHERE id=1"), []).unwrap();
+            assert!(ingest_into(&mut conn, &source, &options, NOW).is_err(),
+                "invalid {column} must not be silently converted into a default");
+            assert_eq!(snapshot(&conn), before, "{column}: prior ledger must survive");
+            assert_eq!(dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name"), state_before,
+                "{column}: failed source data must not advance its checkpoint");
+            src.execute(&format!("UPDATE request_logs SET {column}=?1 WHERE id=1"), rusqlite::params![original]).unwrap();
+        }
+        ingest_into(&mut conn, &source, &options, NOW).unwrap();
+        assert_eq!(&rollup_totals(&conn)[..7], &[130, 30, 30, 0, 0, 0, 2]);
+        drop(src);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_invalid_token_ranges_are_rejected_before_source_commit() {
+        let dir = temp_dir("review3-invalid-token-range");
+        let source_path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&source_path);
+        insert_full(&src, 1, NOW - 60_000, "m", "codex_a", "a@x.test", "k", 100, 20, 30, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        let source = source_of(&source_path);
+        for (column, value) in [("input_tokens", -1), ("output_tokens", -1), ("cached_tokens", -1),
+            ("input_tokens", 9_007_199_254_740_992i64)] {
+            src.execute(&format!("UPDATE request_logs SET {column}=?1 WHERE id=1"), rusqlite::params![value]).unwrap();
+            assert!(ingest_into(&mut conn, &source, &opts_now(), NOW).is_err(), "invalid {column}: {value}");
+            assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM usage_rollup"), 0);
+            assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM ingest_state"), 0);
+            src.execute("UPDATE request_logs SET input_tokens=100,output_tokens=20,cached_tokens=30", []).unwrap();
+        }
+        drop(src);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_safe_individual_rows_cannot_overflow_a_rollup() {
+        let dir = temp_dir("review3-rollup-overflow");
+        let source_path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&source_path);
+        insert_full(&src, 1, NOW - 60_000, "m", "codex_a", "a@x.test", "k", 4_503_599_627_370_496, 0, 0, true, 10, "");
+        insert_full(&src, 2, NOW - 30_000, "m", "codex_a", "a@x.test", "k", 4_503_599_627_370_496, 0, 0, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        assert!(ingest_into(&mut conn, &source_of(&source_path), &opts_now(), NOW).is_err(),
+            "individually exact rows must not create an inexact bucket");
+        assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM usage_rollup"), 0);
+        assert_eq!(scalar_i64(&conn, "SELECT COUNT(*) FROM ingest_state"), 0);
+        drop(src);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_optional_null_and_missing_columns_remain_compatible() {
+        let dir = temp_dir("review3-optional-null");
+        let source_path = seed_source(&dir, "src.sqlite",
+            "CREATE TABLE request_logs(id INTEGER PRIMARY KEY, timestamp INTEGER, input_tokens INTEGER,
+             output_tokens INTEGER, cached_tokens INTEGER, success INTEGER, email TEXT)");
+        let src = open_source(&source_path);
+        src.execute("INSERT INTO request_logs(id,timestamp,input_tokens) VALUES(1,?1,100)", [NOW - 60_000]).unwrap();
+        let mut conn = ledger_conn(&dir);
+        ingest_into(&mut conn, &source_of(&source_path), &opts_now(), NOW).unwrap();
+        assert_eq!(&rollup_totals(&conn)[..7], &[100, 0, 0, 0, 0, 0, 1]);
+        drop(src);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_sealed_add_does_not_coerce_corrupt_retained_counts() {
+        let dir = temp_dir("review3-sealed-corruption");
+        let source_path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&source_path);
+        insert_full(&src, 1, hour_at(-10)+1000, "m", "codex_a", "a@x.test", "k", 100, 20, 0, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        let source = source_of(&source_path);
+        ingest_into(&mut conn, &source, &opts_now(), NOW).unwrap();
+        insert_full(&src, 2, hour_at(-10)+2000, "m", "codex_a", "a@x.test", "k", 40, 10, 0, true, 10, "");
+        for invalid in ["'invalid'", "-10", "0.5", "9223372036854775807"] {
+            conn.execute(&format!("UPDATE usage_rollup SET std_normal_input={invalid}"), []).unwrap();
+            let before = snapshot(&conn);
+            let state_before = dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name");
+            assert!(ingest_into(&mut conn, &source, &opts_now(), NOW).is_err(),
+                "retained {invalid} must not be coerced before validation");
+            assert_eq!(snapshot(&conn), before);
+            assert_eq!(dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name"), state_before);
+        }
+        conn.execute("UPDATE usage_rollup SET std_normal_input=100", []).unwrap();
+        ingest_into(&mut conn, &source, &opts_now(), NOW).unwrap();
+        assert_eq!(&rollup_totals(&conn)[..7], &[140, 0, 30, 0, 0, 0, 2]);
+        drop(src);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_error_distribution_corruption_preserves_retained_ledger() {
+        let dir = temp_dir("review3-error-distribution");
+        let source_path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&source_path);
+        insert_full(&src, 1, hour_at(-10)+1000, "m", "codex_a", "a@x.test", "k", 100, 20, 0, false, 10, "upstream_error");
+        let mut conn = ledger_conn(&dir);
+        let source = source_of(&source_path);
+        ingest_into(&mut conn, &source, &opts_now(), NOW).unwrap();
+        insert_full(&src, 2, hour_at(-10)+2000, "m", "codex_a", "a@x.test", "k", 40, 10, 0, false, 10, "upstream_error");
+        for invalid in ["invalid", r#"{"upstream_error":-1}"#, r#"{"upstream_error":0.5}"#,
+            r#"{"upstream_error":9223372036854775807}"#, r#"{"upstream_error":9007199254740991}"#] {
+            conn.execute("UPDATE usage_rollup SET error_categories=?1", [invalid]).unwrap();
+            let before = snapshot(&conn);
+            let state_before = dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name");
+            assert!(ingest_into(&mut conn, &source, &opts_now(), NOW).is_err(),
+                "invalid or overflowing retained distribution {invalid}");
+            assert_eq!(snapshot(&conn), before);
+            assert_eq!(dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name"), state_before);
+        }
+        conn.execute("UPDATE usage_rollup SET error_categories=?1", [r#"{"upstream_error":1}"#]).unwrap();
+        ingest_into(&mut conn, &source, &opts_now(), NOW).unwrap();
+        assert_eq!(conn.query_row("SELECT error_categories FROM usage_rollup", [], |row| row.get::<_, String>(0)).unwrap(),
+            r#"{"upstream_error":2}"#);
+        assert_eq!(&rollup_totals(&conn)[..7], &[140, 0, 30, 0, 0, 0, 2]);
+        drop(src);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_ingest_count_overflow_rolls_back_new_rows() {
+        let dir = temp_dir("review3-ingest-count");
+        let source_path = seed_source(&dir, "src.sqlite", SOURCE_FULL_DDL);
+        let src = open_source(&source_path);
+        insert_full(&src, 1, NOW-60_000, "m", "codex_a", "a@x.test", "k", 100, 20, 0, true, 10, "");
+        let mut conn = ledger_conn(&dir);
+        let source = source_of(&source_path);
+        ingest_into(&mut conn, &source, &opts_now(), NOW).unwrap();
+        insert_full(&src, 2, NOW-30_000, "m", "codex_a", "a@x.test", "k", 40, 10, 0, true, 10, "");
+        for value in [-1i64, 9_007_199_254_740_991, 9_007_199_254_740_992, i64::MAX] {
+            conn.execute("UPDATE ingest_state SET total_rows_seen=?1", [value]).unwrap();
+            let before = snapshot(&conn);
+            let state_before = dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name");
+            assert!(ingest_into(&mut conn, &source, &opts_now(), NOW).is_err(),
+                "invalid or overflowing observed-row count {value}");
+            assert_eq!(snapshot(&conn), before);
+            assert_eq!(dump(&conn, "SELECT * FROM ingest_state ORDER BY source_name"), state_before);
+        }
+        conn.execute("UPDATE ingest_state SET total_rows_seen=1", []).unwrap();
+        ingest_into(&mut conn, &source, &opts_now(), NOW).unwrap();
+        assert_eq!(&rollup_totals(&conn)[..7], &[140, 0, 30, 0, 0, 0, 2]);
+        drop(src);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

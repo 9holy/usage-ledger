@@ -1,4 +1,4 @@
-export const ACCOUNT_QUOTA_SNAPSHOTS_KEY = 'usage-monitor:account-quota-snapshots:v3-subscription'
+export const ACCOUNT_QUOTA_SNAPSHOTS_KEY = 'usage-monitor:account-quota-snapshots:v4-verified-account'
 
 export interface AccountQuotaSnapshot {
   accountKey: string

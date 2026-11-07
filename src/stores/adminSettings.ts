@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { connectionScopeKey } from './connectionScope'
 import { adminAPI } from '@/api'
 import type { CustomMenuItem } from '@/types'
 
@@ -50,17 +51,34 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
   const opsQueryModeDefault = ref(readCachedString('ops_query_mode_default_cached', 'auto'))
   const paymentEnabled = ref(readCachedBool('payment_enabled_cached', false))
   const customMenuItems = ref<CustomMenuItem[]>([])
+  let generation = 0
+
+  watch(connectionScopeKey, () => {
+    generation += 1
+    loaded.value = false
+    loading.value = false
+    opsMonitoringEnabled.value = true
+    opsRealtimeMonitoringEnabled.value = true
+    opsQueryModeDefault.value = 'auto'
+    paymentEnabled.value = false
+    customMenuItems.value = []
+    for (const key of ['ops_monitoring_enabled_cached', 'ops_realtime_monitoring_enabled_cached', 'ops_query_mode_default_cached', 'payment_enabled_cached']) {
+      try { localStorage.removeItem(key) } catch { /* Storage may be unavailable. */ }
+    }
+  }, { flush: 'sync' })
 
   async function fetch(force = false): Promise<void> {
     if (loaded.value && !force) return
     if (loading.value) return
 
     loading.value = true
+    const requestedGeneration = generation
     try {
       const [settings, paymentConfigResp] = await Promise.all([
         adminAPI.settings.getSettings(),
         adminAPI.payment.getConfig()
       ])
+      if (requestedGeneration !== generation) return
       opsMonitoringEnabled.value = settings.ops_monitoring_enabled ?? true
       writeCachedBool('ops_monitoring_enabled_cached', opsMonitoringEnabled.value)
 
@@ -77,11 +95,12 @@ export const useAdminSettingsStore = defineStore('adminSettings', () => {
 
       loaded.value = true
     } catch (err) {
+      if (requestedGeneration !== generation) return
       // Keep cached/default value: do not "flip" the UI based on a transient fetch failure.
       loaded.value = true
       console.error('[adminSettings] Failed to fetch settings:', err)
     } finally {
-      loading.value = false
+      if (requestedGeneration === generation) loading.value = false
     }
   }
 

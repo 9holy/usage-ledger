@@ -19,6 +19,8 @@ struct AccountSubscription {
     end_ms: Option<i64>,
     renewal_at_ms: Option<i64>,
     checked_at_ms: Option<i64>,
+    active: Option<bool>,
+    billing_period: Option<String>,
     source: &'static str,
     error: Option<String>,
 }
@@ -86,6 +88,55 @@ struct AccountUsageCycle {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AccountReferenceUsage {
+    calendar_week: AccountUsagePeriod,
+    subscription_month: Option<AccountUsagePeriod>,
+    current_cycle: Option<AccountUsageCycle>,
+    previous_cycle: Option<AccountUsageCycle>,
+    quota_cycles: Vec<AccountUsageCycle>,
+    month_cycles: Vec<AccountUsageCycle>,
+    unsegmented_month: Totals,
+    unsegmented_month_billing_totals: BTreeMap<String, Totals>,
+}
+
+impl AccountReferenceUsage {
+    fn add(&mut self, time: i64, usage: &UsageRecord, totals: &Totals) {
+        if self.calendar_week.contains(time) { self.calendar_week.add(usage, totals); }
+        if let Some(cycle) = self.quota_cycles.iter_mut().find(|cycle| cycle.period.contains(time)) {
+            cycle.period.add(usage, totals);
+            if let Some(snapshot) = cycle.quota_snapshot.as_mut().filter(|snapshot| snapshot.contains(time)) {
+                snapshot.add(usage, totals);
+            }
+        }
+        if let Some(month) = self.subscription_month.as_mut().filter(|month| month.contains(time)) {
+            month.add(usage, totals);
+            if let Some(cycle) = self.month_cycles.iter_mut().find(|cycle| cycle.period.contains(time)) {
+                cycle.period.add(usage, totals);
+            } else {
+                store::merge_totals(&mut self.unsegmented_month, totals);
+                store::merge_totals(self.unsegmented_month_billing_totals.entry(super::billing::key(usage).into()).or_default(), totals);
+            }
+        }
+    }
+
+    fn finish(&mut self, now: i64) {
+        self.calendar_week.finish();
+        if let Some(month) = &mut self.subscription_month { month.finish(); }
+        for cycle in &mut self.quota_cycles {
+            cycle.period.finish();
+            if let Some(snapshot) = &mut cycle.quota_snapshot { snapshot.finish(); }
+        }
+        self.current_cycle = self.quota_cycles.iter().find(|cycle| cycle.current).cloned();
+        self.previous_cycle = self.quota_cycles.iter().filter(|cycle| cycle.period.end_ms <= now)
+            .max_by_key(|cycle| (cycle.period.end_ms, cycle.period.start_ms)).cloned();
+        for cycle in &mut self.month_cycles { cycle.period.finish(); }
+        store::finish_totals(&mut self.unsegmented_month);
+        for totals in self.unsegmented_month_billing_totals.values_mut() { store::finish_totals(totals); }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AccountUsage {
     account_key: String,
     account_label: String,
@@ -94,6 +145,7 @@ struct AccountUsage {
     billing_account_verified: bool,
     verified_week_requests: i64,
     creator_reference_week_requests: i64,
+    creator_reference: AccountReferenceUsage,
     verified_history: Option<AccountUsagePeriod>,
     subscription: AccountSubscription,
     calendar_week: AccountUsagePeriod,
@@ -114,6 +166,9 @@ pub struct AccountUsageReport {
     current_account_key: Option<String>,
     accounts: Vec<AccountUsage>,
     unassigned_week: Totals,
+    unassigned_by_tool: BTreeMap<String, Totals>,
+    unlocated_totals: Totals,
+    unlocated_by_tool: BTreeMap<String, Totals>,
 }
 
 #[derive(Debug)]
@@ -184,6 +239,11 @@ pub(super) fn is_account_weekly_pool(tool: &str, limit_id: &str, window_minutes:
 }
 
 pub(super) fn initialize(conn: &Connection) -> Result<(), String> {
+    // Acquire the writer lock before inspecting the old schema. Concurrent API
+    // and collector connections must not both decide to add the same column.
+    let transaction = if conn.is_autocommit() {
+        Some(Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(|error| error.to_string())?)
+    } else { None };
     super::request_accounts::initialize(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS monitor_account_cycles (
@@ -191,6 +251,7 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), String> {
            slot TEXT NOT NULL, window_minutes INTEGER NOT NULL,
            start_ms INTEGER NOT NULL, end_ms INTEGER, reset_ms INTEGER NOT NULL,
            observed_ms INTEGER NOT NULL, used_percent REAL, exhausted_ms INTEGER,
+           attribution_verified INTEGER NOT NULL DEFAULT 0,
            UNIQUE(tool,account_key,start_ms));",
     )
     .map_err(|error| error.to_string())?;
@@ -208,6 +269,17 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     }
+    let has_verified: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('monitor_account_cycles') WHERE name='attribution_verified')",
+        [], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_verified {
+        // Older cycles have no provenance: keep them, but do not present them as
+        // verified account periods. A later authenticated observation can upgrade
+        // its own boundary without treating session-creator history as proof.
+        conn.execute("ALTER TABLE monitor_account_cycles ADD COLUMN attribution_verified INTEGER NOT NULL DEFAULT 0", [])
+            .map_err(|error| error.to_string())?;
+    }
     // Existing installations already have a latest quota snapshot, but no historical rounds.
     let mut statement = conn
         .prepare(
@@ -217,8 +289,10 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), String> {
              FROM monitor_quotas q WHERE window_minutes=10080
                AND json_extract(data,'$.attribution')='account'
                AND json_extract(data,'$.source_error') IS NULL
+               AND (json_extract(data,'$.billing_account_verified')=1
+                 OR (tool<>'codex' AND json_extract(data,'$.source')='cockpit_snapshot'))
                AND NOT EXISTS(SELECT 1 FROM monitor_account_cycles c
-                 WHERE c.tool=q.tool AND c.account_key=q.account_key)
+                 WHERE c.tool=q.tool AND c.account_key=q.account_key AND c.attribution_verified=1)
              ORDER BY observed_ms DESC,CASE slot WHEN 'primary' THEN 0 ELSE 1 END,id",
         )
         .map_err(|error| error.to_string())?;
@@ -251,6 +325,9 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), String> {
             reset,
             used,
         )?;
+    }
+    if let Some(transaction) = transaction {
+        transaction.commit().map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -294,7 +371,7 @@ pub(super) fn observe_quota(
             let predecessor_observed: Option<i64> = conn
                 .query_row(
                     "SELECT observed_ms FROM monitor_account_cycles
-                     WHERE tool=?1 AND account_key=?2 AND start_ms<?3 AND end_ms IS NOT NULL
+                     WHERE tool=?1 AND account_key=?2 AND attribution_verified=1 AND start_ms<?3 AND end_ms IS NOT NULL
                      ORDER BY start_ms DESC LIMIT 1",
                     params![tool, account_key, previous.start],
                     |row| row.get(0),
@@ -357,8 +434,12 @@ pub(super) fn observe_quota(
     }
     conn.execute(
         "INSERT INTO monitor_account_cycles
-           (tool,account_key,slot,window_minutes,start_ms,reset_ms,observed_ms,used_percent,exhausted_ms)
-         VALUES(?1,?2,?3,10080,?4,?5,?6,?7,?8)",
+           (tool,account_key,slot,window_minutes,start_ms,reset_ms,observed_ms,used_percent,exhausted_ms,attribution_verified)
+         VALUES(?1,?2,?3,10080,?4,?5,?6,?7,?8,1)
+         ON CONFLICT(tool,account_key,start_ms) DO UPDATE SET
+           slot=excluded.slot,end_ms=NULL,reset_ms=excluded.reset_ms,observed_ms=excluded.observed_ms,
+           used_percent=excluded.used_percent,exhausted_ms=excluded.exhausted_ms,attribution_verified=1
+         WHERE monitor_account_cycles.attribution_verified=0",
         params![tool, account_key, slot, start, reset, observed, used, (used == Some(100.)).then_some(0)],
     )
     .map_err(|error| error.to_string())?;
@@ -371,7 +452,7 @@ pub(super) fn observe_quota(
 fn latest_cycle(conn: &Connection, tool: &str, account: &str) -> Result<Option<Cycle>, String> {
     conn.query_row(
         "SELECT id,start_ms,end_ms,reset_ms,observed_ms,used_percent,exhausted_ms
-         FROM monitor_account_cycles WHERE tool=?1 AND account_key=?2 ORDER BY start_ms DESC LIMIT 1",
+         FROM monitor_account_cycles WHERE tool=?1 AND account_key=?2 AND attribution_verified=1 ORDER BY start_ms DESC LIMIT 1",
         params![tool, account],
         Cycle::from_row,
     )
@@ -381,11 +462,13 @@ fn latest_cycle(conn: &Connection, tool: &str, account: &str) -> Result<Option<C
 
 #[derive(Deserialize)]
 struct AuthFile {
+    auth_mode: Option<String>,
     tokens: Option<AuthTokens>,
 }
 
 #[derive(Deserialize)]
 struct AuthTokens {
+    account_id: Option<String>,
     id_token: Option<String>,
 }
 
@@ -427,9 +510,12 @@ fn claim_time(value: Option<&serde_json::Value>) -> Result<Option<i64>, ()> {
 
 fn decode_subscription(bytes: &[u8]) -> Result<Option<(String, AccountSubscription)>, ()> {
     let file: AuthFile = serde_json::from_slice(bytes).map_err(|_| ())?;
-    let Some(token) = file.tokens.and_then(|tokens| tokens.id_token) else {
+    if file.auth_mode.as_deref().is_some_and(|mode| mode != "chatgpt") {
         return Ok(None);
-    };
+    }
+    let Some(tokens) = file.tokens else { return Ok(None); };
+    let selected_account = tokens.account_id;
+    let Some(token) = tokens.id_token else { return Ok(None); };
     let payload = token.split('.').nth(1).ok_or(())?;
     let decoded = URL_SAFE_NO_PAD
         .decode(payload.trim_end_matches('='))
@@ -444,6 +530,10 @@ fn decode_subscription(bytes: &[u8]) -> Result<Option<(String, AccountSubscripti
     else {
         return Ok(None);
     };
+    if selected_account.as_deref().is_some_and(|selected| selected != account) {
+        // An organization selection must not inherit another account's token dates.
+        return Err(());
+    }
     let start = claim_time(claims.chatgpt_subscription_active_start.as_ref());
     let end = claim_time(claims.chatgpt_subscription_active_until.as_ref());
     let checked = claim_time(claims.chatgpt_subscription_last_checked.as_ref());
@@ -453,6 +543,8 @@ fn decode_subscription(bytes: &[u8]) -> Result<Option<(String, AccountSubscripti
         end_ms: end.ok().flatten(),
         renewal_at_ms: None,
         checked_at_ms: checked.ok().flatten(),
+        active: None,
+        billing_period: None,
         source: "local_auth",
         error: invalid.then(|| "Invalid local subscription date metadata".into()),
     };
@@ -468,7 +560,7 @@ fn decode_subscription(bytes: &[u8]) -> Result<Option<(String, AccountSubscripti
 
 fn read_local_subscriptions() -> LocalSubscriptions {
     let mut paths = Vec::new();
-    if let Some(profile) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|home| !home.is_empty()).or_else(|| std::env::var_os("HOME").filter(|home| !home.is_empty())) {
         paths.push(PathBuf::from(profile).join(".codex").join("auth.json"));
     }
     if let Some(home) = std::env::var_os("CODEX_HOME").filter(|home| !home.is_empty()) {
@@ -542,12 +634,22 @@ pub(super) fn capture_subscription_dates(conn: &Connection) -> Result<(), String
     save_subscription_dates(conn, &read_local_subscriptions())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OfficialBillingCycle {
-    renewal_at_ms: i64,
+    renewal_at_ms: Option<i64>,
     checked_at_ms: i64,
+    // Legacy records were written only after explicit active/monthly responses.
+    #[serde(default = "legacy_active_subscription")]
+    active: Option<bool>,
+    #[serde(default = "legacy_monthly_subscription")]
+    billing_period: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
+
+fn legacy_active_subscription() -> Option<bool> { Some(true) }
+fn legacy_monthly_subscription() -> Option<String> { Some("monthly".into()) }
 
 pub(super) fn subscription_check_due(conn: &Connection, account: &str, now: i64) -> Result<bool, String> {
     let saved: Option<String> = conn.query_row(
@@ -555,7 +657,39 @@ pub(super) fn subscription_check_due(conn: &Connection, account: &str, now: i64)
     ).optional().map_err(|e| e.to_string())?;
     let saved = saved.map(|data| serde_json::from_str::<OfficialBillingCycle>(&data))
         .transpose().map_err(|e| e.to_string())?;
-    Ok(saved.is_none_or(|saved| now - saved.checked_at_ms >= DAY || saved.renewal_at_ms <= now))
+    Ok(saved.is_none_or(|saved| {
+        let retry_after = if saved.error.is_some() { 300_000 } else { DAY };
+        now < saved.checked_at_ms || now.saturating_sub(saved.checked_at_ms) >= retry_after
+            || saved.renewal_at_ms.is_some_and(|renewal| renewal <= now)
+    }))
+}
+
+fn store_official_subscription(conn: &Connection, account: &str, mut next: OfficialBillingCycle) -> Result<(), String> {
+    let transaction = if conn.is_autocommit() {
+        Some(Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(|e| e.to_string())?)
+    } else { None };
+    let key = format!("account_billing_cycle:account:{account}");
+    let previous: Option<String> = conn.query_row("SELECT data FROM monitor_state WHERE key=?1", [&key], |r| r.get(0))
+        .optional().map_err(|e| e.to_string())?;
+    if let Some(previous) = previous {
+        let saved: OfficialBillingCycle = serde_json::from_str(&previous).map_err(|e| e.to_string())?;
+        if saved.checked_at_ms > next.checked_at_ms { return Ok(()); }
+        if saved.checked_at_ms == next.checked_at_ms && saved != next {
+            // Equally timed contradictory observations cannot establish eligibility.
+            next.active = None;
+            next.billing_period = None;
+            next.renewal_at_ms = None;
+            next.error = Some("Conflicting official subscription observations".into());
+        }
+        let history_key = format!("account_billing_cycle_history:account:{account}:{}:{:x}", saved.checked_at_ms, md5::compute(&previous));
+        conn.execute("INSERT OR IGNORE INTO monitor_state(key,data) VALUES(?1,?2)", params![history_key,previous])
+            .map_err(|e| e.to_string())?;
+    }
+    conn.execute("INSERT INTO monitor_state(key,data) VALUES(?1,?2)
+        ON CONFLICT(key) DO UPDATE SET data=excluded.data", params![key,serde_json::to_string(&next).map_err(|e| e.to_string())?])
+        .map_err(|e| e.to_string())?;
+    if let Some(transaction) = transaction { transaction.commit().map_err(|e| e.to_string())?; }
+    Ok(())
 }
 
 pub(super) fn save_official_subscription(conn: &Connection, account: &str, payload: &serde_json::Value, now: i64) -> Result<(), String> {
@@ -564,20 +698,27 @@ pub(super) fn save_official_subscription(conn: &Connection, account: &str, paylo
         return Err("Official subscription account does not match the requested account".into());
     }
     let entitlement = &record["entitlement"];
-    if entitlement["has_active_subscription"].as_bool() != Some(true)
-        || entitlement["billing_period"].as_str() != Some("monthly") {
-        return Ok(());
-    }
-    let renewal = claim_time(entitlement.get("renews_at"))
-        .map_err(|_| "Invalid official subscription renewal time")?;
-    let Some(renewal_at_ms) = renewal else { return Ok(()); };
-    let dates = OfficialBillingCycle { renewal_at_ms, checked_at_ms: now };
-    conn.execute("INSERT INTO monitor_state(key,data) VALUES(?1,?2)
-        ON CONFLICT(key) DO UPDATE SET data=excluded.data
-        WHERE json_extract(excluded.data,'$.checkedAtMs')>=json_extract(monitor_state.data,'$.checkedAtMs')",
-        params![format!("account_billing_cycle:account:{account}"),serde_json::to_string(&dates).map_err(|e|e.to_string())?])
-        .map_err(|e|e.to_string())?;
-    Ok(())
+    let active = entitlement["has_active_subscription"].as_bool();
+    let billing_period = entitlement["billing_period"].as_str().filter(|period| !period.trim().is_empty()).map(str::to_owned);
+    let monthly = active == Some(true) && billing_period.as_deref() == Some("monthly");
+    let renewal_at_ms = if monthly {
+        claim_time(entitlement.get("renews_at")).map_err(|_| "Invalid official subscription renewal time")?
+    } else { None };
+    let explicitly_ineligible = active == Some(false) || billing_period.as_deref().is_some_and(|period| period != "monthly");
+    let error = (!explicitly_ineligible && (!monthly || renewal_at_ms.is_none()))
+        .then(|| "Official metadata does not establish an active monthly subscription cycle".into());
+    store_official_subscription(conn, account, OfficialBillingCycle {
+        renewal_at_ms, checked_at_ms: now, active, billing_period, error,
+    })
+}
+
+pub(super) fn subscription_unavailable(conn: &Connection, account: &str, observed_ms: i64) -> Result<(), String> {
+    // Keep the last successful record in history. Failure means unknown, never
+    // inactive, and cannot keep a formerly valid monthly period marked current.
+    store_official_subscription(conn, account, OfficialBillingCycle {
+        renewal_at_ms: None, checked_at_ms: observed_ms, active: None, billing_period: None,
+        error: Some("Official subscription metadata could not be refreshed".into()),
+    })
 }
 
 fn with_subscription_history(
@@ -611,6 +752,8 @@ fn with_subscription_history(
                     end_ms: saved.end_ms,
                     renewal_at_ms: None,
                     checked_at_ms: saved.checked_at_ms,
+                    active: None,
+                    billing_period: None,
                     source: "local_auth",
                     error: None,
                 },
@@ -625,16 +768,22 @@ fn with_subscription_history(
         let (key,data)=row.map_err(|e|e.to_string())?;
         let saved:OfficialBillingCycle=serde_json::from_str(&data).map_err(|e|e.to_string())?;
         let subscription=result.accounts.entry(key.trim_start_matches("account_billing_cycle:").to_owned()).or_default();
-        subscription.renewal_at_ms=Some(saved.renewal_at_ms);
-        subscription.end_ms=Some(saved.renewal_at_ms);
-        subscription.checked_at_ms=Some(saved.checked_at_ms);
-        subscription.source="official";
-        subscription.error=None;
+        subscription.renewal_at_ms = saved.renewal_at_ms;
+        if saved.renewal_at_ms.is_some() { subscription.end_ms = saved.renewal_at_ms; }
+        subscription.checked_at_ms = Some(saved.checked_at_ms);
+        subscription.active = saved.active;
+        subscription.billing_period = saved.billing_period;
+        subscription.source = "official";
+        subscription.error = saved.error;
     }
     Ok(result)
 }
 
 fn subscription_month(subscription: &AccountSubscription, now: i64) -> Option<(i64, i64)> {
+    if subscription.error.is_some() || subscription.active == Some(false)
+        || subscription.billing_period.as_deref().is_some_and(|period| period != "monthly") {
+        return None;
+    }
     if let Some(renewal) = subscription.renewal_at_ms {
         // The original activation date can precede changes to the monthly billing schedule.
         let target = DateTime::<Utc>::from_timestamp_millis(now.min(renewal - 1))?;
@@ -706,6 +855,7 @@ fn read(
     now: i64,
     subscriptions: &LocalSubscriptions,
 ) -> Result<AccountUsageReport, String> {
+    store::validate_token_totals(conn)?;
     let current_account = if subscriptions.error.is_none() && subscriptions.accounts.len() == 1 {
         subscriptions.accounts.keys().next()
     } else {
@@ -714,33 +864,14 @@ fn read(
     let subscriptions = with_subscription_history(conn, subscriptions)?;
     let evidence = super::request_accounts::EvidenceIndex::load(conn)?;
     let verified_bounds = evidence.account_bounds();
-    let mut statement = conn
-        .prepare(
-            "SELECT tool,account_key,MIN(id),MIN(json_extract(data,'$.account_label'))
-         FROM monitor_quotas GROUP BY tool,account_key
-         HAVING MAX(json_extract(data,'$.attribution')='account')=1
-         UNION ALL SELECT 'codex',account_key,0,NULL FROM monitor_request_account_evidence e
-         WHERE NOT EXISTS(SELECT 1 FROM monitor_quotas q WHERE q.tool='codex' AND q.account_key=e.account_key)
-         GROUP BY account_key ORDER BY 1,3",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })
-        .map_err(|error| error.to_string())?;
+    let rows = super::quota::account_rows(conn)?;
     let mut accounts = Vec::new();
     let mut current_account_key = None;
     let mut indices = BTreeMap::new();
     let mut ranges = vec![(week_start, now)];
     let mut report_identities = BTreeMap::new();
     for row in rows {
-        let (tool, raw_account, _id, label) = row.map_err(|error| error.to_string())?;
+        let (tool, raw_account, _id, label) = row;
         if !report_identities.contains_key(&tool) {
             report_identities.insert(tool.clone(), super::quota::account_report_identities(conn, &tool)?);
         }
@@ -757,12 +888,11 @@ fn read(
             .map(|(start, end)| AccountUsagePeriod::new(start, end, now));
         let verified_history = (tool=="codex").then(|| verified_bounds.get(&raw_account)).flatten()
             .map(|(start,end)| AccountUsagePeriod::new(*start,*end,now));
-        if let Some(history) = &verified_history { ranges.push((history.start_ms,history.observed_end_ms)); }
         let mut cycle_statement = conn
             .prepare(
                 "SELECT id,start_ms,end_ms,reset_ms,observed_ms,used_percent,exhausted_ms
              FROM monitor_account_cycles WHERE tool=?1 AND account_key=?2
-               AND start_ms<=?3 AND observed_ms>0
+               AND attribution_verified=1 AND start_ms<=?3 AND observed_ms>0
                AND COALESCE(end_ms,reset_ms)>start_ms ORDER BY start_ms DESC",
             )
             .map_err(|error| error.to_string())?;
@@ -807,6 +937,12 @@ fn read(
             billing_account_verified: false,
             verified_week_requests: 0,
             creator_reference_week_requests: 0,
+            creator_reference: AccountReferenceUsage {
+                calendar_week: AccountUsagePeriod::new(week_start, now, now),
+                subscription_month: month.clone(), current_cycle: None, previous_cycle: None,
+                quota_cycles: quota_cycles.clone(), month_cycles: month_cycles.clone(),
+                unsegmented_month: Totals::default(), unsegmented_month_billing_totals: BTreeMap::new(),
+            },
             verified_history,
             subscription,
             calendar_week: AccountUsagePeriod::new(week_start, now, now),
@@ -821,6 +957,9 @@ fn read(
     }
     let creators = session_creators(conn)?;
     let mut unassigned_week = Totals::default();
+    let mut unassigned_by_tool = BTreeMap::<String, Totals>::new();
+    let mut unlocated_totals = Totals::default();
+    let mut unlocated_by_tool = BTreeMap::<String, Totals>::new();
     ranges.retain(|(start, end)| start < end);
     ranges.sort_unstable();
     let mut merged: Vec<(i64, i64)> = Vec::new();
@@ -842,9 +981,17 @@ fn read(
             .join(" OR ")
     };
     let mut statement = conn.prepare(&format!(
-        "SELECT tool,timestamp_ms,usage,cost FROM monitor_requests WHERE {where_clause} ORDER BY timestamp_ms",
+        "SELECT tool,timestamp_ms,usage,cost FROM monitor_requests WHERE ({where_clause})
+           OR (tool='codex' AND timestamp_ms<? AND id IN (SELECT value FROM json_each(?)))
+           OR EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='timestamp')
+           OR json_extract(usage,'$.usageBasis') IN ('legacy_initial_cumulative','legacy_cumulative_delta') ORDER BY timestamp_ms",
     )).map_err(|error| error.to_string())?;
-    let parameters = merged.iter().flat_map(|(start, end)| [*start, *end]);
+    // The display bounds of verified history may span years. Read only the
+    // actually matched requests between them, not every unrelated intervening row.
+    let mut parameters: Vec<rusqlite::types::Value> = merged.iter()
+        .flat_map(|(start, end)| [rusqlite::types::Value::Integer(*start), rusqlite::types::Value::Integer(*end)]).collect();
+    parameters.push(rusqlite::types::Value::Integer(now));
+    parameters.push(rusqlite::types::Value::Text(serde_json::to_string(&evidence.api_request_ids()).map_err(|error| error.to_string())?));
     let rows = statement
         .query_map(rusqlite::params_from_iter(parameters), |row| {
             Ok((
@@ -859,30 +1006,39 @@ fn read(
         let (tool, time, usage, cost) = row.map_err(|error| error.to_string())?;
         let usage: UsageRecord = serde_json::from_str(&usage).map_err(|error| error.to_string())?;
         let totals = weekly::saved_request_totals(&usage, &cost)?;
-        let matched = evidence.account_for(&usage);
-        let (account_key, verified) = match matched {
-            super::request_accounts::AccountMatch::Verified(account) => (Some(account.to_owned()), true),
-            super::request_accounts::AccountMatch::Conflict => (None, false),
-            super::request_accounts::AccountMatch::None => (creators.get(&(tool.clone(), usage.session_id.clone()))
-                .filter(|creators| creators.len() == 1).and_then(|creators| creators.first().cloned()), false),
+        if !usage.has_period_timestamp() {
+            store::merge_totals(&mut unlocated_totals, &totals);
+            store::merge_totals(unlocated_by_tool.entry(tool).or_default(), &totals);
+            continue;
+        }
+        let index = match evidence.account_for(&usage) {
+            super::request_accounts::AccountMatch::Verified(account) => indices.get(&(tool.clone(), account.to_owned())),
+            _ => None,
         };
-        let index = account_key.and_then(|account| indices.get(&(tool, account)));
         let Some(index) = index else {
-            if time >= week_start {
+            // A creator is useful provenance for a conversation, never proof of
+            // the login that paid for a later request. References are a subset
+            // of unassigned records and must not be added to confirmed totals.
+            if week_start <= time && time < now {
                 store::merge_totals(&mut unassigned_week, &totals);
+                store::merge_totals(unassigned_by_tool.entry(tool.clone()).or_default(), &totals);
+            }
+            if let Some(reference) = creators.get(&(tool.clone(), usage.session_id.clone()))
+                .filter(|creators| creators.len() == 1).and_then(|creators| creators.first())
+                .and_then(|creator| indices.get(&(tool, creator.clone()))) {
+                accounts[*reference].creator_reference.add(time, &usage, &totals);
             }
             continue;
         };
         let account = &mut accounts[*index];
-        if verified {
+        {
             if let Some(history) = account.verified_history.as_mut().filter(|range|range.contains(time)) {
                 history.add(&usage,&totals);
             }
         }
         if account.calendar_week.contains(time) {
             account.calendar_week.add(&usage,&totals);
-            if verified { account.verified_week_requests += 1; }
-            else { account.creator_reference_week_requests += 1; }
+            account.verified_week_requests += 1;
         }
         if let Some(cycle) = account
             .quota_cycles
@@ -917,9 +1073,14 @@ fn read(
         }
     }
     for account in &mut accounts {
+        account.creator_reference.finish(now);
+        account.creator_reference_week_requests = account.creator_reference.calendar_week.totals.request_count;
         if let Some(history) = &mut account.verified_history {
             history.finish();
-            if history.totals.request_count>0 { account.attribution="request_evidence_with_creator_reference"; }
+            if history.totals.request_count > 0 {
+                account.attribution = "request_evidence_with_creator_reference";
+                account.billing_account_verified = true;
+            }
         }
         account.calendar_week.finish();
         if let Some(month) = &mut account.subscription_month {
@@ -949,12 +1110,17 @@ fn read(
         for totals in account.unsegmented_month_billing_totals.values_mut(){store::finish_totals(totals);}
     }
     store::finish_totals(&mut unassigned_week);
+    store::finish_totals(&mut unlocated_totals);
+    for totals in unassigned_by_tool.values_mut().chain(unlocated_by_tool.values_mut()) { store::finish_totals(totals); }
     Ok(AccountUsageReport {
         collected_at_ms: now,
         week_start_ms: week_start,
         current_account_key,
         accounts,
         unassigned_week,
+        unassigned_by_tool,
+        unlocated_totals,
+        unlocated_by_tool,
     })
 }
 
@@ -1029,7 +1195,7 @@ mod tests {
         .unwrap();
     }
 
-    fn request(conn: &Connection, id: &str, session: &str, stamp: i64, cost: Value) {
+    fn unverified_request(conn: &Connection, id: &str, session: &str, stamp: i64, cost: Value) {
         let usage = UsageRecord {
             id: id.into(),
             tool: "codex".into(),
@@ -1055,6 +1221,28 @@ mod tests {
         .unwrap();
     }
 
+    fn request(conn: &Connection, id: &str, session: &str, stamp: i64, cost: Value) {
+        unverified_request(conn, id, session, stamp, cost);
+        if let Some(creators) = session_creators(conn).unwrap().get(&("codex".into(), session.into())) {
+            if let [creator] = creators.iter().collect::<Vec<_>>().as_slice() {
+                prove_request(conn, id, creator);
+            }
+        }
+    }
+
+    fn prove_request(conn: &Connection, id: &str, account: &str) {
+        let (session, time): (String, i64) = conn.query_row(
+            "SELECT json_extract(usage,'$.sessionId'),timestamp_ms FROM monitor_requests WHERE tool='codex' AND id=?1",
+            [id], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        let model = format!("fixture-model:{id}");
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.model',?2) WHERE tool='codex' AND id=?1",
+            params![id,model]).unwrap();
+        conn.execute("INSERT INTO monitor_request_account_evidence
+            SELECT 'account-period-fixture',COALESCE(MAX(log_id),0)+1,?1,?2,?3,NULL,?4,?4,100,20,40
+            FROM monitor_request_account_evidence WHERE source='account-period-fixture'", params![session,account,model,time]).unwrap();
+    }
+
     fn subscriptions(start: i64, end: Option<i64>) -> LocalSubscriptions {
         LocalSubscriptions {
             accounts: [(
@@ -1064,6 +1252,8 @@ mod tests {
                     end_ms: end,
                     renewal_at_ms: None,
                     checked_at_ms: Some(start),
+                    active: None,
+                    billing_period: None,
                     source: "local_auth",
                     error: None,
                 },
@@ -1119,10 +1309,12 @@ mod tests {
         account(&conn,1,"creator");
         session(&conn,"old-chat","old-chat",Some("creator"),None);
         let start = time("2026-11-02T00:00:00Z");
-        request(&conn,"matched","old-chat",start+1000,json!({"usd":3.0}));
-        request(&conn,"unmatched","old-chat",start+3000,json!({"usd":2.0}));
+        unverified_request(&conn,"matched","old-chat",start+1000,json!({"usd":3.0}));
+        unverified_request(&conn,"unmatched","old-chat",start+3000,json!({"usd":2.0}));
         let before = read(&conn,start,start+5000,&LocalSubscriptions::default()).unwrap();
-        assert_eq!(before.accounts[0].calendar_week.totals.priced_cost_usd,5.0);
+        assert_eq!(before.accounts[0].calendar_week.totals.priced_cost_usd,0.0);
+        assert_eq!(before.accounts[0].creator_reference.calendar_week.totals.priced_cost_usd,5.0);
+        assert_eq!(before.unassigned_week.priced_cost_usd,5.0);
         conn.execute("INSERT INTO monitor_request_account_evidence VALUES('fixture',1,'old-chat','account:actual','model',NULL,?1,?2,100,20,40)",
             params![start,start+2000]).unwrap();
         conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.model','model') WHERE id='matched'",[]).unwrap();
@@ -1133,8 +1325,10 @@ mod tests {
         assert_eq!(actual.creator_reference_week_requests,0);
         assert_eq!(actual.verified_history.as_ref().unwrap().totals.priced_cost_usd,3.0);
         let creator = after.accounts.iter().find(|a|a.creator_reference_week_requests==1).unwrap();
-        assert_eq!(creator.calendar_week.totals.priced_cost_usd,2.0);
-        assert_eq!(after.accounts.iter().map(|a|a.calendar_week.totals.priced_cost_usd).sum::<f64>(),5.0);
+        assert_eq!(creator.calendar_week.totals.priced_cost_usd,0.0);
+        assert_eq!(creator.creator_reference.calendar_week.totals.priced_cost_usd,2.0);
+        assert_eq!(after.unassigned_week.priced_cost_usd,2.0);
+        assert_eq!(after.accounts.iter().map(|a|a.calendar_week.totals.priced_cost_usd).sum::<f64>() + after.unassigned_week.priced_cost_usd,5.0);
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|r|r.get::<_,i64>(0)).unwrap(),2);
         let later = read(&conn,start+DAY,start+2*DAY,&LocalSubscriptions::default()).unwrap();
         let actual = later.accounts.iter().find(|account| account.verified_history.as_ref().is_some_and(|h|h.totals.request_count>0)).unwrap();
@@ -1168,18 +1362,22 @@ mod tests {
             ("future", "parent", start + 100),
             ("before", "parent", start - 1),
         ] {
-            request(&conn, id, session, stamp, json!({"usd":1.0}));
+            unverified_request(&conn, id, session, stamp, json!({"usd":1.0}));
         }
         let report = read(&conn, start, start + 100, &LocalSubscriptions::default()).unwrap();
         assert_eq!(report.accounts.len(), 2);
-        assert_eq!(report.accounts[0].calendar_week.totals.request_count, 1);
-        assert_eq!(report.accounts[1].calendar_week.totals.request_count, 1);
-        assert_eq!(report.unassigned_week.request_count, 2);
+        assert_eq!(report.accounts[0].calendar_week.totals.request_count, 0);
+        assert_eq!(report.accounts[0].creator_reference.calendar_week.totals.request_count, 1);
+        assert_eq!(report.accounts[1].calendar_week.totals.request_count, 0);
+        assert_eq!(report.accounts[1].creator_reference.calendar_week.totals.request_count, 1);
+        assert_eq!(report.unassigned_week.request_count, 4);
         assert!(report.accounts[0].account_key.starts_with("codex:account-"));
         assert_eq!(report.accounts[0].subscription.source, "none");
         assert!(report.accounts[0].subscription_month.is_none());
         assert!(report.accounts[0].previous_cycle.is_none());
-        assert_eq!(report.accounts[0].calendar_week.totals.total_tokens, 120);
+        assert_eq!(report.accounts[0].calendar_week.totals.total_tokens, 0);
+        assert_eq!(report.accounts[0].creator_reference.calendar_week.totals.total_tokens, 120);
+        assert_eq!((report.unassigned_week.total_tokens, report.unassigned_week.priced_cost_usd), (480, 4.0));
         let json = serde_json::to_value(report).unwrap();
         assert_eq!(json["accounts"][0]["attribution"], "session_creator");
         assert_eq!(json["accounts"][0]["billingAccountVerified"], false);
@@ -1299,13 +1497,9 @@ mod tests {
             (1_792_909_122_624, 1_793_513_494_000, 0., true),
             (1_792_909_132_650, 1_793_513_494_000, 1., true),
         ] {
-            let payload = json!({"rate_limits":{"limit_id":"codex","plan_type":"pro",
-                "primary":{"window_minutes":10080,"resets_at":next_reset / 1000,"used_percent":used}}});
-            for observation in
-                super::super::quota::codex_observations(&payload, Some("a"), "a", Some(observed))
-            {
-                super::super::quota::save(&conn, &observation).unwrap();
-            }
+            let payload = json!({"plan_type":"pro","rate_limit":{"primary_window":{
+                "limit_window_seconds":604800,"reset_at":next_reset / 1000,"used_percent":used}}});
+            super::super::quota::save_authenticated_codex(&conn, "a", &payload, observed).unwrap();
             if accepted {
                 accepted_observed = observed;
             }
@@ -1323,13 +1517,9 @@ mod tests {
 
         // A later stale-window 100% must remain raw evidence, not exhaust the new round.
         let stale_observed = accepted_observed + 1_000;
-        let payload = json!({"rate_limits":{"limit_id":"codex",
-            "primary":{"window_minutes":10080,"resets_at":1793386876i64,"used_percent":100.}}});
-        for observation in
-            super::super::quota::codex_observations(&payload, Some("a"), "a", Some(stale_observed))
-        {
-            super::super::quota::save(&conn, &observation).unwrap();
-        }
+        let payload = json!({"plan_type":"pro","rate_limit":{"primary_window":{
+            "limit_window_seconds":604800,"reset_at":1793386876i64,"used_percent":100.}}});
+        super::super::quota::save_authenticated_codex(&conn, "a", &payload, stale_observed).unwrap();
         let cycle = latest_cycle(&conn, "codex", "account:a").unwrap().unwrap();
         assert_eq!(
             (cycle.observed, cycle.used, cycle.exhausted),
@@ -1445,8 +1635,8 @@ mod tests {
             (1_792_909_122_624, None, 1_792_909_122_624, 0.),
         ] {
             conn.execute(
-                "INSERT INTO monitor_account_cycles(tool,account_key,slot,window_minutes,start_ms,end_ms,reset_ms,observed_ms,used_percent)
-                 VALUES('codex','account:a','primary',10080,?1,?2,?3,?4,?5)",
+                "INSERT INTO monitor_account_cycles(tool,account_key,slot,window_minutes,start_ms,end_ms,reset_ms,observed_ms,used_percent,attribution_verified)
+                 VALUES('codex','account:a','primary',10080,?1,?2,?3,?4,?5,1)",
                 params![start, end, reset, observed, used],
             ).unwrap();
         }
@@ -2110,9 +2300,9 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO monitor_account_cycles(tool,account_key,slot,window_minutes,start_ms,reset_ms,observed_ms,used_percent)
-             VALUES('codex','account:a','secondary',10080,?1,?2,?1,10),
-                   ('codex','account:a','secondary',10080,?3,?4,0,10)",
+            "INSERT INTO monitor_account_cycles(tool,account_key,slot,window_minutes,start_ms,reset_ms,observed_ms,used_percent,attribution_verified)
+             VALUES('codex','account:a','secondary',10080,?1,?2,?1,10,1),
+                   ('codex','account:a','secondary',10080,?3,?4,0,10,1)",
             params![now + DAY, now + WEEK, start - 2 * WEEK, start - WEEK],
         ).unwrap();
         let report = read(
@@ -2184,6 +2374,11 @@ mod tests {
         ).unwrap();
         store::initialize(&conn).unwrap();
         initialize(&conn).unwrap();
+        assert!(latest_cycle(&conn, "codex", "account:a").unwrap().is_none());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_account_cycles WHERE id=9 AND attribution_verified=0", [], |r| r.get::<_,i64>(0)).unwrap(), 1);
+        // This test now supplies independent provenance before testing the old
+        // exhaustion migration; initialization itself must never assume it.
+        conn.execute("UPDATE monitor_account_cycles SET attribution_verified=1 WHERE id=9", []).unwrap();
         let cycle = latest_cycle(&conn, "codex", "account:a").unwrap().unwrap();
         assert_eq!(
             (
@@ -2378,7 +2573,7 @@ mod tests {
             "UPDATE monitor_quotas SET observed_ms=?1,data=?2 WHERE id=1",
             params![
                 observed,
-                json!({"attribution":"account","resets_at_ms":reset,"used_percent":25.})
+                json!({"attribution":"account","billing_account_verified":true,"source":"codex_official_usage","resets_at_ms":reset,"used_percent":25.})
                     .to_string()
             ],
         )
@@ -2997,6 +3192,9 @@ mod tests {
         assert_eq!(month.totals.priced_cost_usd, 2.);
         assert_eq!(month.totals.request_count, 1);
         assert_eq!(account.calendar_week.totals.priced_cost_cny, 3.);
+        let history = account.verified_history.as_ref().unwrap();
+        assert_eq!(history.totals.request_count, 3);
+        assert_eq!((history.totals.priced_cost_usd, history.totals.priced_cost_cny), (1001., 3.));
     }
 
     #[test]
@@ -3166,4 +3364,171 @@ mod tests {
             "unassignedWeek":report.unassigned_week,"globalWeek":global})
         );
     }
+    #[test]
+    fn same_session_switch_keeps_creator_references_out_of_confirmed_accounts() {
+        let conn = database();
+        account(&conn, 1, "creator");
+        account(&conn, 2, "actual");
+        session(&conn, "chat", "same-chat", Some("creator"), None);
+        let start = time("2026-11-02T00:00:00Z");
+        unverified_request(&conn, "unknown-before", "same-chat", start + 1000, json!({"usd":2.0}));
+        unverified_request(&conn, "proven-after-switch", "same-chat", start + 2000, json!({"usd":3.0}));
+        unverified_request(&conn, "unknown-after", "same-chat", start + 3000, json!({"usd":5.0}));
+        prove_request(&conn, "proven-after-switch", "account:actual");
+        let report = read(&conn, start, start + 5000, &LocalSubscriptions::default()).unwrap();
+        let ids = super::super::quota::account_report_identities(&conn, "codex").unwrap();
+        let creator = report.accounts.iter().find(|a| a.account_key == ids["account:creator"].0).unwrap();
+        let actual = report.accounts.iter().find(|a| a.account_key == ids["account:actual"].0).unwrap();
+        assert_eq!((creator.calendar_week.totals.request_count, creator.calendar_week.totals.priced_cost_usd), (0, 0.0));
+        assert!(!creator.billing_account_verified);
+        assert_eq!((actual.calendar_week.totals.request_count, actual.calendar_week.totals.priced_cost_usd), (1, 3.0));
+        assert!(actual.billing_account_verified);
+        assert_eq!((report.unassigned_week.request_count, report.unassigned_week.total_tokens, report.unassigned_week.priced_cost_usd), (2, 240, 7.0));
+        assert_eq!(report.accounts.iter().map(|a| a.calendar_week.totals.request_count).sum::<i64>() + report.unassigned_week.request_count, 3);
+        assert_eq!(report.accounts.iter().map(|a| a.calendar_week.totals.priced_cost_usd).sum::<f64>() + report.unassigned_week.priced_cost_usd, 10.0);
+        let value = serde_json::to_value(report).unwrap();
+        let creator = value["accounts"].as_array().unwrap().iter().find(|a| a["accountKey"] == ids["account:creator"].0).unwrap();
+        assert_eq!(creator["creatorReference"]["calendarWeek"]["totals"]["requestCount"], 2);
+        assert_eq!(creator["creatorReference"]["calendarWeek"]["totals"]["pricedCostUsd"], 7.0);
+        assert_eq!(value["unassignedByTool"]["codex"]["requestCount"], 2);
+        assert!(!value.to_string().contains("account:creator"));
+    }
+
+    #[test]
+    fn creator_without_quota_has_reference_identity_but_no_confirmed_usage() {
+        let conn = database();
+        session(&conn, "one", "shared-chat", Some("same-name"), None);
+        session(&conn, "copy", "shared-chat", Some("same-name"), None);
+        let start = time("2026-11-02T00:00:00Z");
+        unverified_request(&conn, "reference", "shared-chat", start + 1, json!({"usd":4.25}));
+        let report = read(&conn, start, start + 1000, &LocalSubscriptions::default()).unwrap();
+        assert_eq!(report.accounts.len(), 1);
+        assert_eq!(report.accounts[0].calendar_week.totals.request_count, 0);
+        assert_eq!((report.unassigned_week.request_count, report.unassigned_week.priced_cost_usd), (1, 4.25));
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["accounts"][0]["creatorReference"]["calendarWeek"]["totals"]["pricedCostUsd"], 4.25);
+        session(&conn, "conflicting-copy", "shared-chat", Some("different-account"), None);
+        let conflict = serde_json::to_value(read(&conn, start, start + 1000, &LocalSubscriptions::default()).unwrap()).unwrap();
+        assert_eq!(conflict["unassignedWeek"]["requestCount"], 1);
+        for account in conflict["accounts"].as_array().unwrap() {
+            assert_eq!(account["calendarWeek"]["totals"]["requestCount"], 0);
+            assert_eq!(account["creatorReference"]["calendarWeek"]["totals"]["requestCount"], 0);
+        }
+    }
+
+    #[test]
+    fn account_periods_do_not_locate_unknown_times_or_cumulative_intervals() {
+        let conn = database();
+        account(&conn, 1, "a");
+        session(&conn, "one", "chat", Some("a"), None);
+        let start = time("2026-11-02T00:00:00Z");
+        for (id, stamp, basis) in [("unknown-time", start - DAY, ""),
+            ("cumulative", start + 10, "legacy_initial_cumulative"),
+            ("delta", start + 20, "legacy_cumulative_delta")] {
+            unverified_request(&conn, id, "chat", stamp, json!({"usd":2.0}));
+            conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.usageBasis',?2) WHERE id=?1", params![id,basis]).unwrap();
+        }
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.unknownFields',json('[\"timestamp\",\"cache_read_tokens\"]')) WHERE id='unknown-time'", []).unwrap();
+        let report = read(&conn, start, start + 1000, &LocalSubscriptions::default()).unwrap();
+        assert_eq!(report.accounts[0].calendar_week.totals.request_count, 0);
+        assert_eq!(report.unassigned_week.request_count, 0);
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["unlocatedTotals"]["requestCount"], 3);
+        assert_eq!(value["unlocatedTotals"]["totalTokens"], 360);
+        assert_eq!(value["unlocatedTotals"]["pricedCostUsd"], 6.0);
+        assert_eq!(value["unlocatedTotals"]["unitemizedRecords"], 2);
+        assert_eq!(value["unlocatedTotals"]["cacheReadUnknownRequests"], 1);
+        assert_eq!(value["unlocatedByTool"]["codex"]["requestCount"], 3);
+        assert_eq!(value["accounts"][0]["creatorReference"]["calendarWeek"]["totals"]["requestCount"], 0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |r| r.get::<_,i64>(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn selected_account_conflicts_and_non_chatgpt_modes_do_not_reuse_token_dates() {
+        let claims = json!({"https://api.openai.com/auth":{"chatgpt_account_id":"personal",
+            "chatgpt_subscription_active_start":"2026-10-01T00:00:00Z"}});
+        let token = format!("header.{}.signature", URL_SAFE_NO_PAD.encode(claims.to_string()));
+        let selected_other = json!({"auth_mode":"chatgpt","tokens":{"account_id":"organization","id_token":token}});
+        assert!(decode_subscription(selected_other.to_string().as_bytes()).is_err());
+        let api_mode = json!({"auth_mode":"apikey","tokens":{"account_id":"personal","id_token":token}});
+        assert!(decode_subscription(api_mode.to_string().as_bytes()).unwrap().is_none());
+        let invalid = AccountSubscription { start_ms: Some(time("2026-10-01T00:00:00Z")),
+            error: Some("Invalid end metadata".into()), ..Default::default() };
+        assert!(subscription_month(&invalid, time("2026-10-15T00:00:00Z")).is_none());
+    }
+
+    #[test]
+    fn official_subscription_denials_and_unknown_responses_revoke_only_current_eligibility() {
+        let start = time("2026-10-01T00:00:00Z");
+        let now = time("2026-10-20T00:00:00Z");
+        let active = json!({"accounts":{"a":{"account":{"account_id":"a"},"entitlement":{
+            "has_active_subscription":true,"billing_period":"monthly","renews_at":"2026-11-01T00:00:00Z"}}}});
+        for (entitlement, expected_active, expected_period, unknown) in [
+            (json!({"has_active_subscription":false,"billing_period":"monthly"}), json!(false), json!("monthly"), false),
+            (json!({"has_active_subscription":true,"billing_period":"yearly"}), json!(true), json!("yearly"), false),
+            (json!({}), Value::Null, Value::Null, true),
+        ] {
+            let conn = database();
+            account(&conn, 1, "a");
+            session(&conn, "chat", "chat", Some("a"), None);
+            request(&conn, "kept", "chat", now - 1000, json!({"usd":9.0}));
+            let original: (String, String) = conn.query_row("SELECT usage,cost FROM monitor_requests", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+            save_official_subscription(&conn, "a", &active, now).unwrap();
+            let before = read(&conn, now-DAY, now, &subscriptions(start, None)).unwrap();
+            assert_eq!(before.accounts[0].subscription_month.as_ref().unwrap().totals.priced_cost_usd, 9.0);
+            let response = json!({"accounts":{"a":{"account":{"account_id":"a"},"entitlement":entitlement}}});
+            save_official_subscription(&conn, "a", &response, now + 1000).unwrap();
+            // A delayed older successful response cannot undo newer denial/unknown evidence.
+            save_official_subscription(&conn, "a", &active, now + 500).unwrap();
+            let after = read(&conn, now-DAY, now+2000, &subscriptions(start, None)).unwrap();
+            assert!(after.accounts[0].subscription_month.is_none());
+            assert_eq!(after.accounts[0].calendar_week.totals.priced_cost_usd, 9.0);
+            assert_eq!(after.accounts[0].subscription.error.is_some(), unknown);
+            let value = serde_json::to_value(after).unwrap();
+            assert_eq!(value["accounts"][0]["subscription"]["active"], expected_active);
+            assert_eq!(value["accounts"][0]["subscription"]["billingPeriod"], expected_period);
+            let history: String = conn.query_row("SELECT data FROM monitor_state WHERE key GLOB 'account_billing_cycle_history:*'", [], |r|r.get(0)).unwrap();
+            let history: Value = serde_json::from_str(&history).unwrap();
+            assert_eq!(history["renewalAtMs"], time("2026-11-01T00:00:00Z"));
+            assert_eq!(history["active"], true);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+            assert_eq!(conn.query_row("SELECT usage,cost FROM monitor_requests", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn concurrent_account_schema_upgrade_serializes_before_column_checks() {
+        let path = std::env::temp_dir().join(format!("account-schema-{}-{}.sqlite", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let conn = Connection::open(&path).unwrap();
+        store::initialize(&conn).unwrap();
+        let start = time("2026-10-01T00:00:00Z");
+        conn.execute("INSERT INTO monitor_account_cycles(id,tool,account_key,slot,window_minutes,start_ms,reset_ms,observed_ms,used_percent)
+            VALUES(9,'codex','account:old','primary',10080,?1,?2,?3,99)", params![start,start+WEEK,start+DAY]).unwrap();
+        conn.execute("ALTER TABLE monitor_account_cycles DROP COLUMN attribution_verified", []).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('monitor_account_cycles')", [], |r|r.get::<_,i64>(0)).unwrap(), 11);
+        drop(conn);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers: Vec<_> = (0..2).map(|_| {
+            let path = path.clone(); let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let conn = Connection::open(path).unwrap();
+                conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                barrier.wait();
+                super::super::quota::initialize(&conn)
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap().unwrap(); }
+        let conn = Connection::open(&path).unwrap();
+        let row: (i64,i64,i64,i64,f64,Option<i64>,i64) = conn.query_row(
+            "SELECT id,start_ms,reset_ms,observed_ms,used_percent,exhausted_ms,attribution_verified FROM monitor_account_cycles", [],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).unwrap();
+        assert_eq!(row, (9,start,start+WEEK,start+DAY,99.0,None,0));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('monitor_account_cycles') WHERE name='attribution_verified'", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_account_cycles", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+        assert!(latest_cycle(&conn, "codex", "account:old").unwrap().is_none());
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
+    }
+
 }

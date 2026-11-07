@@ -24,7 +24,7 @@
       <!-- Right: Announcements + Docs + Language + Subscriptions + Balance + User Dropdown -->
       <div class="flex min-w-0 items-center gap-1 sm:gap-3">
         <!-- Announcement Bell -->
-        <AnnouncementBell v-if="user" />
+        <AnnouncementBell v-if="user && authStore.authMode === 'jwt'" />
 
         <!-- Docs Link -->
         <a
@@ -52,7 +52,7 @@
         <LocaleSwitcher />
 
         <!-- Subscription Progress (for users with active subscriptions) -->
-        <SubscriptionProgressMini v-if="user" />
+        <SubscriptionProgressMini v-if="user && authStore.authMode === 'jwt'" />
 
         <!-- Balance Display -->
         <div

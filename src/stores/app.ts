@@ -4,7 +4,8 @@
  */
 
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { connectionScopeKey } from './connectionScope'
 import type { Toast, ToastType, PublicSettings } from '@/types'
 import { i18n } from '@/i18n'
 import {
@@ -34,6 +35,8 @@ export const useAppStore = defineStore('app', () => {
   const docUrl = ref<string>('')
   const cachedPublicSettings = ref<PublicSettings | null>(null)
   let publicSettingsRequest: Promise<PublicSettings | null> | null = null
+  let publicSettingsGeneration = 0
+  let versionGeneration = 0
 
   // Version cache state
   const versionLoaded = ref<boolean>(false)
@@ -259,8 +262,10 @@ export const useAppStore = defineStore('app', () => {
     }
 
     versionLoading.value = true
+    const generation = versionGeneration
     try {
       const data = await checkUpdatesAPI(force)
+      if (generation !== versionGeneration) return null
       currentVersion.value = data.current_version
       latestVersion.value = data.latest_version
       hasUpdate.value = data.has_update
@@ -272,7 +277,7 @@ export const useAppStore = defineStore('app', () => {
       console.error('Failed to fetch version:', error)
       return null
     } finally {
-      versionLoading.value = false
+      if (generation === versionGeneration) versionLoading.value = false
     }
   }
 
@@ -280,8 +285,13 @@ export const useAppStore = defineStore('app', () => {
    * Clear version cache (e.g., after update)
    */
   function clearVersionCache(): void {
+    versionGeneration += 1
     versionLoaded.value = false
+    versionLoading.value = false
     hasUpdate.value = false
+    currentVersion.value = ''
+    latestVersion.value = ''
+    releaseInfo.value = null
   }
 
   // ==================== Public Settings Management ====================
@@ -382,6 +392,7 @@ export const useAppStore = defineStore('app', () => {
     }
 
     publicSettingsLoading.value = true
+    const generation = publicSettingsGeneration
     let apiRequest: Promise<PublicSettings>
     try {
       apiRequest = fetchPublicSettingsAPI()
@@ -393,6 +404,7 @@ export const useAppStore = defineStore('app', () => {
 
     const request = apiRequest
       .then((data) => {
+        if (generation !== publicSettingsGeneration) return null
         applySettings(data)
         return data
       })
@@ -415,9 +427,24 @@ export const useAppStore = defineStore('app', () => {
    * Clear public settings cache
    */
   function clearPublicSettingsCache(): void {
+    publicSettingsGeneration += 1
+    publicSettingsRequest = null
+    publicSettingsLoading.value = false
     publicSettingsLoaded.value = false
     cachedPublicSettings.value = null
+    siteName.value = 'Sub2API'
+    siteLogo.value = ''
+    siteVersion.value = ''
+    contactInfo.value = ''
+    apiBaseUrl.value = ''
+    docUrl.value = ''
+    if (typeof window !== 'undefined') delete window.__APP_CONFIG__
   }
+
+  watch(connectionScopeKey, () => {
+    clearPublicSettingsCache()
+    clearVersionCache()
+  }, { flush: 'sync' })
 
   /**
    * Initialize settings from injected config (window.__APP_CONFIG__)

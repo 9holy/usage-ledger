@@ -14,6 +14,7 @@ defineProps<{
     color: string
   }>
   total?: number
+  recordCounts?: boolean
   available: number | null
   loaded: boolean
   period: string
@@ -39,6 +40,7 @@ const count = (n: number) => n.toLocaleString(usageLocale())
       <UsageCoverageAssembly
         :rows="rows"
         :total="total"
+        :record-counts="recordCounts"
         :available="available"
         :loaded="loaded"
       />
@@ -60,7 +62,7 @@ const count = (n: number) => n.toLocaleString(usageLocale())
         class="coverage-reason-row"
       >
         <span>{{ reason.label }}</span
-        ><strong>{{ count(reason.count) }}<small>{{ t('usageMonitor.text.requests4') }}</small></strong>
+        ><strong>{{ count(reason.count) }}<small>{{ t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests4') }}</small></strong>
         <button
           type="button"
           :aria-label="t('usageMonitor.text.filterQuoteHints') + reason.label"

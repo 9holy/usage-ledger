@@ -1,3 +1,4 @@
+import './costDataI18n'
 /**
  * cockpit 服务档位(`service_tier`)全链路 —— 2026-09-20
  *

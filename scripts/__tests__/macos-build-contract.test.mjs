@@ -32,6 +32,16 @@ test('Mac test packages use ad-hoc signing without weakening Windows updater sig
   assert.equal(local.app, undefined)
 })
 
+test('every desktop external link has the matching native opener capability', () => {
+  const source = readFileSync(path.join(root, 'src/features/desktop/externalLinks.ts'), 'utf8')
+  const urls = [...source.matchAll(/export const (?:PROJECT_REPOSITORY_URL|ACCOUNT_PURCHASE_URL) = '([^']+)'/g)]
+    .map(match => match[1]).sort()
+  assert.equal(urls.length, 2)
+  const permission = json('src-tauri/capabilities/default.json').permissions
+    .find(item => item.identifier === 'opener:allow-open-url')
+  assert.deepEqual(permission.allow.map(item => item.url).sort(), urls)
+})
+
 test('Mac-only commands stop on other hosts without starting a build', { skip: process.platform === 'darwin' }, () => {
   for (const script of ['scripts/build-macos.mjs', 'scripts/test-macos.mjs']) {
     const result = spawnSync(process.execPath, [path.join(root, script)], { cwd: root, encoding: 'utf8', windowsHide: true })

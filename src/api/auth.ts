@@ -3,9 +3,12 @@
  * Handles user login, registration, and logout operations
  */
 
+import axios from 'axios'
 import { apiClient } from './client'
 import { refreshAuthTokens, type RefreshTokenResponse } from './tokenRefresh'
-import { captureAuthConnection, isAuthConnectionCurrent, persistAuthConnectionBinding, syncConnectionJwt, type AuthConnectionContext } from './url'
+import { authConnectionBindingMatches, captureAuthConnection, isAuthConnectionCurrent, isDesktopRuntime, persistAuthConnectionBinding, syncConnectionJwt, type AuthConnectionContext } from './url'
+import { getDesktopProxyHeaders } from './desktopProxy'
+import { sanitizeNavigationUrl } from '@/utils/url'
 export type { RefreshTokenResponse } from './tokenRefresh'
 import type {
   LoginRequest,
@@ -59,7 +62,9 @@ export async function startOAuthLogin(
     proof,
     { params: request.params }
   )
-  return data
+  const authorizeUrl = sanitizeNavigationUrl(data.authorize_url, { allowRelative: true })
+  if (!authorizeUrl) throw new Error('Invalid OAuth authorization URL')
+  return { ...data, authorize_url: authorizeUrl }
 }
 
 /**
@@ -145,7 +150,7 @@ async function persistLogin(data: AuthResponse, context: AuthConnectionContext):
 
 export async function login(credentials: LoginRequest): Promise<LoginResponse> {
   const context = captureAuthConnection()
-  const { data } = await apiClient.post<LoginResponse>('/auth/login', credentials)
+  const { data } = await apiClient.post<LoginResponse>('/auth/login', credentials, { _authConnectionRevision: context.revision })
 
   // Only store token if 2FA is not required
   if (!isTotp2FARequired(data)) {
@@ -162,7 +167,7 @@ export async function login(credentials: LoginRequest): Promise<LoginResponse> {
  */
 export async function login2FA(request: TotpLogin2FARequest): Promise<AuthResponse> {
   const context = captureAuthConnection()
-  const { data } = await apiClient.post<AuthResponse>('/auth/login/2fa', request)
+  const { data } = await apiClient.post<AuthResponse>('/auth/login/2fa', request, { _authConnectionRevision: context.revision })
 
   // Store token and user data
   await persistLogin(data, context)
@@ -177,7 +182,7 @@ export async function login2FA(request: TotpLogin2FARequest): Promise<AuthRespon
  */
 export async function register(userData: RegisterRequest): Promise<AuthResponse> {
   const context = captureAuthConnection()
-  const { data } = await apiClient.post<AuthResponse>('/auth/register', userData)
+  const { data } = await apiClient.post<AuthResponse>('/auth/register', userData, { _authConnectionRevision: context.revision })
 
   // Store token and user data
   await persistLogin(data, context)
@@ -199,18 +204,36 @@ export async function getCurrentUser() {
  * Optionally revokes the refresh token on the server
  */
 export async function logout(): Promise<void> {
+  const context = captureAuthConnection()
+  const accessToken = getAuthToken()
   const refreshToken = getRefreshToken()
+  const connection = context.connection
+  const sessionMatches = connection
+    ? connection.type === 'sub2api' && connection.authMode === 'login'
+      && (connection.apiKey === accessToken || authConnectionBindingMatches(context))
+    : !isDesktopRuntime()
+
+  // Clear immediately. A late revocation response must not erase a newly connected session.
+  clearAuthToken()
 
   // Try to revoke the refresh token on the server
-  if (refreshToken) {
+  if (refreshToken && sessionMatches) {
     try {
-      await apiClient.post('/auth/logout', { refresh_token: refreshToken })
+      const proxyHeaders = isDesktopRuntime() ? await getDesktopProxyHeaders(context.targetBase) : {}
+      // This request owns its destination and credential even after the UI switches connections.
+      await axios.post(`${context.apiBase}/auth/logout`, { refresh_token: refreshToken }, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          ...proxyHeaders,
+        },
+        timeout: 10000,
+      })
     } catch {
       // Ignore errors - we still want to clear local state
     }
   }
 
-  clearAuthToken()
 }
 
 /**

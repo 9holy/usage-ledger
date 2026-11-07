@@ -2,6 +2,7 @@ import { costDataText } from './costDataText'
 import axios from 'axios'
 import type { ConnectionConfig } from '@/stores/connection'
 import { isDesktopRuntime, PROXY_PORT } from '@/api/url'
+import { getDesktopProxyHeaders } from '@/api/desktopProxy'
 import type { AdminUsageLog } from '@/types'
 import { accountCostSnapshot } from './modelCostAnalysis'
 import { localDateParameter, type UsageQueryWindow } from './usageWindow'
@@ -62,17 +63,18 @@ export async function readSub2apiWindow(connection: ConnectionConfig, window: Us
   if (!base) return { ...result, get reason() { return costDataText('theSavedConnectionHasNoTargetAddress') } }
   const target = base.endsWith('/api/v1') ? base : `${base}/api/v1`
   const desktop = isDesktopRuntime()
-  const client = axios.create({
-    baseURL: desktop ? `http://127.0.0.1:${PROXY_PORT}` : target,
-    timeout: 30000,
-    headers: {
-      ...(connection.authMode === 'login' ? { Authorization: `Bearer ${connection.apiKey}` } : { 'X-API-Key': connection.apiKey }),
-      ...(desktop ? { 'X-Target-Base': target } : {}),
-      'X-Admin-UI-Request': '1',
-    },
-  })
   const logs: AdminUsageLog[] = []
   try {
+    const proxyHeaders = desktop ? await getDesktopProxyHeaders(target) : {}
+    const client = axios.create({
+      baseURL: desktop ? `http://127.0.0.1:${PROXY_PORT}` : target,
+      timeout: 30000,
+      headers: {
+        ...(connection.authMode === 'login' ? { Authorization: `Bearer ${connection.apiKey}` } : { 'X-API-Key': connection.apiKey }),
+        ...proxyHeaders,
+        'X-Admin-UI-Request': '1',
+      },
+    })
     for (let page = 1; page <= 25; page += 1) {
       const response = await client.get('/admin/usage', { signal: options.signal, params: {
         page, page_size: 1000, start_date: localDateParameter(window.start), end_date: localDateParameter(window.end),

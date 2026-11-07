@@ -1,4 +1,4 @@
-use super::types::*;
+use super::{store, types::*};
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,7 +57,11 @@ impl CoverageWriter {
             conn.execute("UPDATE monitor_live_coverage SET end_ms=?4,open=1 WHERE source=?1 AND tool=?2 AND start_ms=?3",params![self.source,tool,start,now]).map_err(|error|error.to_string())?;
             self.active.insert(tool.into(), (start, now));
         } else {
-            conn.execute("INSERT INTO monitor_live_coverage(source,tool,start_ms,end_ms,open) VALUES(?1,?2,?3,?3,1)",params![self.source,tool,now]).map_err(|error|error.to_string())?;
+            // A failure and recovery can occur in one clock tick while draining
+            // files. Reopening the same zero-width boundary is idempotent.
+            conn.execute("INSERT INTO monitor_live_coverage(source,tool,start_ms,end_ms,open) VALUES(?1,?2,?3,?3,1)
+                ON CONFLICT(source,tool,start_ms) DO UPDATE SET open=1",
+                params![self.source,tool,now]).map_err(|error|error.to_string())?;
             self.active.insert(tool.into(), (now, now));
         }
         Ok(())
@@ -146,6 +150,8 @@ fn source_complete(
 struct Counts {
     short: i64,
     long: i64,
+    short_unknown: bool,
+    long_unknown: bool,
 }
 fn windows(
     counts: &Counts,
@@ -153,18 +159,19 @@ fn windows(
     now: i64,
     tool: Option<&str>,
 ) -> Vec<LiveWindow> {
-    [(60, counts.short), (300, counts.long)]
+    [(60, counts.short, counts.short_unknown), (300, counts.long, counts.long_unknown)]
         .into_iter()
-        .map(|(seconds, tokens)| {
+        .map(|(seconds, tokens, output_unknown)| {
             let covered_ms = covered(spans, tool, now - seconds * 1_000, now);
             let complete = covered_ms == seconds * 1_000;
             LiveWindow {
                 seconds,
                 observed_output_tokens: tokens,
-                output_tokens_per_second: complete.then_some(tokens as f64 / seconds as f64),
+                output_tokens_per_second: (complete && !output_unknown).then_some(tokens as f64 / seconds as f64),
                 covered_ms,
                 complete,
                 source_complete: source_complete(spans, tool, now - seconds * 1_000, now),
+                output_complete: !output_unknown,
             }
         })
         .collect()
@@ -172,25 +179,29 @@ fn windows(
 fn counted_windows(counts: &Counts, coverage: &[LiveWindow]) -> Vec<LiveWindow> {
     coverage
         .iter()
-        .zip([counts.short, counts.long])
-        .map(|(window, tokens)| LiveWindow {
+        .zip([(counts.short, counts.short_unknown), (counts.long, counts.long_unknown)])
+        .map(|(window, (tokens, output_unknown))| LiveWindow {
             observed_output_tokens: tokens,
-            output_tokens_per_second: window.complete.then_some(tokens as f64 / window.seconds as f64),
+            output_tokens_per_second: (window.complete && !output_unknown).then_some(tokens as f64 / window.seconds as f64),
+            output_complete: !output_unknown,
             ..window.clone()
         })
         .collect()
 }
-fn add(counts: &mut Counts, timestamp: i64, tokens: i64, now: i64) {
+fn add(counts: &mut Counts, timestamp: i64, tokens: i64, output_known: bool, now: i64) {
     if timestamp > now - 60_000 {
         counts.short += tokens;
+        counts.short_unknown |= !output_known;
     }
     if timestamp > now - 300_000 {
         counts.long += tokens;
+        counts.long_unknown |= !output_known;
     }
 }
 
 fn minute_buckets(
     minutes: [i64; 60],
+    output_unknown: [bool; 60],
     spans: &BTreeMap<String, Vec<(i64, i64)>>,
     now: i64,
     tool: Option<&str>,
@@ -207,9 +218,10 @@ fn minute_buckets(
                 start_ms: start,
                 end_ms: end,
                 observed_output_tokens: tokens,
-                output_tokens: (covered_ms == MINUTE && source_complete).then_some(tokens),
+                output_tokens: (covered_ms == MINUTE && source_complete && !output_unknown[index]).then_some(tokens),
                 covered_ms,
                 source_complete,
+                output_complete: !output_unknown[index],
             }
         })
         .collect()
@@ -252,7 +264,7 @@ fn recorded_timeline(
                     THEN json_extract(usage,'$.outputTokens') END AS output
             FROM monitor_requests
             WHERE timestamp_ms>=?1 AND timestamp_ms<?2
-                AND COALESCE(json_extract(usage,'$.usageBasis'),'')!='legacy_initial_cumulative'
+                AND COALESCE(json_extract(usage,'$.usageBasis'),'') NOT IN ('legacy_initial_cumulative','legacy_cumulative_delta')
                 AND NOT EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='timestamp')
         ) SELECT tool,minute,COALESCE(SUM(output),0),COUNT(*),COUNT(*)-COUNT(output)
             FROM requests GROUP BY tool,minute",
@@ -291,6 +303,7 @@ pub fn read(
     started: i64,
     updated: i64,
 ) -> Result<LiveSnapshot, String> {
+    store::validate_token_totals(conn)?;
     let mut spans: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
     let mut query = conn
         .prepare("SELECT tool,start_ms,end_ms,open FROM monitor_live_coverage WHERE end_ms>?1")
@@ -323,11 +336,13 @@ pub fn read(
     let mut by_model: BTreeMap<(String, Option<String>), Counts> = BTreeMap::new();
     let mut by_session: BTreeMap<(String, String), Counts> = BTreeMap::new();
     let mut minutes = [0i64; 60];
+    let mut minutes_unknown = [false; 60];
+    let mut tool_minutes_unknown = BTreeMap::<String, [bool; 60]>::new();
     let mut tool_minutes: BTreeMap<String, [i64; 60]> = TOOLS
         .into_iter()
         .map(|tool| (tool.into(), [0; 60]))
         .collect();
-    let mut query=conn.prepare("SELECT o.tool,r.session_key,json_extract(r.usage,'$.model'),o.observed_ms,o.output_tokens FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND COALESCE(json_extract(r.usage,'$.usageBasis'),'')!='legacy_initial_cumulative'").map_err(|error|error.to_string())?;
+    let mut query=conn.prepare("SELECT o.tool,r.session_key,json_extract(r.usage,'$.model'),o.observed_ms,o.output_tokens,(json_type(r.usage,'$.outputTokens') IS 'integer' AND NOT EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='output_tokens')) FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND COALESCE(json_extract(r.usage,'$.usageBasis'),'') NOT IN ('legacy_initial_cumulative','legacy_cumulative_delta')").map_err(|error|error.to_string())?;
     let rows = query
         .query_map(params![now - 60 * MINUTE, now], |row| {
             Ok((
@@ -336,34 +351,39 @@ pub fn read(
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         })
         .map_err(|error| error.to_string())?;
     for row in rows {
-        let (tool, key, model, time, tokens) = row.map_err(|error| error.to_string())?;
-        add(&mut global, time, tokens, now);
-        add(by_tool.entry(tool.clone()).or_default(), time, tokens, now);
+        let (tool, key, model, time, tokens, output_known) = row.map_err(|error| error.to_string())?;
+        add(&mut global, time, tokens, output_known, now);
+        add(by_tool.entry(tool.clone()).or_default(), time, tokens, output_known, now);
         add(
             by_model.entry((tool.clone(), model)).or_default(),
             time,
             tokens,
+            output_known,
             now,
         );
         add(
             by_session.entry((tool.clone(), key)).or_default(),
             time,
             tokens,
+            output_known,
             now,
         );
         let index = ((time - (now - 60 * MINUTE) - 1) / MINUTE) as usize;
         minutes[index] += tokens;
+        minutes_unknown[index] |= !output_known;
+        tool_minutes_unknown.entry(tool.clone()).or_insert([false; 60])[index] |= !output_known;
         tool_minutes.entry(tool).or_insert([0; 60])[index] += tokens;
     }
-    let timeline = minute_buckets(minutes, &spans, now, None);
+    let timeline = minute_buckets(minutes, minutes_unknown, &spans, now, None);
     let timeline_by_tool = tool_minutes
         .into_iter()
         .map(|(tool, minutes)| {
-            let buckets = minute_buckets(minutes, &spans, now, Some(&tool));
+            let buckets = minute_buckets(minutes, tool_minutes_unknown.remove(&tool).unwrap_or([false; 60]), &spans, now, Some(&tool));
             (tool, buckets)
         })
         .collect();
@@ -423,6 +443,22 @@ mod tests {
     use super::*;
     use crate::usage_monitor::store;
     #[test]
+    fn coverage_recovery_within_one_millisecond_does_not_stop_collection() {
+        let conn = Connection::open_in_memory().unwrap();
+        store::initialize(&conn).unwrap();
+        let mut writer = CoverageWriter::new("jsonl");
+        writer.observe(&conn, "codex", 1000, true).unwrap();
+        writer.observe(&conn, "codex", 1000, false).unwrap();
+        writer.observe(&conn, "codex", 1000, true).unwrap();
+        writer.observe(&conn, "codex", 2000, true).unwrap();
+        let spans: Vec<(i64, i64, bool)> = conn.prepare(
+            "SELECT start_ms,end_ms,open FROM monitor_live_coverage WHERE source='jsonl' AND tool='codex'"
+        ).unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
+            .collect::<Result<_, _>>().unwrap();
+        assert_eq!(spans, [(1000, 2000, true)]);
+    }
+
+    #[test]
     fn shared_coverage_keeps_each_groups_counts_and_unknown_windows() {
         let now = 400_000;
         for wildcard in [vec![(100_000, now)], vec![(100_000, 340_000), (360_000, now)]] {
@@ -433,7 +469,7 @@ mod tests {
             ]);
             for tool in [None, Some("codex"), Some("claude"), Some("unreported-tool")] {
                 let coverage = windows(&Counts::default(), &spans, now, tool);
-                for counts in [Counts::default(), Counts { short: 17, long: 123 }, Counts { short: 0, long: 9 }] {
+                for counts in [Counts::default(), Counts { short: 17, long: 123, ..Default::default() }, Counts { short: 0, long: 9, ..Default::default() }] {
                     assert_eq!(
                         serde_json::to_value(counted_windows(&counts, &coverage)).unwrap(),
                         serde_json::to_value(windows(&counts, &spans, now, tool)).unwrap()
@@ -441,6 +477,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unknown_output_keeps_observed_lower_bound_without_an_exact_live_rate() {
+        let now=7_200_000;
+        let mut conn=Connection::open_in_memory().unwrap();
+        store::initialize(&conn).unwrap();
+        for source in ["*","codex","claude","antigravity","deepseek-harness"] {
+            conn.execute("INSERT INTO monitor_live_coverage(source,tool,start_ms,end_ms,open) VALUES('fixture',?1,?2,?3,0)",params![source,now-3_600_000,now]).unwrap();
+        }
+        usage(&mut conn,"known","claude","known-session",Some("model"),now-1000,60);
+        for (id,lower_bound) in [("partial",7),("fully-unknown",0)] {
+            let record=UsageRecord{id:id.into(),tool:"codex".into(),session_id:"uncertain-session".into(),model:Some("model".into()),timestamp_ms:now-500,output_tokens:lower_bound,unknown_fields:vec!["output_tokens".into()],..Default::default()};
+            let tx=conn.transaction().unwrap();
+            store::save_usage_with_catalog(&tx,&record,0,now-500,&crate::model_catalog::CatalogSnapshot::default()).unwrap();
+            tx.commit().unwrap();
+        }
+        let result=read(&conn,now,0,now).unwrap();
+        assert_eq!(result.windows[0].observed_output_tokens,67);
+        assert!(result.windows[0].output_tokens_per_second.is_none());
+        assert_eq!(serde_json::to_value(&result.windows[0]).unwrap()["outputComplete"],false);
+        let codex=result.by_tool.iter().find(|row|row.tool.as_deref()==Some("codex")).unwrap();
+        let claude=result.by_tool.iter().find(|row|row.tool.as_deref()==Some("claude")).unwrap();
+        assert!(codex.windows[0].output_tokens_per_second.is_none());
+        assert_eq!(claude.windows[0].output_tokens_per_second,Some(1.));
+        assert!(result.timeline.last().unwrap().output_tokens.is_none());
+        assert_eq!(result.timeline.last().unwrap().observed_output_tokens,67);
+        assert_eq!(serde_json::to_value(result.timeline.last().unwrap()).unwrap()["outputComplete"],false);
+        assert_eq!(result.timeline_by_tool["claude"].last().unwrap().output_tokens,Some(60));
+        // Zero reported output remains different from absent output, and unrelated groups stay exact.
+        assert_eq!(result.timeline_by_tool["antigravity"].last().unwrap().output_tokens,Some(0));
     }
 
     fn usage(

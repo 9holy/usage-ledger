@@ -221,7 +221,7 @@ For a bug report, include the app version, OS/architecture, source type, selecte
 
 ### Windows
 
-Install Node.js 22 LTS or a compatible newer version, pnpm 9.15.9, Rust stable with the MSVC toolchain, Visual Studio C++ Build Tools, and WebView2 Runtime.
+Install Node.js 22 LTS (22.12.0+) or a compatible newer version, pnpm 9.15.9, Rust stable with the MSVC toolchain, Visual Studio C++ Build Tools, and WebView2 Runtime.
 
 ~~~powershell
 git clone https://github.com/9holy/usage-ledger.git
@@ -261,6 +261,9 @@ The build command creates a universal app/DMG by default; the [macOS guide](docs
 - [DeepSeek Harness integration](docs/integrations/deepseek-harness.md).
 - [macOS build and test guide](docs/platforms/macos.md).
 - [0.2.25 release notes](docs/release/0.2.25.md).
+- [2026-11-07 audit and validation report](docs/audit-2026-11-07.md).
+- [2026-11-07 usage statistics and account attribution follow-up](docs/monitor-accuracy-audit-2026-11-07.md).
+- [2026-11-07 third review: concurrency, attribution and ledger accuracy](docs/re-review-2026-11-07.md).
 - [Privacy notes](docs/PRIVACY.md).
 - [Third-party notices](THIRD_PARTY_NOTICES.md) and [license texts](LICENSES/).
 

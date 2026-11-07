@@ -3,7 +3,7 @@ import { usageLocale } from '@/utils/usageFormat'
 import { useI18n } from 'vue-i18n'
 import { computed } from 'vue'
 import { Clock3 } from '@lucide/vue'
-import { monitorCacheCoverage, monitorCacheRatio, monitorTotalCost, type MonitorSessionDetail } from '@/api/usageMonitor'
+import { monitorKnownTokenTotal, monitorRequestCountLabel, monitorCacheCoverage, monitorCacheRatio, monitorTotalCost, type MonitorSessionDetail } from '@/api/usageMonitor'
 
 const { t } = useI18n()
 
@@ -23,8 +23,12 @@ function elapsed(row: Turn): string {
   if (ms == null) return t('usageMonitor.text.durationNotReported')
   return ms < 60_000 ? t('usageMonitor.text.s2', { value0: (ms / 1000).toFixed(2) }) : t('usageMonitor.text.mS', { value0: Math.floor(ms / 60_000), value1: Math.floor(ms / 1000) % 60 })
 }
+function tokenValue(row: Turn, field: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens', format = compact.value): string {
+  const value = monitorKnownTokenTotal(row.totals, field)
+  return value == null ? t('usageMonitor.text.unknown') : format.format(value)
+}
 function usageLabel(row: Turn): string {
-  return t('usageMonitor.text.inputOutputTokens', { value0: number.value.format(row.totals.inputTokens), value1: number.value.format(row.totals.outputTokens), value2: row.totals.incompleteRequests ? t('usageMonitor.text.recordedPortionOnly') : '' })
+  return t('usageMonitor.text.inputOutputTokens', { value0: tokenValue(row, 'inputTokens', number.value), value1: tokenValue(row, 'outputTokens', number.value), value2: row.totals.incompleteRequests ? t('usageMonitor.text.recordedPortionOnly') : '' })
 }
 </script>
 
@@ -36,13 +40,13 @@ function usageLabel(row: Turn): string {
       <ol v-if="turns.length" class="turn-track">
         <li v-for="(row, index) in turns" :key="row.id" :class="{ 'is-selected': selected === row.id }">
           <button type="button" class="turn-choice" :class="{ selected: selected === row.id }" :aria-pressed="selected === row.id" :title="t('usageMonitor.text.turnIdentifier2') + (row.id || t('usageMonitor.text.unknown'))" @click="emit('select', row.id)">
-            <span class="turn-caption"><strong>{{ t('usageMonitor.text.turnRecord') }} {{ turns.length - index }}</strong><small>{{ number.format(row.totals.requestCount) }} {{ t('usageMonitor.text.requests8') }}</small></span>
+            <span class="turn-caption"><strong>{{ t('usageMonitor.text.turnRecord') }} {{ turns.length - index }}</strong><small>{{ monitorRequestCountLabel(row.totals) }}</small></span>
             <time>{{ time(row) }} <small>{{ row.timing?.startedAtMs != null ? t('usageMonitor.text.turnStart') : t('usageMonitor.text.firstUsageRecord') }}</small></time>
             <span class="turn-volume" role="img" :aria-label="usageLabel(row)" :title="usageLabel(row)"><i class="input-volume" :style="{ width: width(row.totals.inputTokens) }" /><i class="output-volume" :style="{ width: width(row.totals.outputTokens) }" /></span>
-            <span class="turn-amounts"><span>{{ t('usageMonitor.text.in') }} {{ compact.format(row.totals.inputTokens) }}</span><span>{{ t('usageMonitor.text.out') }} {{ compact.format(row.totals.outputTokens) }}</span></span>
+            <span class="turn-amounts"><span>{{ t('usageMonitor.text.in') }} {{ tokenValue(row, 'inputTokens') }}</span><span>{{ t('usageMonitor.text.out') }} {{ tokenValue(row, 'outputTokens') }}</span></span>
             <span v-if="row.totals.incompleteRequests" class="partial">{{ row.totals.incompleteRequests }} {{ t('usageMonitor.text.incompleteKnownUsage') }}</span>
             <span class="turn-timing"><Clock3 :size="12" />{{ elapsed(row) }}<small>{{ t('usageMonitor.text.cacheHit') }} {{ monitorCacheRatio(row.totals) }}</small></span>
-            <span class="turn-cache">{{ t('usageMonitor.text.cacheRead4') }} {{ compact.format(row.totals.cacheReadTokens) }} {{ t('usageMonitor.text.write2') }} {{ compact.format(row.totals.cacheWriteTokens) }}</span>
+            <span class="turn-cache">{{ t('usageMonitor.text.cacheRead4') }} {{ tokenValue(row, 'cacheReadTokens') }} {{ t('usageMonitor.text.write2') }} {{ tokenValue(row, 'cacheWriteTokens') }}</span>
             <small v-if="monitorCacheCoverage(row.totals)" class="turn-cache">{{ monitorCacheCoverage(row.totals) }}</small>
             <span class="turn-cost">{{ monitorTotalCost(row.totals) }}</span>
             <small class="turn-id">{{ row.id || t('usageMonitor.text.identifierNotRecorded') }}</small>

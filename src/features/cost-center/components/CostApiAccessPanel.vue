@@ -129,6 +129,7 @@ import { useRouter } from 'vue-router'
 import { CheckCircle2, Copy, ExternalLink, KeyRound, LoaderCircle, RefreshCcw, ShieldCheck, Terminal, TriangleAlert, Wifi } from '@lucide/vue'
 import { authAPI, keysAPI } from '@/api'
 import { getActiveConnection } from '@/api/url'
+import { fetchGateway } from '@/api/fetch'
 import type { ApiKey } from '@/types'
 import type { OpsDashboardOverview } from '@/api/admin/ops'
 import { useClipboard } from '@/composables/useClipboard'
@@ -277,14 +278,13 @@ async function testConnection() {
   testMessage.value = ''
   testOk.value = false
   const started = performance.now()
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 8_000)
   try {
-    const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 8_000)
-    const response = await fetch(`${gatewayBase.value}/models`, {
+    const response = await fetchGateway('/models', {
       headers: { Authorization: `Bearer ${selectedKey.value.key}` },
       signal: controller.signal,
-    })
-    window.clearTimeout(timeout)
+    }, gatewayBase.value)
     lastProbeMs.value = Math.round(performance.now() - started)
     const payload = await response.json().catch(() => null) as any
     if (!response.ok) {
@@ -300,6 +300,7 @@ async function testConnection() {
     lastProbeMs.value = Math.round(performance.now() - started)
     testMessage.value = error?.name === 'AbortError' ? t('costComponents.noResponseWithinSecondsCheckTheRemote') : error?.message || t('costComponents.connectionFailedCheckThatTheServiceIs')
   } finally {
+    window.clearTimeout(timeout)
     testing.value = false
   }
 }

@@ -216,6 +216,25 @@ describe('same-window independent source summaries', () => {
     expect(unified.unmeasuredSources.value).toEqual(expect.arrayContaining(['cliproxy', 'cockpit']))
   })
 
+  it('keeps known request counts while missing window token groups remain unavailable', async () => {
+    vi.mocked(getCockpitRequestLogSummary).mockResolvedValue({
+      available: true, rowCount: 1, groups: [], windowEndMs: Date.now() - 10000,
+    } as never)
+    const unified = useUnifiedCost(ref(null))
+    unified.selectedSources.value = new Set(['cockpit'])
+
+    await unified.loadUnified('1h')
+
+    expect(unified.sourceReadings.value.cockpit).toMatchObject({
+      records: 1, tokens: null, costUsd: null, state: 'unavailable', coverageBasis: 'stored_records',
+    })
+    expect(unified.sourceStatuses.value.cockpit).toMatchObject({
+      records: 1, tokens: null, state: 'unavailable',
+    })
+    expect(unified.cockpitCost.value).toBeNull()
+    expect(unified.totalCostUsd.value).toBeNull()
+  })
+
   it('preserves unknown-price and partial-price costs without using cumulative fallback values', async () => {
     paidFixtures()
     vi.mocked(getCliproxyModelPrices).mockResolvedValue({ 'fixture-model': {} })

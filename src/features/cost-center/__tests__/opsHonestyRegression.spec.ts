@@ -249,17 +249,20 @@ describe('FIX A · cockpit totals 没有 429 维度 ⇒ upstream_429_count 必�
 // FIX C（源码结构断言，弱于行为断言：该单元格状态由模板表达式决定，无独立可导出函数）
 // ─────────────────────────────────────────────────────────────────────────────
 describe('FIX C · 三端汇总的「Cockpit 总 Token / 请求数」角标必须跟值走', () => {
-  it('字段缺失时 state = unavailable，不再因为对象存在就判 measured', () => {
+  it('所选窗口格使用独立窗口读数，历史Token字段缺失仍标unavailable', () => {
     const lines = VIEW.split('\n')
-    const cells: Array<[string, string]> = [
-      ['Cockpit 总 Token', lines.find((l) => l.includes('label="Cockpit 总 Token"')) ?? ''],
-      ['Cockpit 请求数', lines.find((l) => l.includes('label="Cockpit 请求数"')) ?? ''],
-    ]
-    for (const [name, line] of cells) {
-      expect(line, `未找到单元格「${name}」`).not.toBe('')
-      expect(line, `「${name}」的 state 必须由 finiteOrNull 判空`).toContain('finiteOrNull(unified.cockpitStats.value?.totals.')
-      expect(line, `「${name}」缺失时必须 unavailable`).toContain("== null ? 'unavailable' : 'measured'")
-      // 旧写法（只看外层对象是否存在）必须已消失。
+    const windowFields = [['cockpitWindowTokens', 'tokens'], ['cockpitWindowRequests', 'records']] as const
+    for (const [label, field] of windowFields) {
+      const line = lines.find(row => row.includes(`:label="t('costCenter.text.${label}')"`)) ?? ''
+      expect(line, `未找到窗口格 ${label}`).not.toBe('')
+      expect(line).toContain(`unified.sourceReadings.value.cockpit?.${field} == null ? t('costCenter.text.unavailable')`)
+      expect(line).toContain(':state="unified.sourceStatuses.value.cockpit.state"')
+      expect(line).not.toContain('unified.cockpitStats.value')
+    }
+    for (const [label, field] of [['Input Tokens', 'inputTokens'], ['Output Tokens', 'outputTokens'], ['Cached Tokens', 'cachedTokens'], ['Reasoning Tokens', 'reasoningTokens']]) {
+      const line = lines.find(row => row.includes(`label="${label}"`)) ?? ''
+      expect(line, `未找到历史明细格 ${label}`).not.toBe('')
+      expect(line).toContain(`finiteOrNull(unified.cockpitStats.value.totals.${field}) == null ? 'unavailable' : 'measured'`)
       expect(line).not.toContain(':state="unified.cockpitStats.value ? \'measured\' : \'unavailable\'"')
     }
   })

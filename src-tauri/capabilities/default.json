@@ -15,7 +15,7 @@
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "https://github.com/rw0104/sub2api-cost-console" },
+        { "url": "https://github.com/9holy/usage-ledger" },
         { "url": "https://pay.ldxp.cn/shop/13QL6FLR" }
       ]
     }

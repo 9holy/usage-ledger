@@ -55,6 +55,37 @@ it('keeps the request pulse proportional and selectable, with zero distinct from
   expect(wrapper.get('header').text()).not.toContain('已记录 0')
 })
 
+it('labels cumulative pulse entries as usage records without claiming a request count', async () => {
+  const requests = [
+    { id: 'cumulative', model: 'gpt-5', timestampMs: 1000, outputTokens: 120, usageBasis: 'legacy_initial_cumulative', unknownFields: [] },
+    { id: 'request', model: 'gpt-5', timestampMs: 2000, outputTokens: 30, usageBasis: 'per_request', unknownFields: [] },
+  ] as MonitorRequest[]
+  const wrapper = mount(UsageRequestPulse, { props: { requests, selected: null } })
+  expect(wrapper.get('h3').text()).toBe('每条用量记录的输出')
+  expect(wrapper.get('header').text()).toContain('2 条用量记录，含 1 条未拆分累计；实际请求次数未知')
+  expect(wrapper.get('header').text()).toContain('已记录 150 输出 Token')
+  expect(wrapper.findAll('.pulse-column i').map(row => row.attributes('style'))).toEqual(['height: 100%;', 'height: 25%;'])
+  expect(wrapper.findAll('.pulse-grid button')[0].attributes('aria-label')).toContain('累计区间未知')
+  expect(wrapper.findAll('.pulse-grid button')[0].attributes('aria-label')).not.toContain('第 1 次')
+  i18n.global.locale.value = 'en'; await nextTick()
+  expect(wrapper.get('h3').text()).toBe('Output per usage record')
+  expect(wrapper.get('header').text()).toContain('2 usage records, including 1 unsplit cumulative records; the actual request count is unknown')
+  expect(wrapper.findAll('.pulse-grid button')[0].attributes('aria-label')).toContain('Cumulative interval unknown')
+  i18n.global.locale.value = 'zh'; await nextTick()
+  wrapper.unmount()
+})
+
+it('never formats observation-only or unavailable request times as pulse request times', () => {
+  const requests = [
+    { id: 'observed', timestampMs: 1770000000000, outputTokens: 9, usageBasis: 'per_request', unknownFields: ['timestamp'] },
+    { id: 'unknown', timestampMs: 0, outputTokens: 0, usageBasis: 'per_request', unknownFields: ['timestamp'] },
+  ] as MonitorRequest[]
+  const wrapper = mount(UsageRequestPulse, { props: { requests, selected: null } })
+  expect(wrapper.findAll('.pulse-grid button').map(row => row.attributes('aria-label').split(' · ').at(-1))).toEqual(['请求时间未知', '请求时间未知'])
+  expect(wrapper.get('header').text()).toContain('已记录 9 输出 Token')
+  wrapper.unmount()
+})
+
 it('compares tariffs in their original currency and retains tiny and missing cache prices', async () => {
   const evidence = { model: 'fixture', currency: 'CNY', inputPerMillion: 4, cachedPerMillion: 0.000001, outputPerMillion: 20 } as PriceEvidence
   const wrapper = mount(UsagePriceFlow, { props: { evidence } })

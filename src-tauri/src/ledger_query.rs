@@ -242,8 +242,8 @@ fn scan_by_day_model(
                 day: row.get::<_, i64>(0)?,
                 model_id: row.get::<_, String>(1)?,
                 source_name: row.get::<_, String>(2)?,
-                tokens: row.get::<_, i64>(3).unwrap_or(0),
-                requests: row.get::<_, i64>(4).unwrap_or(0),
+                tokens: row.get::<_, i64>(3)?,
+                requests: row.get::<_, i64>(4)?,
             })
         })
         .map_err(|e| format!("对账查询失败: {e}"))?
@@ -277,11 +277,18 @@ pub fn reconcile(
     conn: &Connection,
     window_days: Option<i64>,
 ) -> Result<ReconcileResult, String> {
+    if conn.is_autocommit() {
+        let transaction = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        let result = reconcile(&transaction, window_days)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(result);
+    }
+
     // 窗口起点 = 现在 − N 天（按 UTC 日对齐，与天桶同口径）
     let end_ms = ledger_db::now_ms();
-    let start_ms = window_days
-        .filter(|d| *d > 0)
-        .map(|d| (end_ms / DAY_MS) * DAY_MS - (d - 1) * DAY_MS);
+    let start_ms = ledger_db::window_start_ms(end_ms, window_days, DAY_MS)?;
+    ledger_db::validate_rollup_timestamps(conn)?;
+    ledger_db::validate_rollup_counts(conn, start_ms, None)?;
 
     let raw = scan_by_day_model(conn, start_ms, None)?;
     if raw.is_empty() {
@@ -603,6 +610,15 @@ type SourceUsageAgg = BTreeMap<String, (i64, i64, i64, Option<i64>, Option<i64>)
 /// 为什么需要它：UI 要能回答"**哪些源真的进来了**、各自的覆盖区间是什么"。
 /// 只看摄取返回值不够 —— 那是"这一次"的结果，这里是"账本里现在有什么"。
 pub fn list_sources(conn: &Connection) -> Result<Vec<LedgerSourceInfo>, String> {
+    if conn.is_autocommit() {
+        let transaction = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        let result = list_sources(&transaction)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(result);
+    }
+    ledger_db::validate_rollup_timestamps(conn)?;
+    ledger_db::validate_rollup_counts(conn, None, None)?;
+
     let mut out: Vec<LedgerSourceInfo> = Vec::new();
 
     // 1) 水位表(每源一行)。它是"已知源"的权威清单 —— 即便该源零行也在。
@@ -616,12 +632,12 @@ pub fn list_sources(conn: &Connection) -> Result<Vec<LedgerSourceInfo>, String> 
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1).unwrap_or_default(),
-                row.get::<_, i64>(2).unwrap_or(0),
-                row.get::<_, i64>(3).unwrap_or(0),
-                row.get::<_, i64>(4).unwrap_or(0),
-                row.get::<_, i64>(5).unwrap_or(0),
-                row.get::<_, String>(6).unwrap_or_default(),
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })
         .map_err(|e| format!("读源水位失败: {e}"))?
@@ -647,11 +663,11 @@ pub fn list_sources(conn: &Connection) -> Result<Vec<LedgerSourceInfo>, String> 
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i64>(1).unwrap_or(0),
-                row.get::<_, i64>(2).unwrap_or(0),
-                row.get::<_, i64>(3).unwrap_or(0),
-                row.get::<_, Option<i64>>(4).unwrap_or(None),
-                row.get::<_, Option<i64>>(5).unwrap_or(None),
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
             ))
         })
         .map_err(|e| format!("汇总账本用量失败: {e}"))?
@@ -663,6 +679,9 @@ pub fn list_sources(conn: &Connection) -> Result<Vec<LedgerSourceInfo>, String> 
     drop(agg);
 
     for (source_name, source_path, last_id, last_ts_ms, last_ingest_ms, total_rows_seen, fingerprint) in states {
+        if !(0..=ledger_db::MAX_EXACT_COUNT).contains(&total_rows_seen) {
+            return Err("摄取累计行数为负数或超出精确范围".into());
+        }
         let fp = ledger_ingest::SourceFingerprint::parse(&fingerprint);
         let (rows, tokens, requests, first_ms, last_ms) =
             usage.get(&source_name).copied().unwrap_or((0, 0, 0, None, None));
@@ -1080,4 +1099,75 @@ mod tests {
         assert!(!r.cells.is_empty(), "真实两源应有对账明细");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn review3_reconciliation_rejects_corrupt_or_inexact_counts() {
+        let dir = temp_dir("review3-query-invalid");
+        let conn = ledger_conn(&dir);
+        insert_rollup(&conn, day(1), "codex_logs", "m", 100, 1);
+        for value in ["0.5", "'invalid'", "-1", "9007199254740992", "9223372036854775807"] {
+            conn.execute(&format!("UPDATE usage_rollup SET std_normal_input={value},std_output=1"), []).unwrap();
+            assert!(reconcile(&conn, None).is_err(), "must reject malformed token count {value}");
+        }
+        conn.execute("UPDATE usage_rollup SET std_normal_input=100,std_output=0", []).unwrap();
+        assert_eq!(reconcile(&conn, None).unwrap().cells[0].logs_tokens, 100);
+        conn.execute("UPDATE usage_rollup SET std_normal_input=4503599627370496", []).unwrap();
+        insert_rollup(&conn, day(2), "codex_logs", "m", 4_503_599_627_370_496, 1);
+        assert!(reconcile(&conn, None).is_err(), "cross-day totals must also remain exact");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_source_listing_rejects_invalid_counts_instead_of_showing_zero() {
+        let dir = temp_dir("review3-sources-invalid");
+        let conn = ledger_conn(&dir);
+        insert_state(&conn, "codex_logs", 1, "/fixture/source.sqlite");
+        insert_rollup(&conn, day(1), "codex_logs", "m", i64::MAX, 1);
+        conn.execute("UPDATE usage_rollup SET std_output=1", []).unwrap();
+        assert!(list_sources(&conn).is_err(), "overflow promoted to REAL must never be converted to zero");
+        conn.execute("UPDATE usage_rollup SET std_normal_input=100,std_output=0", []).unwrap();
+        assert_eq!(list_sources(&conn).unwrap()[0].tokens, 100);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_reconciliation_rejects_unrepresentable_time_windows() {
+        let dir = temp_dir("review3-query-window");
+        let conn = ledger_conn(&dir);
+        assert!(reconcile(&conn, Some(i64::MAX)).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_invalid_time_bucket_is_not_silently_filtered_out() {
+        let dir = temp_dir("review3-time-type");
+        let conn = ledger_conn(&dir);
+        insert_rollup(&conn, day(1), "codex_logs", "m", 100, 1);
+        conn.execute("UPDATE usage_rollup SET hour_bucket='invalid'", []).unwrap();
+        for window in [None, Some(7)] {
+            assert!(reconcile(&conn, window).is_err(), "bad time must not produce an empty success report");
+            assert!(crate::ledger_merge::merged_usage(&conn, window).is_err());
+        }
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn review3_source_listing_rejects_invalid_observed_row_count() {
+        let dir = temp_dir("review3-source-state-count");
+        let conn = ledger_conn(&dir);
+        insert_state(&conn, "codex_logs", 1, "/fixture/source.sqlite");
+        for value in [-1i64, 9_007_199_254_740_992, i64::MAX] {
+            conn.execute("UPDATE ingest_state SET total_rows_seen=?1", [value]).unwrap();
+            assert!(list_sources(&conn).is_err(), "invalid observed-row count {value}");
+        }
+        conn.execute("UPDATE ingest_state SET total_rows_seen=100", []).unwrap();
+        assert_eq!(list_sources(&conn).unwrap()[0].total_rows_seen, 100);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

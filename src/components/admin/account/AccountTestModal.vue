@@ -372,7 +372,7 @@ import Select from '@/components/common/Select.vue'
 import TextArea from '@/components/common/TextArea.vue'
 import { Icon } from '@/components/icons'
 import { useClipboard } from '@/composables/useClipboard'
-import { buildApiUrl } from '@/api/client'
+import { fetchApi } from '@/api/fetch'
 import { ADMIN_UI_REQUEST_HEADER } from '@/api/adminUIRequest'
 import { adminAPI } from '@/api/admin'
 import type { Account, ClaudeModel } from '@/types'
@@ -878,10 +878,8 @@ const startTest = async () => {
     }
 
     // Use the configured API base; EventSource does not support POST.
-    const url = buildApiUrl(`/admin/accounts/${props.account.id}/test`)
-
     // Use fetch with streaming for SSE since EventSource doesn't support POST
-    const response = await fetch(url, {
+    const response = await fetchApi(`/admin/accounts/${props.account.id}/test`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${localStorage.getItem('auth_token')}`,

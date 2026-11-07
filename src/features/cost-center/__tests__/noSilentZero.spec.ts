@@ -160,7 +160,7 @@ describe('cliproxyAdapter · 无单价不再静默变 0', () => {
     const result = pricedEventCostUsd(event('a'), pricing)
     expect(result.cost).toBe(0)
     expect(costBasisKindOf(result)).toBe('no_price_no_estimate')
-    expect(result.label).toContain('缺 input/output 档')
+    expect(result.label).toContain('缺少该模型的输入或输出单价')
   })
 
   it('缺 output 档但事件没有 output token → 仍按可得单价计价（按需判定，不误伤）', () => {

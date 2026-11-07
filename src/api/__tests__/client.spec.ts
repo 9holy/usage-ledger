@@ -25,6 +25,8 @@ vi.mock('@/api/url', () => ({
   getActiveConnection: () => urlState.active,
   captureAuthConnection: () => ({ revision: urlState.revision }),
   getAPIBaseURL: () => urlState.baseURL,
+  getSub2apiTargetBase: () => `${urlState.active?.baseUrl || ''}/api/v1`,
+  getCostTargetBase: () => `${urlState.active?.costServiceUrl || urlState.active?.baseUrl || ''}/api/v1`,
   isDesktopRuntime: () => urlState.desktop,
   redirectToAppPath: vi.fn((path: string) => {
     window.location.hash = `#${path}`
@@ -33,6 +35,8 @@ vi.mock('@/api/url', () => ({
   buildGatewayUrl: (p: string) => p,
 }))
 vi.mock('@/i18n', () => ({ getLocale: () => 'zh-CN' }))
+const proxy = vi.hoisted(() => ({ headers: vi.fn() }))
+vi.mock('@/api/desktopProxy', () => ({ getDesktopProxyHeaders: proxy.headers }))
 
 function setConnection(conn: ConnectionConfig | null) {
   urlState.revision += 1
@@ -59,6 +63,7 @@ describe('API Client', () => {
     urlState.active = null
     urlState.baseURL = '/api/v1'
     urlState.desktop = false
+    proxy.headers.mockReset().mockImplementation(async (target: string) => ({ 'X-Target-Base': target, 'X-Proxy-Token': 'native-session-token' }))
     vi.resetModules()
     const mod = await import('@/api/client')
     apiClient = mod.apiClient
@@ -91,6 +96,25 @@ describe('API Client', () => {
       const config = adapter.mock.calls[0][0]
       expect(config.headers.get('Authorization')).toBe('Bearer jwt-token')
       expect(config.headers.get('X-API-Key')).toBeFalsy()
+    })
+
+    it('removes a previous session credential when the active connection uses a different auth mode', async () => {
+      setConnection({ id: 'a', name: 'A', type: 'sub2api', baseUrl: 'https://a.example', apiKey: 'admin-key', authMode: 'apikey', lastUsed: 0 })
+      const adapter = makeAdapter(() => okResponse({}))
+      apiClient.defaults.adapter = adapter
+      await apiClient.get('/admin/groups/all', { headers: { Authorization: 'Bearer old-jwt', 'X-API-Key': 'old-key' } })
+      expect(adapter.mock.calls[0][0].headers.get('Authorization')).toBeUndefined()
+      expect(adapter.mock.calls[0][0].headers.get('X-API-Key')).toBe('admin-key')
+    })
+
+    it('does not send a login password after its captured connection was replaced before the interceptor runs', async () => {
+      setConnection({ id: 'a', name: 'A', type: 'sub2api', baseUrl: 'https://a.example', apiKey: '', authMode: 'login', lastUsed: 0 })
+      const adapter = makeAdapter(() => okResponse({}))
+      apiClient.defaults.adapter = adapter
+      const pending = apiClient.post('/auth/login', { password: 'private' }, { _authConnectionRevision: urlState.revision })
+      setConnection({ id: 'b', name: 'B', type: 'sub2api', baseUrl: 'https://b.example', apiKey: '', authMode: 'login', lastUsed: 0 })
+      await expect(pending).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+      expect(adapter).not.toHaveBeenCalled()
     })
 
     it('cliproxy 连接注入 X-API-Key', async () => {
@@ -127,6 +151,47 @@ describe('API Client', () => {
   // --- baseURL 刷新 ---
 
   describe('baseURL 刷新', () => {
+    it('authorizes desktop proxy requests without exposing the proxy token to a direct CLIProxy connection', async () => {
+      urlState.desktop = true
+      setConnection({ id: 'a', name: 'A', type: 'sub2api', baseUrl: 'https://a.example', apiKey: 'admin-key', lastUsed: 0 })
+      const adapter = makeAdapter(() => okResponse({}))
+      apiClient.defaults.adapter = adapter
+      await apiClient.get('/admin/accounts')
+      expect(adapter.mock.calls[0][0].headers.get('X-Proxy-Token')).toBe('native-session-token')
+      expect(adapter.mock.calls[0][0].headers.get('X-Target-Base')).toBe('https://a.example/api/v1')
+
+      setConnection({ id: 'b', name: 'B', type: 'cliproxy', baseUrl: 'https://b.example', apiKey: 'business-key', lastUsed: 0 })
+      await apiClient.get('/models')
+      expect(adapter.mock.calls[1][0].headers.get('X-Proxy-Token')).toBeUndefined()
+      expect(adapter.mock.calls[1][0].headers.get('X-Target-Base')).toBeUndefined()
+      expect(proxy.headers).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not send credentials when native proxy authorization is unavailable', async () => {
+      urlState.desktop = true
+      proxy.headers.mockRejectedValueOnce(new Error('native unavailable'))
+      const adapter = makeAdapter(() => okResponse({}))
+      apiClient.defaults.adapter = adapter
+      await expect(apiClient.get('/admin/accounts')).rejects.toBeTruthy()
+      expect(adapter).not.toHaveBeenCalled()
+    })
+
+    it('cancels a request if its connection changed while awaiting native authorization', async () => {
+      urlState.desktop = true
+      let finish!: (headers: Record<string, string>) => void
+      proxy.headers.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+      const adapter = makeAdapter(() => okResponse({}))
+      apiClient.defaults.adapter = adapter
+      setConnection({ id: 'a', name: 'A', type: 'sub2api', baseUrl: 'https://a.example', apiKey: 'a-key', lastUsed: 0 })
+      const pending = apiClient.post('/auth/login', { password: 'private' })
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+      await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+      setConnection({ id: 'b', name: 'B', type: 'sub2api', baseUrl: 'https://b.example', apiKey: 'b-key', lastUsed: 0 })
+      finish({ 'X-Proxy-Token': 'native-session-token' })
+      await rejection
+      expect(adapter).not.toHaveBeenCalled()
+    })
+
     it('每次请求刷新为最新 baseURL(切换连接后生效)', async () => {
       setConnection({ id: 'a', name: 'a', type: 'sub2api', baseUrl: 'https://a.example.com', apiKey: 'k', lastUsed: 0 })
       const adapter = makeAdapter(() => okResponse({}))
@@ -253,6 +318,27 @@ describe('API Client', () => {
   // --- 401 处理(派发事件 + 跳转 connect) ---
 
   describe('401 远程认证失效', () => {
+    it.each([
+      { status: 423, data: { code: 'ADMIN_COMPLIANCE_ACK_REQUIRED' }, event: 'admin-compliance-required' },
+      { status: 404, data: { message: 'Ops monitoring is disabled' }, event: 'ops-monitoring-disabled' },
+    ])('does not apply a stale source $status to the newly selected source', async ({ status, data, event }) => {
+      setConnection({ id: 'a', name: 'A', type: 'sub2api', baseUrl: 'https://a.example', apiKey: 'a-token', lastUsed: 0 })
+      const listener = vi.fn()
+      window.addEventListener(event, listener)
+      let rejectRequest!: () => void
+      apiClient.defaults.adapter = (config) => new Promise((_resolve, reject) => {
+        rejectRequest = () => reject({ response: { status, data }, config })
+      })
+      const pending = apiClient.get('/admin/ops/dashboard')
+      const rejected = expect(pending).rejects.toMatchObject({ status })
+      await vi.waitFor(() => expect(rejectRequest).toBeTypeOf('function'))
+      setConnection({ id: 'b', name: 'B', type: 'sub2api', baseUrl: 'https://b.example', apiKey: 'b-token', lastUsed: 0 })
+      rejectRequest()
+      await rejected
+      expect(listener).not.toHaveBeenCalled()
+      expect(localStorage.getItem('ops_monitoring_enabled_cached')).toBeNull()
+      window.removeEventListener(event, listener)
+    })
     it('rejects a stale source 401 without notifying or redirecting the newly selected connection', async () => {
       setConnection({ id: 'a', name: 'A', type: 'sub2api', authMode: 'login', baseUrl: 'https://a.example', apiKey: 'a-token', lastUsed: 0 })
       window.location.hash = '#/admin/cost-center'

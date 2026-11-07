@@ -42,4 +42,18 @@ describe('OAuth captcha start API', () => {
       params: { mode: 'open', redirect: '/billing?plan=pro' }
     })).toBe('/api/v1/auth/oauth/wechat/start?mode=open&redirect=%2Fbilling%3Fplan%3Dpro')
   })
+
+  it.each(['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'java\nscript:alert(1)', '//evil.example/login', null])(
+    'rejects unsafe OAuth authorization URLs before navigation: %s', async (authorizeUrl) => {
+      post.mockResolvedValue({ data: { authorize_url: authorizeUrl } })
+      await expect(startOAuthLogin({ provider: 'github', params: {} }, {}))
+        .rejects.toThrow('Invalid OAuth authorization URL')
+    },
+  )
+
+  it('allows an explicit site-root OAuth endpoint', async () => {
+    post.mockResolvedValue({ data: { authorize_url: '/api/v1/auth/oauth/github/start?state=abc' } })
+    await expect(startOAuthLogin({ provider: 'github', params: {} }, {}))
+      .resolves.toEqual({ authorize_url: '/api/v1/auth/oauth/github/start?state=abc' })
+  })
 })

@@ -185,10 +185,9 @@ describe('KeyUsageView daily detail', () => {
     const fetchMock = vi.mocked(fetch)
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/v1/usage?'),
-      expect.objectContaining({
-        headers: { Authorization: 'Bearer sk-test-key' },
-      })
+      expect.objectContaining({ headers: expect.any(Headers) })
     )
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBe('Bearer sk-test-key')
     expect(String(fetchMock.mock.calls[0][0])).toContain('days=30')
 
     const text = wrapper.text()

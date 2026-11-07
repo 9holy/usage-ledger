@@ -6,6 +6,7 @@ import type {
   WechatJSAPIPayload,
   WechatOAuthInfo,
 } from '@/types/payment'
+import { sanitizeNavigationUrl } from '@/utils/url'
 
 export const PAYMENT_RECOVERY_STORAGE_KEY = 'payment.recovery.current'
 
@@ -175,7 +176,8 @@ export function decidePaymentLaunch(
     if (!context.airwallexRouteUrl) {
       return { kind: 'unhandled', paymentState: baseState, recovery: baseState }
     }
-    const paymentState = { ...baseState, payUrl: context.airwallexRouteUrl || '' }
+    const paymentState = { ...baseState, payUrl: sanitizeNavigationUrl(context.airwallexRouteUrl, { allowRelative: true }) }
+    if (!paymentState.payUrl) return { kind: 'unhandled', paymentState, recovery: paymentState }
     return { kind: 'airwallex_route', paymentState, recovery: paymentState }
   }
 
@@ -192,12 +194,17 @@ export function decidePaymentLaunch(
     const payUrl = kind === 'stripe_popup'
       ? context.stripePopupUrl || context.stripeRouteUrl || ''
       : context.stripeRouteUrl || context.stripePopupUrl || ''
-    const paymentState = { ...baseState, payUrl }
+    const paymentState = { ...baseState, payUrl: sanitizeNavigationUrl(payUrl, { allowRelative: true }) }
     return { kind, paymentState, recovery: paymentState, stripeMethod }
   }
 
   if (result.result_type === 'oauth_required' && result.oauth?.authorize_url) {
-    return { kind: 'wechat_oauth', paymentState: baseState, recovery: baseState, oauth: result.oauth }
+    const authorizeUrl = sanitizeNavigationUrl(result.oauth.authorize_url, { allowRelative: true })
+    if (!authorizeUrl) return { kind: 'unhandled', paymentState: baseState, recovery: baseState }
+    return {
+      kind: 'wechat_oauth', paymentState: baseState, recovery: baseState,
+      oauth: { ...result.oauth, authorize_url: authorizeUrl },
+    }
   }
 
   const jsapiPayload = result.jsapi ?? result.jsapi_payload
@@ -252,6 +259,7 @@ export function createPaymentRecoverySnapshot(
 ): PaymentRecoverySnapshot {
   return {
     ...state,
+    payUrl: sanitizeNavigationUrl(state.payUrl, { allowRelative: true }),
     createdAt: now,
   }
 }
@@ -316,7 +324,7 @@ export function readPaymentRecoverySnapshot(
       qrCode: parsed.qrCode,
       expiresAt: parsed.expiresAt,
       paymentType: parsed.paymentType,
-      payUrl: parsed.payUrl,
+      payUrl: sanitizeNavigationUrl(parsed.payUrl, { allowRelative: true }),
       outTradeNo: parsed.outTradeNo || '',
       clientSecret: parsed.clientSecret,
       intentId: parsed.intentId || '',

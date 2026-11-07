@@ -265,6 +265,7 @@ import { useSubscriptionStore } from '@/stores/subscriptions'
 import { useAppStore } from '@/stores'
 import { paymentAPI } from '@/api/payment'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
+import { sanitizeNavigationUrl } from '@/utils/url'
 import { isMobileDevice } from '@/utils/device'
 import { hasPeakRate, formatPeakRateWindow, serverTimezoneLabel, type PeakRateFields } from '@/utils/peak-rate'
 import type { SubscriptionPlan, CheckoutInfoResponse, CreateOrderResult, OrderType } from '@/types/payment'
@@ -444,8 +445,9 @@ function buildWechatOAuthAuthorizeUrl(
   authorizeUrl: string,
   context: { paymentType: string; orderType: OrderType; planId?: number; orderAmount: number },
 ): string {
-  const normalizedUrl = authorizeUrl.trim()
-  if (!normalizedUrl || typeof window === 'undefined') {
+  const normalizedUrl = sanitizeNavigationUrl(authorizeUrl, { allowRelative: true })
+  if (!normalizedUrl) throw new Error('Invalid payment authorization URL')
+  if (typeof window === 'undefined') {
     return normalizedUrl
   }
 
@@ -471,9 +473,11 @@ function buildWechatOAuthAuthorizeUrl(
     }
 
     targetUrl.searchParams.set('redirect', `${redirectUrl.pathname}${redirectUrl.search}`)
-    return targetUrl.toString()
+    const target = sanitizeNavigationUrl(targetUrl.toString())
+    if (!target) throw new Error('Invalid payment authorization URL')
+    return target
   } catch {
-    return normalizedUrl
+    throw new Error('Invalid payment authorization URL')
   }
 }
 

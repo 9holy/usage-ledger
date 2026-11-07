@@ -1,6 +1,10 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { runInNewContext } from 'node:vm'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
+import en from '@/i18n/locales/en'
+import zh from '@/i18n/locales/zh'
 
 /**
  * 三源口径的**措辞契约**守卫(2026-09-16 收口轮 / 同日加固轮 / 同日加固第二轮)。
@@ -85,21 +89,10 @@ const SOURCE_BOUND_TERMS = ['产出', '用户计费', '收入', '营收', '渠�
  *  它槽内没有任何 SOURCE_BOUND_TERMS 命中,只靠词表抓不到。 */
 const SOURCE_CALIBER_TERMS = ['自算成本', '估算成本']
 
-/**
- * ★ 语言覆盖(2026-09-22):`SOURCE_BOUND_TERMS` 的**英文对照词**,尚未启用。
- *
- * 它现在**不能**直接并进 `SOURCE_BOUND_TERMS`:`hits()` 用的是**纯子串**匹配,
- * 而英文源码里 `modelCostSummary.revenue` / `revenueMissing` / `stats.totals.outputTokens`
- * 都会命中 `revenue` / `output`。实测在成本中心面跑一遍英文词表得到 **50 处命中,
- * 其中 0 处是用户可见的源措辞 —— 全是标识符**。直接并进去会把守卫从「假绿」翻成「假红」,
- * 而假红的下场通常是被注释掉,最终同样失去守卫。
- *
- * 启用顺序(不可颠倒):先给 `hits()` 换**词边界**匹配 → 再把本表并进 `SOURCE_BOUND_TERMS`。
- * 见文件末尾的「语言覆盖 tripwire」。
- */
+/** 英文仅匹配实际文案的完整词组；不得扫描 revenueMissing 等源码标识符。 */
 const SOURCE_BOUND_TERMS_EN = [
   'revenue', 'user billing', 'channel price', 'account rate',
-  'gross margin', 'contribution margin', 'payback',
+  'gross margin', 'contribution margin', 'payback', 'user charges', 'income',
 ]
 
 /**
@@ -126,6 +119,12 @@ interface Exemption {
 
 /** 逐条人工判定后的显式豁免。 */
 const EXEMPTIONS: Exemption[] = [
+  {
+    file: VIEW_PATH,
+    snippet: "function financialPointHours(point: { timestamp: string; bucketHours: number; source: 'ops' | 'usage_logs' })",
+    rules: ['D'],
+    reason: 'usage_logs 是趋势类型的判别值，用于选择真实覆盖时长；函数只返回数值，不渲染来源或营收文案。与 financialTrend.ts 的类型判别值采用相同规则。',
+  },
   {
     file: VIEW_PATH,
     snippet: '已从真实 usage_logs 按',
@@ -272,6 +271,44 @@ function filesRenderingThroughI18n(files: { path: string; text: string }[]): str
   return files.filter((file) => I18N_RENDER_PATTERN.test(file.text)).map((file) => file.path)
 }
 
+type Locale = 'zh' | 'en'
+const MESSAGES: Record<Locale, unknown> = { zh, en }
+
+/** 解析实际调用的 key，包括无组件上下文的 costDataText。缺失翻译必须报错。 */
+function translationKeys(text: string): string[] {
+  return [...text.matchAll(/(?:\b(t|costDataText)|\$t)\s*\(\s*(['"`])([^'"`]+)\2/g)]
+    .filter((match) => !match[3].includes('${')) // 动态包装函数由其各个字面量调用点覆盖。
+    .map((match) => match[1] === 'costDataText' ? `costData.${match[3]}` : match[3])
+}
+
+function translated(key: string, locale: Locale): string {
+  let current: unknown = MESSAGES[locale]
+  for (const part of key.split('.')) {
+    current = current && typeof current === 'object' ? (current as Record<string, unknown>)[part] : undefined
+  }
+  if (typeof current !== 'string' || current.trim() === '') throw new Error(`${locale}: missing translation ${key}`)
+  return current
+}
+
+/** 只检查已解析的文案。英文的词边界不能把 revenueMissing / accountRate 当成用户文案。 */
+function renderedHits(text: string): string[] {
+  const normalized = normalize(text)
+  return [
+    ...SOURCE_BOUND_TERMS.filter((term) => normalized.includes(term)),
+    ...SOURCE_BOUND_TERMS_EN.filter((term) => new RegExp(`\\b${term}\\b`, 'i').test(normalized)),
+  ]
+}
+
+function translatedHits(expression: string, locale: Locale): string[] {
+  return translationKeys(expression).flatMap((key) => renderedHits(translated(key, locale)))
+}
+
+/** 保留旧 A 规则，并让真正渲染的两种语言参加检查，不再禁止整个 i18n 功能。 */
+function hasUnsafeTranslatedFallback(expression: string, locale: Locale): boolean {
+  const selectsLocalOrCpa = /(?:connectionType|sourceKind)(?:\.value)?\s*(?:===|!==)\s*(?:null|'cliproxy')\s*\?/.test(expression)
+  return selectsLocalOrCpa && translatedHits(expression, locale).length > 0 && !isSourceExhaustive(expression)
+}
+
 const CLIPROXY_COMPARISON = /(===|!==)\s*'cliproxy'/
 const SUB2API_COMPARISON = /(===|!==)\s*'sub2api'/
 const NULL_COMPARISON = /(===|!==)\s*null/
@@ -354,7 +391,7 @@ interface ScannedFile {
   templateStart: number
   templateEnd: number
   scriptStart: number
-  blocks: string[][]
+  blocks: Block[]
   sourceAwareComputed: Set<string>
 }
 
@@ -764,45 +801,96 @@ describe('cost center 三源措辞契约:非 cockpit / 非 sub2api 不得默认�
     expect(hits("{{ '毛' }}{{ '利' }}")).toEqual(['毛利'])
   })
 
-  /**
-   * ★ 语言覆盖 tripwire(2026-09-22)
-   *
-   * `SOURCE_BOUND_TERMS` 是**中文词表**,且 `hits()` 是**纯子串匹配**。这两点合起来有一个
-   * 从未被写下来的**隐含前提**:成本中心面是「中文硬编码 + 中文词表」的**自洽组合** ——
-   * 源码里渲染什么,词表就匹配什么。
-   *
-   * 一旦有人把这些文件 i18n 化,渲染出的英文文案**一个中文词都不命中**,规则 A–F 会照常全绿
-   * ⇒ 守卫**静默失效**。届时英文界面完全可以把 cliproxy / cockpit 的估算成本标成 "Revenue",
-   * 而 CI 是绿的 —— 正是本项目反复吃亏的「假绿」形态。
-   *
-   * 但**不能直接把英文词条并进词表**(理由见 `SOURCE_BOUND_TERMS_EN` 注释:实测 50 处命中
-   * 全是标识符,会把假绿翻成假红)。正确顺序:**先换词边界匹配,再补英文词条**。
-   * 本 tripwire 的职责是让这个顺序**不能被人静默跳过**。
-   */
-  it('★ 语言覆盖:成本中心未 i18n 化前不得引入 t()/useI18n(否则中文词表静默失效)', () => {
-    const surface = [VIEW_PATH, COCKPIT_VIEW_PATH]
-      .concat(collectFiles(COMPONENT_DIR, (name) => name.endsWith('.vue'), () => false))
-      .map((path) => ({ path, text: readFileSync(resolve(process.cwd(), path), 'utf8') }))
-
-    const i18nRendered = filesRenderingThroughI18n(surface)
-    if (i18nRendered.length > 0) {
-      throw new Error([
-        `成本中心面已开始 i18n 化:${i18nRendered.join(', ')}`,
-        `但 SOURCE_BOUND_TERMS 仍是中文词表(${SOURCE_BOUND_TERMS.join(' / ')}),`,
-        '而 hits() 是纯子串匹配 —— 英文文案一个词都不命中,规则 A–F 会**静默失效**。',
-        '修法(顺序不可颠倒):',
-        `  1. 先给 hits() 换**词边界**匹配 —— 否则 ${SOURCE_BOUND_TERMS_EN.join(' / ')}`,
-        '     会在 modelCostSummary.revenue / revenueMissing / totals.outputTokens',
-        '     这类标识符上假红(实测:成本中心面跑英文词表 = 50 命中 / 0 真措辞);',
-        '  2. 再把 SOURCE_BOUND_TERMS_EN 并进 SOURCE_BOUND_TERMS。',
-      ].join('\n'))
+  it('语言覆盖：实际调用的每个翻译 key 必须同时存在于中英词典，源选择槽位不得漏掉第三源', () => {
+    const keys = new Set(SCANNED.flatMap((file) => translationKeys(file.lines.join('\n'))))
+    expect(keys.size).toBeGreaterThan(0)
+    const offenders: string[] = []
+    for (const locale of ['zh', 'en'] as const) {
+      for (const key of keys) expect(translated(key, locale), `${locale}: ${key}`).not.toBe('')
+      for (const file of SCANNED) {
+        file.lines.forEach((line, index) => {
+          // 与规则 A 相同，逐属性/插值检查，不能用同一行另一槽位的分支为它担保。
+          for (const slot of line.split('"')) {
+            if (hasUnsafeTranslatedFallback(slot, locale)) offenders.push(`${locale} ${file.path}:${index + 1}: ${slot.trim()}`)
+          }
+        })
+      }
     }
-
-    // 词表必须与「实际渲染语言」同语言。当前渲染语言 = 中文 ⇒ 词表是中文、英文表未启用。
-    // 这两条是**非空断言**:防止有人只改词表语言、不碰渲染语言,让 tripwire 的前提失真。
-    expect(SOURCE_BOUND_TERMS.some((term) => /[\u4e00-\u9fff]/.test(term))).toBe(true)
-    expect(SOURCE_BOUND_TERMS_EN.some((term) => /[\u4e00-\u9fff]/.test(term))).toBe(false)
+    expect(offenders).toEqual([])
   })
+
+  it('双语守卫自检：错误兜底、未知 key 必须失败，标识符不能充当文案，正确三源分支必须通过', () => {
+    expect(renderedHits('revenueMissing accountRate grossMargin contributionMargin')).toEqual([])
+    expect(renderedHits('Revenue / user charges / channel price')).toEqual(expect.arrayContaining(['revenue', 'user charges', 'channel price']))
+    expect(() => translated('costComponents.__missing_key__', 'en')).toThrow('missing translation')
+    for (const locale of ['zh', 'en'] as const) {
+      expect(hasUnsafeTranslatedFallback("connectionType === null ? t('costComponents.adaptiveCalculatedCost') : t('costComponents.userBilling')", locale)).toBe(true)
+      expect(hasUnsafeTranslatedFallback("props.sourceKind === 'cliproxy' ? t('costComponents.adaptiveEstimatedCost') : t('costComponents.userBilling')", locale)).toBe(true)
+      expect(hasUnsafeTranslatedFallback("connectionType === null ? t('costComponents.adaptiveCalculatedCost') : connectionType === 'cliproxy' ? t('costComponents.adaptiveEstimatedCost') : t('costComponents.userBilling')", locale)).toBe(false)
+    }
+  })
+
+  // 运行真实源码中的纯 computed，并解析真实中英词典；只比源码里出现三个字符串是不够的，
+  // 例如把 CPA 的返回值误接到用户计费 key，结构检查仍会通过，这里必须失败。
+  function evaluateComputed(path: string, name: string, source: 'sub2api' | 'cliproxy' | 'cockpit', locale: Locale): unknown {
+    const file = SCANNED.find((entry) => entry.path === path)!
+    const script = file.lines.slice(file.scriptStart + 1).join('\n').split('</script>')[0]
+    const ast = ts.createSourceFile(path, script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    const declaration = ast.statements.filter(ts.isVariableStatement)
+      .flatMap((statement) => [...statement.declarationList.declarations])
+      .find((entry) => entry.name.getText(ast) === name)
+    expect(declaration?.initializer, `${path}: ${name}`).toBeDefined()
+    expect(file.sourceAwareComputed.has(name), `${path}: ${name} must distinguish all three sources`).toBe(true)
+    return runInNewContext(`const ${name} = ${declaration!.initializer!.getText(ast)};\n${name}.value`, {
+      computed: (getter: () => unknown) => ({ value: getter() }),
+      props: { sourceKind: source },
+      connectionType: { value: source === 'cockpit' ? null : source },
+      upstreamProvider: { value: 'relay' },
+      t: (key: string) => translated(key, locale),
+    }, { timeout: 1000 })
+  }
+
+  for (const locale of ['zh', 'en'] as const) {
+    for (const source of ['sub2api', 'cliproxy', 'cockpit'] as const) {
+      it(`真实双语分支：${locale} / ${source} 保持用量表、价格来源、账号费率与营收缺失口径`, () => {
+        const index = ['sub2api', 'cliproxy', 'cockpit'].indexOf(source)
+        const inspector = `${COMPONENT_DIR}/CostProfileInspector.vue`
+        const cases: [string, string, string[]][] = [
+          [inspector, 'meteredPriceSource', ['costComponents.customChannelPrices', 'costComponents.litellmUnitPrices', 'costComponents.localPriceBook']],
+          [inspector, 'meteredExplanation', ['costComponents.relayChannelPricesTakePriorityTheModel', 'costComponents.thisSourceHasNoAvailableChannelPrices', 'costComponents.thisSourceHasNoAvailableRevenueLayer']],
+          [inspector, 'meteredFixedOverheadNote', ['costComponents.configureOnlyFixedCostsInAdditionTo', 'costComponents.configureOnlyFixedCostsInAdditionTom210', 'costComponents.configureOnlyFixedCostsInAdditionTom211']],
+          [inspector, 'accountMultiplierNote', ['costComponents.relayDiscountOrActualProcurementMultiplier', 'costComponents.noAccountRateBasisEstimatedUsingLitellm', 'costComponents.noAccountRateBasisCalculatedUsingThe']],
+          [VIEW_PATH, 'modelCostBasisNote', ['costCenter.text.calculatedSeparatelyUsingRecordedUsageTokensActualModels', 'costCenter.text.estimatedFromRecordedUsageTokensActualModelsAnd', 'costCenter.text.calculatedFromRecordedUsageTokensActualModelsAnd']],
+          [VIEW_PATH, 'revenueMissingNote', ['costCenter.text.sourceDoesNotProvideActualCost', 'costCenter.text.cpaHasNoRevenueBasis', 'costCenter.text.localUsageHasNoRevenueBasis']],
+        ]
+        for (const [path, name, expected] of cases) {
+          expect(evaluateComputed(path, name, source, locale), `${name}: ${source}`).toBe(translated(expected[index], locale))
+        }
+        expect(evaluateComputed(inspector, 'meteredUsageSourceLabel', source, locale))
+          .toBe(['usage_logs', 'CPA usage_events', translated('costComponents.cockpitLocalUsageDatabase', locale)][index])
+        const economy = evaluateComputed(`${COMPONENT_DIR}/AdaptiveOperationsCharts.vue`, 'sourceEconomy', source, locale) as { hasRevenue: boolean; costLabel: string; revenueAbsentReason: string }
+        expect(economy).toEqual({
+          hasRevenue: source === 'sub2api',
+          costLabel: translated(['costComponents.userBilling', 'costComponents.adaptiveEstimatedCost', 'costComponents.adaptiveCalculatedCost'][index], locale),
+          revenueAbsentReason: source === 'sub2api' ? '' : translated(source === 'cliproxy' ? 'costComponents.adaptiveCpaNoRevenue' : 'costComponents.adaptiveCockpitNoRevenue', locale),
+        })
+        // 译文字典本身也可能写错。此处的红线独立于 translated(expectedKey)，
+        // 把 CPA 的翻译改成 Revenue 不能让“实际值与同一个错误词典比较”假绿。
+        if (source !== 'sub2api') {
+          expect(renderedHits(economy.costLabel)).toEqual([])
+          const absence = locale === 'en' ? /\b(no|not|unavailable|cannot|without)\b/i : /未|没有|无|不可/
+          expect(economy.revenueAbsentReason).toMatch(absence)
+          expect(evaluateComputed(VIEW_PATH, 'revenueMissingNote', source, locale)).toMatch(absence)
+          expect(evaluateComputed(inspector, 'accountMultiplierNote', source, locale)).toMatch(absence)
+          expect(evaluateComputed(inspector, 'meteredUsageSourceLabel', source, locale)).not.toContain('usage_logs')
+          expect(renderedHits(String(evaluateComputed(inspector, 'meteredPriceSource', source, locale)))).toEqual([])
+          expect(renderedHits(String(evaluateComputed(VIEW_PATH, 'modelCostBasisNote', source, locale)))).toEqual([])
+        } else {
+          expect(renderedHits(economy.costLabel).length).toBeGreaterThan(0)
+        }
+      })
+    }
+  }
 
   it('tripwire 自检:注入 i18n 渲染写法必须被识别,标识符调用不得误命中', () => {
     // 没有这条,上面那个 `if` 就是一句无法证伪的空话 —— 它可能永远不命中。
@@ -830,7 +918,8 @@ describe('cost center 三源措辞契约:非 cockpit / 非 sub2api 不得默认�
    * 2 个 `SOURCE_CALIBER_TERMS` 也全部出现。
    */
   it('★ 词表耦合:每个受保护的词都必须真的出现在扫描面里(死词 = 守卫在为空报警)', () => {
-    const corpus = normalize(SCANNED.map((file) => file.lines.join('\n')).join('\n'))
+    const keys = new Set(SCANNED.flatMap((file) => translationKeys(file.lines.join('\n'))))
+    const corpus = normalize([...SCANNED.map((file) => file.lines.join('\n')), ...[...keys].flatMap((key) => ['zh', 'en'].map((locale) => translated(key, locale as Locale)))].join('\n'))
     const dead = [...SOURCE_BOUND_TERMS, ...SOURCE_CALIBER_TERMS]
       .filter((term) => !corpus.includes(term))
 

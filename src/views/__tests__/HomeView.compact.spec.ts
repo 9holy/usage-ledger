@@ -83,7 +83,26 @@ describe('HomeView compact mode', () => {
     })
 
     expect(wrapper.get('iframe').attributes('src')).toBe('https://example.com/home')
+    expect(wrapper.get('iframe').attributes('sandbox')).toBe('allow-scripts allow-forms allow-popups allow-same-origin')
     expect(wrapper.find('[data-testid="compact-home"]').exists()).toBe(false)
+  })
+
+  it('isolates same-origin embedded documents so scripts cannot remove their own sandbox', () => {
+    const wrapper = mountHome({ home_content: `${window.location.origin}/embedded` })
+    expect(wrapper.get('iframe').attributes('sandbox')).toBe('allow-scripts allow-forms allow-popups')
+    expect(wrapper.get('iframe').attributes('referrerpolicy')).toBe('no-referrer')
+  })
+
+  it('removes executable remote HTML while retaining ordinary custom content', () => {
+    const wrapper = mountHome({
+      home_content: '<section id="safe">Welcome</section><img src="x" onerror="window.compromised = true"><script>window.compromised = true</script><a href="javascript:alert(1)">Link</a><iframe srcdoc="<script>alert(1)</script>"></iframe>',
+    })
+
+    expect(wrapper.get('#safe').text()).toBe('Welcome')
+    expect(wrapper.get('img').attributes('onerror')).toBeUndefined()
+    expect(wrapper.find('script').exists()).toBe(false)
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    expect(wrapper.get('a').attributes('href')).toBeUndefined()
   })
 
   it('treats whitespace-only custom content as empty and selects compact mode', () => {

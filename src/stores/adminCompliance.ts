@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { connectionScopeKey } from './connectionScope'
 import adminComplianceAPI, { type AdminComplianceStatus } from '@/api/admin/compliance'
 import { getLocale } from '@/i18n'
 
@@ -12,6 +13,7 @@ export const useAdminComplianceStore = defineStore('adminCompliance', () => {
   const submitting = ref(false)
   const initialized = ref(false)
   const forceVisible = ref(false)
+  let generation = 0
 
   const required = computed(() => status.value?.required === true)
   const shouldShow = computed(() => required.value || forceVisible.value)
@@ -24,30 +26,34 @@ export const useAdminComplianceStore = defineStore('adminCompliance', () => {
   })
 
   async function fetchStatus(): Promise<AdminComplianceStatus> {
+    const requestedGeneration = generation
     loading.value = true
     try {
       const nextStatus = await adminComplianceAPI.getStatus()
+      if (requestedGeneration !== generation) return nextStatus
       status.value = nextStatus
       initialized.value = true
       forceVisible.value = nextStatus.required
       return nextStatus
     } finally {
-      loading.value = false
+      if (requestedGeneration === generation) loading.value = false
     }
   }
 
   async function accept(phrase: string): Promise<AdminComplianceStatus> {
+    const requestedGeneration = generation
     submitting.value = true
     try {
       const nextStatus = await adminComplianceAPI.accept({
         phrase,
         language: currentLocale.value
       })
+      if (requestedGeneration !== generation) return nextStatus
       status.value = nextStatus
       forceVisible.value = nextStatus.required
       return nextStatus
     } finally {
-      submitting.value = false
+      if (requestedGeneration === generation) submitting.value = false
     }
   }
 
@@ -68,12 +74,15 @@ export const useAdminComplianceStore = defineStore('adminCompliance', () => {
   }
 
   function reset(): void {
+    generation += 1
     status.value = null
     loading.value = false
     submitting.value = false
     initialized.value = false
     forceVisible.value = false
   }
+
+  watch(connectionScopeKey, reset, { flush: 'sync' })
 
   return {
     status,

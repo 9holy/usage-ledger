@@ -218,6 +218,13 @@ pub fn read_batch(
     source: &Connection,
     cursor: &store::RuntimeModeCursor,
 ) -> Result<ModeBatch, String> {
+    read_batch_for_cursors(source, &[cursor])
+}
+
+fn read_batch_for_cursors(
+    source: &Connection,
+    cursors: &[&store::RuntimeModeCursor],
+) -> Result<ModeBatch, String> {
     // Keep the checkpoint check and consumed rows in one read-only SQLite snapshot.
     let source = source
         .unchecked_transaction()
@@ -237,23 +244,24 @@ pub fn read_batch(
         .optional()
         .map_err(|error| error.to_string())?
         .unwrap_or_default();
-    let checkpoint = if cursor.id > 0 {
-        source
+    let mut after_id = cursors.iter().map(|cursor| cursor.id).min().unwrap_or(0);
+    for cursor in cursors.iter().filter(|cursor| cursor.id > 0) {
+        let checkpoint = source
             .query_row(
                 "SELECT ts,ts_nanos FROM logs WHERE id=?1",
                 [cursor.id],
                 |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .optional()
-            .map_err(|error| error.to_string())?
-    } else {
-        None
-    };
-    let after_id = if cursor.id == 0 || checkpoint == Some((cursor.ts, cursor.ts_nanos)) {
-        cursor.id
-    } else {
-        0
-    };
+            .map_err(|error| error.to_string())?;
+        if checkpoint != Some((cursor.ts, cursor.ts_nanos)) {
+            // Older releases committed mode and billing separately. A smaller
+            // cursor from a new generation cannot prove the other consumer read
+            // that generation's prefix; validate both identities before skipping.
+            after_id = 0;
+            break;
+        }
+    }
     let mut statement = source.prepare("SELECT id,ts,ts_nanos,thread_id,feedback_log_body FROM logs
         WHERE id>?1 AND id<=?2 AND target='feedback_tags' AND module_path='codex_core::session::turn'
         ORDER BY id LIMIT ?3").map_err(|error| error.to_string())?;
@@ -311,14 +319,18 @@ pub fn collect(conn: &mut Connection, paths: &[PathBuf]) -> Vec<SourceStatus> {
                 .map_err(|error| error.to_string())?;
             source.busy_timeout(Duration::from_millis(500)).map_err(|error| error.to_string())?;
             let source_path = path.to_string_lossy();
-            let mode_cursor = store::runtime_mode_cursor(conn, &source_path)?;
-            let billing_cursor=super::billing::cursor(conn,&source_path)?;
-            let cursor=if mode_cursor.id<=billing_cursor.id {mode_cursor}else{billing_cursor};
-            let batch = read_batch(&source, &cursor)?;
-            if batch.next_cursor != cursor || !batch.observations.is_empty() {
-                store::apply_runtime_mode_batch(conn, &source_path, &batch.observations, &batch.next_cursor)?;
+            // Re-read both durable cursors after obtaining the write reservation,
+            // then commit their shared source batch and all derived evidence together.
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let mode_cursor = store::runtime_mode_cursor(&tx, &source_path)?;
+            let billing_cursor = super::billing::cursor(&tx, &source_path)?;
+            let batch = read_batch_for_cursors(&source, &[&mode_cursor, &billing_cursor])?;
+            if batch.next_cursor != mode_cursor || !batch.observations.is_empty() {
+                store::apply_runtime_mode_batch_in_transaction(&tx, &source_path, &batch.observations, &batch.next_cursor)?;
             }
-            super::billing::apply_batch(conn,&source_path,&batch.billings,&batch.next_cursor)?;
+            super::billing::apply_batch_in_transaction(&tx, &source_path, &batch.billings, &batch.next_cursor)?;
+            tx.commit().map_err(|error| error.to_string())?;
             Ok::<_,String>(if batch.invalid_rows > 0 {
                 Some(format!("{} runtime mode log rows have invalid tags or identities; their modes remain unknown", batch.invalid_rows))
             } else if batch.catching_up {
@@ -335,6 +347,178 @@ mod tests {
     fn body(thread: &str, turn: &str, tags: &str) -> String {
         format!("session_task.run{{thread_id={thread}}}: run_turn{{turn_id={turn} thread.id={thread} turn.id={turn} submission.id={turn}}}: tags_json={tags}")
     }
+    struct RuntimeLogFixture {
+        root: PathBuf,
+        source_path: PathBuf,
+    }
+
+    impl RuntimeLogFixture {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("monitor-mode-{label}-{}-{}",
+                std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir_all(&root).unwrap();
+            let source_path = root.join("logs_fixture.sqlite");
+            let source = Connection::open(&source_path).unwrap();
+            source.execute_batch("CREATE TABLE logs(id INTEGER PRIMARY KEY,ts INTEGER,ts_nanos INTEGER,thread_id TEXT,target TEXT,module_path TEXT,feedback_log_body TEXT)").unwrap();
+            Self { root, source_path }
+        }
+
+        fn source_row(&self, id: i64, text: &str) {
+            let source = Connection::open(&self.source_path).unwrap();
+            source.execute("INSERT INTO logs VALUES(?1,100,0,'thread','feedback_tags','codex_core::session::turn',?2)",
+                params![id, text]).unwrap();
+        }
+    }
+
+    impl Drop for RuntimeLogFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn seed_priced_runtime_request(conn: &mut Connection) {
+        let tx = conn.transaction().unwrap();
+        store::save_usage_with_catalog(&tx, &super::super::types::UsageRecord {
+            id: "runtime-request".into(), tool: "codex".into(), session_id: "thread".into(),
+            turn_id: "turn".into(), timestamp_ms: 101_000, model: Some("gpt-6.1-sol".into()),
+            input_tokens: 300_000, output_tokens: 100, context_tokens: Some(300_000),
+            ..Default::default()
+        }, i64::MAX, 0, &crate::model_catalog::CatalogSnapshot::default()).unwrap();
+        tx.commit().unwrap();
+    }
+
+    fn runtime_request_snapshot(conn: &Connection) -> (String, String, String) {
+        conn.query_row("SELECT r.usage,r.cost,s.totals FROM monitor_requests r JOIN monitor_sessions s ON s.key=r.session_key WHERE r.id='runtime-request'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+    }
+
+    #[test]
+    fn waiting_runtime_collector_cannot_rewind_committed_mode_and_billing_cursors() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Instant;
+        static WAITING: AtomicBool = AtomicBool::new(false);
+        WAITING.store(false, Ordering::SeqCst);
+        let fixture = RuntimeLogFixture::new("cursor");
+        fixture.source_row(1, &body("thread", "turn", "{}"));
+        let db = fixture.root.join("ledger.sqlite");
+        let mut conn = Connection::open(&db).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        store::initialize(&conn).unwrap();
+        seed_priced_runtime_request(&mut conn);
+        let before = runtime_request_snapshot(&conn);
+        let mut competing = Connection::open(&db).unwrap();
+        competing.busy_handler(Some(|attempt| {
+            WAITING.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(1));
+            attempt < 10_000
+        })).unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        let worker_path = fixture.source_path.clone();
+        let worker = std::thread::spawn(move || collect(&mut competing, &[worker_path]));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !WAITING.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(WAITING.load(Ordering::SeqCst), "competing runtime collector did not reach the write lock");
+        // A second collector has consumed a newly appended row while the first
+        // one is waiting with a batch that stopped at the old source endpoint.
+        fixture.source_row(2, &body("thread", "turn", "{}"));
+        let next = store::RuntimeModeCursor { id: 2, ts: Some(100), ts_nanos: Some(0) };
+        let path = fixture.source_path.to_string_lossy();
+        for prefix in ["codex_runtime_mode_cursor", "codex_billing_cursor"] {
+            tx.execute("INSERT INTO monitor_state VALUES(?1,?2)",
+                params![format!("{prefix}:{path}"), serde_json::to_string(&next).unwrap()]).unwrap();
+        }
+        tx.commit().unwrap();
+        let statuses = worker.join().unwrap();
+        assert!(statuses.iter().all(|status| status.error.is_none()), "{statuses:?}");
+        assert_eq!(runtime_request_snapshot(&conn), before);
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (1, 300_000, 100));
+        assert_eq!(store::runtime_mode_cursor(&conn, &path).unwrap(), next);
+        assert_eq!(super::super::billing::cursor(&conn, &path).unwrap(), next);
+    }
+
+    #[test]
+    fn billing_checkpoint_failure_rolls_back_mode_evidence_usage_and_both_cursors() {
+        let fixture = RuntimeLogFixture::new("atomic");
+        fixture.source_row(1, &body("thread", "turn", r#"{"service_tier":"priority"}"#)
+            .replace("tags_json", "auth_mode=Some(Chatgpt) tags_json"));
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::initialize(&conn).unwrap();
+        seed_priced_runtime_request(&mut conn);
+        let before = runtime_request_snapshot(&conn);
+        let before_cost: super::super::types::CostEstimate = serde_json::from_str(&before.1).unwrap();
+        assert!(before_cost.scenarios.len() >= 2);
+        assert!(before_cost.scenarios.iter().all(|quote| quote.amount > 0.0));
+        conn.execute_batch("CREATE TRIGGER fail_runtime_billing_cursor BEFORE INSERT ON monitor_state
+            WHEN NEW.key LIKE 'codex_billing_cursor:%' BEGIN SELECT RAISE(ABORT,'forced runtime billing checkpoint failure'); END;").unwrap();
+        let statuses = collect(&mut conn, std::slice::from_ref(&fixture.source_path));
+        assert!(statuses[0].error.as_deref().unwrap().contains("forced runtime billing checkpoint failure"));
+        let path = fixture.source_path.to_string_lossy();
+        assert_eq!(runtime_request_snapshot(&conn), before, "mode evidence committed although its source batch failed");
+        assert_eq!(store::runtime_mode_cursor(&conn, &path).unwrap(), store::RuntimeModeCursor::default());
+        assert_eq!(super::super::billing::cursor(&conn, &path).unwrap(), store::RuntimeModeCursor::default());
+        for table in ["monitor_turn_mode_evidence", "monitor_turn_billing", "monitor_original_api_quotes"] {
+            assert_eq!(conn.query_row::<i64, _, _>(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap(), 0);
+        }
+        conn.execute("DROP TRIGGER fail_runtime_billing_cursor", []).unwrap();
+        assert!(collect(&mut conn, std::slice::from_ref(&fixture.source_path))[0].error.is_none());
+        let after = runtime_request_snapshot(&conn);
+        let usage: super::super::types::UsageRecord = serde_json::from_str(&after.0).unwrap();
+        assert_eq!(usage.runtime_mode.unwrap().mode.as_deref(), Some("fast"));
+        assert_eq!(usage.billing_scope.as_deref(), Some("subscription"));
+        let after_cost: super::super::types::CostEstimate = serde_json::from_str(&after.1).unwrap();
+        assert_eq!(after_cost.scenarios.len(), before_cost.scenarios.len());
+        assert!(after_cost.scenarios.iter().zip(&before_cost.scenarios)
+            .all(|(next, previous)| next.amount > 0.0 && next.amount < previous.amount));
+        assert_eq!(super::super::billing::original_api(&conn, "codex", "runtime-request").unwrap().unwrap(), before.1);
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (1, 300_000, 100));
+        let next = store::RuntimeModeCursor { id: 1, ts: Some(100), ts_nanos: Some(0) };
+        assert_eq!(store::runtime_mode_cursor(&conn, &path).unwrap(), next);
+        assert_eq!(super::super::billing::cursor(&conn, &path).unwrap(), next);
+    }
+
+    #[test]
+    fn split_generation_cursors_replay_the_missing_billing_prefix_after_reset() {
+        let fixture = RuntimeLogFixture::new("split-reset");
+        fixture.source_row(1, &body("thread", "turn", r#"{"service_tier":"priority"}"#)
+            .replace("tags_json", "auth_mode=Some(Chatgpt) tags_json"));
+        let mut conn = Connection::open_in_memory().unwrap();
+        store::initialize(&conn).unwrap();
+        seed_priced_runtime_request(&mut conn);
+        let before_cost = runtime_request_snapshot(&conn).1;
+        let path = fixture.source_path.to_string_lossy();
+        let current = store::RuntimeModeCursor { id: 1, ts: Some(100), ts_nanos: Some(0) };
+        store::apply_runtime_mode_batch(&mut conn, &path, &[store::RuntimeModeObservation {
+            session_key: "codex:thread".into(), turn_id: "turn".into(), mode: "fast".into(),
+            observed_at_ms: 100_000, source_row_id: 1,
+        }], &current).unwrap();
+        // An earlier release committed mode for the new source generation, then
+        // failed before billing. Its numerically larger old cursor is incompatible.
+        let old = store::RuntimeModeCursor { id: 2, ts: Some(99), ts_nanos: Some(0) };
+        conn.execute("INSERT INTO monitor_state VALUES(?1,?2)",
+            params![format!("codex_billing_cursor:{path}"), serde_json::to_string(&old).unwrap()]).unwrap();
+        assert!(collect(&mut conn, std::slice::from_ref(&fixture.source_path))[0].error.is_none());
+        let after = runtime_request_snapshot(&conn);
+        let usage: super::super::types::UsageRecord = serde_json::from_str(&after.0).unwrap();
+        assert_eq!(usage.billing_scope.as_deref(), Some("subscription"), "a new mode checkpoint cannot prove old billing consumed this generation");
+        assert_eq!(usage.runtime_mode.unwrap().mode.as_deref(), Some("fast"));
+        assert_eq!(store::runtime_mode_cursor(&conn, &path).unwrap(), current);
+        assert_eq!(super::super::billing::cursor(&conn, &path).unwrap(), current);
+        assert_eq!(super::super::billing::original_api(&conn, "codex", "runtime-request").unwrap().unwrap(), before_cost);
+        let before_cost: super::super::types::CostEstimate = serde_json::from_str(&before_cost).unwrap();
+        let after_cost: super::super::types::CostEstimate = serde_json::from_str(&after.1).unwrap();
+        assert_eq!(after_cost.scenarios.len(), before_cost.scenarios.len());
+        assert!(after_cost.scenarios.iter().zip(&before_cost.scenarios)
+            .all(|(next, previous)| next.amount > 0.0 && next.amount < previous.amount));
+        let totals = store::sum_sessions(&store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (1, 300_000, 100));
+        assert!(collect(&mut conn, std::slice::from_ref(&fixture.source_path))[0].error.is_none());
+        assert_eq!(runtime_request_snapshot(&conn), after, "recovered split cursors must become idempotent");
+    }
+
     #[test]
     fn billing_authentication_does_not_require_a_recorded_speed_tier() {
         for (auth,kind) in [("Some(Chatgpt)","subscription"),("Some(ApiKey)","api")] {

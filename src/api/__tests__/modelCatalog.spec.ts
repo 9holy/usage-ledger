@@ -1,3 +1,4 @@
+import '@/features/desktop/__tests__/usageI18nFixture'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
 import { getModelCatalogStatus, refreshModelCatalog, quoteModelCatalogBatch } from '../modelCatalog'

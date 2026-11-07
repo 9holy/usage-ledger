@@ -101,7 +101,7 @@ export const useConnectionStore = defineStore('connection', () => {
   const error = ref<string | null>(null)
   let connectionAttempt = 0
   /** 2FA 中间态:首次 /auth/login 拿到 temp_token 后暂存,待 complete2FA 用 */
-  const pending2FA = ref<{ connectionId: string; baseUrl: string; tempToken: string } | null>(null)
+  const pending2FA = ref<{ connectionId: string; baseUrl: string; tempToken: string; email: string; password?: string } | null>(null)
 
   const active = computed(() =>
     connections.value.find(c => c.id === activeId.value) ?? null,
@@ -125,11 +125,7 @@ export const useConnectionStore = defineStore('connection', () => {
     connections.value = connections.value.filter(c => c.id !== id)
     saveConnections(connections.value)
     if (activeId.value === id) {
-      connectionAttempt += 1
-      activeId.value = null
-      localStorage.removeItem(ACTIVE_KEY)
-      connected.value = false
-      setActiveConnection(null)
+      disconnect()
     }
   }
 
@@ -151,6 +147,8 @@ export const useConnectionStore = defineStore('connection', () => {
     const attempt = ++connectionAttempt
 
     connecting.value = true
+    connected.value = false
+    pending2FA.value = null
     error.value = null
 
     try {
@@ -280,6 +278,8 @@ export const useConnectionStore = defineStore('connection', () => {
     const attempt = ++connectionAttempt
 
     connecting.value = true
+    connected.value = false
+    pending2FA.value = null
     error.value = null
 
     try {
@@ -290,7 +290,7 @@ export const useConnectionStore = defineStore('connection', () => {
       if (attempt !== connectionAttempt || activeId.value !== id || active.value?.baseUrl !== conn.baseUrl) return { ok: false, error: '登录期间连接已切换' }
       if (isTotp2FARequired(resp)) {
         // 2FA 需要后续补码:暂存 temp_token,等 complete2FA 用它换 JWT
-        pending2FA.value = { connectionId: id, baseUrl: conn.baseUrl, tempToken: resp.temp_token ?? '' }
+        pending2FA.value = { connectionId: id, baseUrl: conn.baseUrl, tempToken: resp.temp_token ?? '', email, password: rememberPassword ? password : undefined }
         return { ok: false, requires2fa: true }
       }
       // 拿到 JWT,更新连接 apiKey(同时刷新 url.ts 活跃连接引用,使后续请求带 Bearer)
@@ -348,7 +348,7 @@ export const useConnectionStore = defineStore('connection', () => {
       await useAuthStore().login2FA(pending.tempToken, totpCode)
       if (attempt !== connectionAttempt || activeId.value !== id || active.value?.baseUrl !== pending.baseUrl) return { ok: false, error: '2FA 期间连接已切换', requiresLogin: true }
       const jwt = localStorage.getItem('auth_token') ?? ''
-      updateConnection(id, { apiKey: jwt, authMode: 'login', tokenExpiresAt: getTokenExpiresAt() ?? undefined, lastUsed: Date.now() })
+      updateConnection(id, { apiKey: jwt, authMode: 'login', email: pending.email, password: pending.password, tokenExpiresAt: getTokenExpiresAt() ?? undefined, lastUsed: Date.now() })
       setActiveConnection(connections.value.find(c => c.id === id) ?? null)
       saveConnections(connections.value)
       localStorage.setItem(ACTIVE_KEY, id)
@@ -365,12 +365,16 @@ export const useConnectionStore = defineStore('connection', () => {
   }
 
   function disconnect() {
+    // logout captures the current upstream before its connection is detached.
+    const logout = useAuthStore().logout()
     connectionAttempt += 1
     activeId.value = null
     connected.value = false
+    connecting.value = false
+    pending2FA.value = null
     localStorage.removeItem(ACTIVE_KEY)
     setActiveConnection(null)
-    useAuthStore().logout().catch(() => {/* 远程登出失败不阻塞本地清除 */})
+    logout.catch(() => {/* 远程登出失败不阻塞本地清除 */})
   }
 
   /** 清除活跃连接标记但不触发 authStore.logout——供 cockpit 占位会话复用:
@@ -379,6 +383,8 @@ export const useConnectionStore = defineStore('connection', () => {
    *  ponytail: 不调 logout,避免清掉刚注入的 cockpit-local 占位会话;connected 保留 true 让管理台可进。 */
   function clearActiveOnly() {
     connectionAttempt += 1
+    connecting.value = false
+    pending2FA.value = null
     activeId.value = null
     localStorage.removeItem(ACTIVE_KEY)
     setActiveConnection(null)

@@ -210,7 +210,7 @@ macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer I
 
 ### Windows
 
-安装 Node.js 22 LTS 或兼容更新版本、pnpm 9.15.9、MSVC 工具链的 Rust stable、Visual Studio C++ Build Tools 和 WebView2 Runtime。
+安装 Node.js 22 LTS（至少 22.12.0）或兼容更新版本、pnpm 9.15.9、MSVC 工具链的 Rust stable、Visual Studio C++ Build Tools 和 WebView2 Runtime。
 
 ~~~powershell
 git clone https://github.com/9holy/usage-ledger.git
@@ -250,6 +250,9 @@ pnpm desktop:build:mac
 - [DeepSeek Harness 接入说明](docs/integrations/deepseek-harness.md)。
 - [macOS 构建与测试指南](docs/platforms/macos.md)。
 - [0.2.25 发布说明](docs/release/0.2.25.md)。
+- [2026-11-07 审核与验证报告](docs/audit-2026-11-07.md)。
+- [2026-11-07 用量统计与账号归属专项复核](docs/monitor-accuracy-audit-2026-11-07.md)。
+- [2026-11-07 第三轮复审：并发、账号证据与账本准确性](docs/re-review-2026-11-07.md)。
 - [隐私说明](docs/PRIVACY.md)。
 - [第三方来源与许可](THIRD_PARTY_NOTICES.md)及[许可文本](LICENSES/)。
 

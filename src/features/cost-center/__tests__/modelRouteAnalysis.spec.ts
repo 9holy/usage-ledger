@@ -262,7 +262,7 @@ describe('成本未知的渲染分支:sub2api 的"未知"与 cockpit/cliproxy �
     const costCells = view.split('\n').filter(line => line.includes('v-if="routeRow.standardCost == null || routeRow.costUnknown"'))
     expect(costCells, '未找到同时覆盖两种成本未知的组合守卫').toHaveLength(1)
     const cell = costCells[0]!
-    expect(cell).toContain("routeRow.costUnknown ? '计价条件不足且源未提供估算' : '该条记录未带成本字段'")
+    expect(cell).toContain("routeRow.costUnknown ? t('costCenter.text.insufficientPricingConditionsAndNoSourceEstimate') : t('costCenter.text.thisRecordLacksACostField')")
     expect(cell).toContain('v-if="routeRow.knownStandardCost != null"')
     expect(cell).toContain('<template v-else><strong>{{ formatUsd(routeRow.standardCost, 6) }}')
     expect(cell.indexOf('v-if="routeRow.standardCost == null || routeRow.costUnknown"')).toBeLessThan(cell.indexOf('<template v-else><strong>{{ formatUsd(routeRow.standardCost, 6) }}'))
@@ -332,7 +332,7 @@ describe('routeCostBasisLabel · 成本列口径标注必须等于真实算法',
     expect(routeCostBasisLabel(row(), null)).not.toContain('请求快照')
     expect(routeCostBasisLabel(row(), 'cliproxy')).not.toContain('请求快照')
     // sub2api 才是真的逐请求快照,它必须这么说。
-    expect(routeCostBasisLabel(row(), 'sub2api')).toContain('逐请求成本快照')
+    expect(routeCostBasisLabel(row(), 'sub2api')).toBe('usage_logs 记录的每次请求成本')
   })
 
   it('★ 接线:成本列必须调 routeCostBasisLabel,且不得再写死「请求快照」字面量', () => {

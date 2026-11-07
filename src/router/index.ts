@@ -9,6 +9,7 @@ import { useConnectionStore } from '@/stores/connection'
 import { useAppStore } from '@/stores/app'
 import { useAdminSettingsStore } from '@/stores/adminSettings'
 import { useAdminComplianceStore } from '@/stores/adminCompliance'
+import { connectionScopeKey } from '@/stores/connectionScope'
 import { useNavigationLoadingState } from '@/composables/useNavigationLoading'
 import { useRoutePrefetch } from '@/composables/useRoutePrefetch'
 import { getSetupStatus } from '@/api/setup'
@@ -969,14 +970,15 @@ router.beforeEach(async (to, _from, next) => {
     return
   }
 
-  if (requiresAdmin && authStore.isAdmin) {
+  if (requiresAdmin && authStore.isAdmin && connectionStore.active?.type !== 'cliproxy') {
     const adminComplianceStore = useAdminComplianceStore()
     if (!adminComplianceStore.initialized) {
+      const requestedConnection = connectionScopeKey()
       try {
         await adminComplianceStore.fetchStatus()
       } catch (error) {
         const err = error as { status?: number; code?: string; metadata?: Record<string, string> }
-        if (err.status === 423 && err.code === 'ADMIN_COMPLIANCE_ACK_REQUIRED') {
+        if (requestedConnection === connectionScopeKey() && err.status === 423 && err.code === 'ADMIN_COMPLIANCE_ACK_REQUIRED') {
           adminComplianceStore.requireAcknowledgement(err.metadata)
         }
       }

@@ -190,6 +190,7 @@ pub fn parse_artifact<R: BufRead>(mut reader: R, expected_version: Option<u64>) 
             }
             None => known_prompt,
         };
+        sum(prompt, output)?;
         let mut unknown_fields = Vec::new();
         if read.is_none() {
             unknown_fields.push("cache_read_tokens".into());
@@ -329,6 +330,19 @@ mod tests {
         bad["data"]["usage"]["inputTokens"] = json!(-1);
         assert!(parse(false, vec![bad]).is_err());
     }
+    #[test]
+    fn combined_input_and_output_must_stay_exact_without_total_tokens() {
+        let limit = super::super::store::MAX_EXACT_TOKENS;
+        let mut event = sample(limit, 1);
+        event["data"]["usage"]["cacheReadTokens"] = json!(0);
+        event["data"]["usage"]["cacheWriteTokens"] = json!(0);
+        event["data"]["usage"]["reasoningTokens"] = json!(0);
+        assert!(parse(false, vec![event.clone()]).is_err());
+        event["data"]["usage"]["inputTokens"] = json!(limit - 1);
+        let (_, rows) = parse(false, vec![event]).unwrap();
+        assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (limit - 1, 1));
+    }
+
     #[test]
     fn future_format_and_sequence_gaps_are_rejected() {
         assert!(parse_lines(b"{\"type\":\"session\",\"version\":5}\n".as_slice()).is_err());

@@ -1,6 +1,6 @@
 import { openUrl } from '@tauri-apps/plugin-opener'
 
-export const PROJECT_REPOSITORY_URL = 'https://github.com/rw0104/sub2api-cost-console'
+export const PROJECT_REPOSITORY_URL = 'https://github.com/9holy/usage-ledger'
 export const ACCOUNT_PURCHASE_URL = 'https://pay.ldxp.cn/shop/13QL6FLR'
 
 const allowedExternalUrls = new Set([

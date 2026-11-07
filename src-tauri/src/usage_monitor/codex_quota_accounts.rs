@@ -33,7 +33,8 @@ impl Reader {
     ) -> Result<Vec<(PathBuf, i64)>, String> {
         for result in self.receiver.try_iter() {
             if let Some(subscription) = result.subscription {
-                if let Err(error) = subscription.and_then(|payload| super::accounts::save_official_subscription(conn,&result.account,&payload,now)) {
+                if let Err(error) = subscription.and_then(|payload| super::accounts::save_official_subscription(conn,&result.account,&payload,result.observed_ms)) {
+                    super::accounts::subscription_unavailable(conn, &result.account, result.observed_ms)?;
                     eprintln!("Official Codex subscription unavailable: {error}");
                 }
             }
@@ -169,6 +170,9 @@ pub(super) fn save_authenticated(
     payload: &Value,
     now: i64,
 ) -> Result<(), String> {
+    if account.trim().is_empty() || now <= 0 {
+        return Err("Official quota has no valid account observation".into());
+    }
     let plan = payload["plan_type"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -187,8 +191,10 @@ pub(super) fn save_authenticated(
         tx.execute("INSERT INTO monitor_codex_quota_accounts(home,reset_ms,plan,account_key,observed_ms)
             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(home,reset_ms,plan,account_key) DO UPDATE SET observed_ms=excluded.observed_ms",
             params![home.to_string_lossy(),reset,plan,format!("account:{account}"),now]).map_err(|e| e.to_string())?;
-        super::quota::save_authenticated_codex(&tx, account, payload, now)?;
     }
+    // Some plans report only a five-hour pool. Their authenticated snapshot
+    // remains useful even when no weekly correlation can be recorded.
+    super::quota::save_authenticated_codex(&tx, account, payload, now)?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -296,7 +302,7 @@ mod tests {
         assert_eq!(conn.query_row("SELECT observed_ms FROM monitor_quotas",[],|r|r.get::<_,i64>(0)).unwrap(),1000);
     }
     #[test]
-    fn superseded_creator_quota_keeps_its_id_but_is_not_a_second_live_account() {
+    fn local_creator_quota_stays_unattributed_beside_the_authenticated_account() {
         let conn = Connection::open_in_memory().unwrap();
         super::super::store::initialize(&conn).unwrap();
         let mut old = super::super::quota::codex_observations(
@@ -316,11 +322,12 @@ mod tests {
         )
         .unwrap();
         let report = super::super::quota::read(&conn, 2001).unwrap();
-        assert_eq!(report.quotas.len(), 1);
-        assert_eq!(report.quotas[0].billing_account_verified, Some(true));
+        assert_eq!(report.quotas.len(), 2);
+        assert_eq!(report.quotas.iter().filter(|q| q.billing_account_verified == Some(true)).count(), 1);
+        assert_eq!(report.quotas.iter().filter(|q| q.attribution == "unattributed" && q.billing_account_verified == Some(false)).count(), 1);
         assert_eq!(
             conn.query_row(
-                "SELECT COUNT(*) FROM monitor_quotas WHERE id=1 AND account_key='account:creator'",
+                "SELECT COUNT(*) FROM monitor_quotas WHERE id=1 AND account_key='session:thread'",
                 [],
                 |r| r.get::<_, i64>(0)
             )
@@ -362,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_cycle_is_not_the_session_creator_and_collisions_are_not_merged() {
+    fn authenticated_cycle_correlations_remain_unproven_for_historical_requests() {
         let conn = Connection::open_in_memory().unwrap();
         super::super::store::initialize(&conn).unwrap();
         let payload = serde_json::json!({"plan_type":"pro","rate_limit":{"primary_window":{
@@ -392,12 +399,12 @@ mod tests {
         save_authenticated(&conn, Path::new("fixture"), "new-login", &payload, 1000).unwrap();
         assert!(matches!(
             EvidenceIndex::load(&conn).unwrap().account_for(&usage),
-            AccountMatch::Verified("account:new-login")
+            AccountMatch::None
         ));
         save_authenticated(&conn, Path::new("fixture"), "other-login", &payload, 2000).unwrap();
         assert!(matches!(
             EvidenceIndex::load(&conn).unwrap().account_for(&usage),
-            AccountMatch::Conflict
+            AccountMatch::None
         ));
         assert_eq!(
             conn.query_row(
@@ -424,4 +431,77 @@ mod tests {
         )
         .is_empty());
     }
+    #[test]
+    fn a_five_hour_only_official_plan_is_not_dropped_without_a_weekly_window() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        save_authenticated(&conn, Path::new("fixture"), "short-plan", &serde_json::json!({
+            "plan_type":"free","rate_limit":{"primary_window":{
+                "limit_window_seconds":18000,"reset_at":19000,"used_percent":40}}}), 1_000_000).unwrap();
+        let report = super::super::quota::read(&conn, 1_000_001).unwrap();
+        assert_eq!(report.quotas.len(), 1);
+        let quota = &report.quotas[0];
+        assert_eq!((quota.window_minutes, quota.used_percent, quota.remaining_percent), (Some(300), Some(40.0), Some(60.0)));
+        assert_eq!(quota.billing_account_verified, Some(true));
+        assert_eq!(quota.source, "codex_official_usage");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_codex_quota_accounts", [], |r|r.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn matching_plan_reset_and_home_do_not_identify_the_account_inside_or_outside_the_cycle() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        let payload = serde_json::json!({"plan_type":"pro","rate_limit":{"primary_window":{
+            "limit_window_seconds":604800,"reset_at":700000,"used_percent":20}}});
+        save_authenticated(&conn, Path::new("fixture"), "current-login", &payload, 600_000_000).unwrap();
+        for (id, time) in [("old-request", 1000), ("same-cycle-request", 600_001_000)] {
+            save_requests(&conn, Path::new("fixture/sessions/chat.jsonl"), &[RequestQuota {
+                id:id.into(),reset_ms:700_000_000,plan:"pro".into(),
+            }]).unwrap();
+            let usage = super::super::types::UsageRecord {
+                id:id.into(),tool:"codex".into(),timestamp_ms:time,
+                input_tokens:100,output_tokens:20,cache_read_tokens:80,..Default::default()
+            };
+            conn.execute("INSERT INTO monitor_requests VALUES('codex',?1,'codex:chat',?2,?3,'{}')",
+                params![id,time,serde_json::to_string(&usage).unwrap()]).unwrap();
+            assert!(matches!(super::super::request_accounts::EvidenceIndex::load(&conn).unwrap().account_for(&usage),
+                super::super::request_accounts::AccountMatch::None));
+        }
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |r|r.get::<_,i64>(0)).unwrap(), 2);
+        assert!(super::super::request_accounts::EvidenceIndex::load(&conn).unwrap().account_bounds().is_empty());
+    }
+
+    #[test]
+    fn unavailable_subscription_is_unknown_and_queue_delay_does_not_refresh_its_evidence_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        let active = serde_json::json!({"accounts":{"a":{"account":{"account_id":"a"},"entitlement":{
+            "has_active_subscription":true,"billing_period":"monthly","renews_at":"2026-11-01T00:00:00Z"}}}});
+        super::super::accounts::save_official_subscription(&conn, "a", &active, 1000).unwrap();
+        let mut reader = Reader::new();
+        reader.sender.send(OfficialQuota {
+            home: PathBuf::from("fixture"), account: "a".into(), observed_ms: 2000,
+            payload: Err("Quota unavailable".into()), subscription: Some(Err("Subscription unavailable".into())),
+        }).unwrap();
+        reader.collect(&conn, &[], 500_000).unwrap();
+        let read = || -> Value { serde_json::from_str(&conn.query_row(
+            "SELECT data FROM monitor_state WHERE key='account_billing_cycle:account:a'", [], |r|r.get::<_,String>(0)).unwrap()).unwrap() };
+        let unknown = read();
+        assert!(unknown["renewalAtMs"].is_null());
+        assert!(unknown["active"].is_null());
+        assert!(unknown["error"].is_string());
+        assert_eq!(unknown["checkedAtMs"], 2000);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_state WHERE key GLOB 'account_billing_cycle_history:*'", [], |r|r.get::<_,i64>(0)).unwrap(), 1);
+        reader.sender.send(OfficialQuota {
+            home: PathBuf::from("fixture"), account: "a".into(), observed_ms: 3000,
+            payload: Err("Quota unavailable".into()), subscription: Some(Ok(active)),
+        }).unwrap();
+        reader.collect(&conn, &[], 600_000).unwrap();
+        let restored = read();
+        assert_eq!(restored["active"], true);
+        assert_eq!(restored["billingPeriod"], "monthly");
+        assert_eq!(restored["checkedAtMs"], 3000);
+        assert!(restored["error"].is_null());
+    }
+
 }

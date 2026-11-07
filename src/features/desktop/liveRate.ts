@@ -6,6 +6,7 @@ const t = i18n.global.t
 
 export function displayLiveRate(window?: LiveWindow, digits = 2): { text: string; value: number | null; partial: boolean } {
   if (!window) return { text: t('usageMonitor.text.noSamples'), value: null, partial: true }
+  if (window.outputComplete === false) return { text: t('usageMonitor.text.outputCountIncomplete'), value: null, partial: true }
   const partial = !window.complete || window.sourceComplete === false
   const measured = window.outputTokensPerSecond
   const value = measured != null && Number.isFinite(measured) && measured > 0

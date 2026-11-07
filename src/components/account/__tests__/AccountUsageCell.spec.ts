@@ -72,6 +72,24 @@ describe('AccountUsageCell', () => {
     })
   })
 
+  it.each(['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'https://accounts.google.com/verify'])(
+    'only renders safe account verification links: %s', async (validationUrl) => {
+      getUsage.mockResolvedValue({ is_forbidden: true, validation_url: validationUrl })
+      const wrapper = mount(AccountUsageCell, {
+        props: { account: makeAccount({ id: 2801, extra: {} }) },
+        global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } },
+      })
+      await flushPromises()
+      const link = wrapper.find('a[title="admin.accounts.openVerification"]')
+      if (validationUrl.startsWith('https:')) {
+        expect(link.attributes('href')).toBe(validationUrl)
+      } else {
+        expect(link.exists()).toBe(false)
+      }
+      wrapper.unmount()
+    },
+  )
+
   it('renders eligible Ollama Cloud state inside the unified usage cell', () => {
     const wrapper = mount(AccountUsageCell, {
       props: {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { RouterView, useRouter, useRoute } from 'vue-router'
-import { onMounted, onBeforeUnmount, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import Toast from '@/components/common/Toast.vue'
 import NavigationProgress from '@/components/common/NavigationProgress.vue'
 import AdminComplianceDialog from '@/components/admin/AdminComplianceDialog.vue'
@@ -8,7 +8,8 @@ import { resolveRouteDocumentTitle } from '@/router/title'
 import AnnouncementPopup from '@/components/common/AnnouncementPopup.vue'
 import { useAppStore, useAuthStore, useSubscriptionStore, useAnnouncementStore, useAdminComplianceStore, useAdminSettingsStore } from '@/stores'
 import { updateFavicon } from '@/utils/branding'
-import { isDesktopRuntime } from '@/api/url'
+import { getActiveConnection, isDesktopRuntime } from '@/api/url'
+import { connectionScopeKey } from '@/stores/connectionScope'
 import DesktopTitleBar from '@/features/desktop/DesktopTitleBar.vue'
 
 const router = useRouter()
@@ -21,6 +22,12 @@ const adminComplianceStore = useAdminComplianceStore()
 const adminSettingsStore = useAdminSettingsStore()
 const desktopRuntime = isDesktopRuntime()
 const nativeMacChrome = desktopRuntime && /Mac/i.test(navigator.platform)
+const remoteUserSession = computed(() => {
+  if (!authStore.isAuthenticated || authStore.authMode !== 'jwt') return false
+  const connection = getActiveConnection()
+  return connection ? connection.type === 'sub2api' && connection.authMode === 'login' && connection.apiKey === authStore.token : !desktopRuntime
+})
+let announcementTimer: ReturnType<typeof setTimeout> | null = null
 
 function updateDocumentTitle() {
   const customMenuItems = [
@@ -57,7 +64,7 @@ watch(
 
 // Watch for authentication state and manage subscription data + announcements
 function onVisibilityChange() {
-  if (route.path !== '/usage-monitor' && document.visibilityState === 'visible' && authStore.isAuthenticated) {
+  if (route.path !== '/usage-monitor' && document.visibilityState === 'visible' && remoteUserSession.value) {
     announcementStore.fetchAnnouncements()
   }
 }
@@ -68,8 +75,10 @@ function onAdminComplianceRequired(event: Event) {
 }
 
 watch(
-  [() => authStore.isAuthenticated, () => route.path === '/usage-monitor'],
+  [() => remoteUserSession.value, () => route.path === '/usage-monitor', connectionScopeKey],
   ([isAuthenticated, localMonitor], oldValue) => {
+    if (announcementTimer) clearTimeout(announcementTimer)
+    announcementTimer = null
     if (localMonitor) {
       subscriptionStore.stopPolling()
       document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -91,8 +100,9 @@ watch(
       // Announcements: new login vs page refresh restore
       if (oldValue?.[0] === false) {
         // New login: delay 3s then force fetch
-        setTimeout(() => {
-          if (route.path !== '/usage-monitor') announcementStore.fetchAnnouncements(true)
+        announcementTimer = setTimeout(() => {
+          announcementTimer = null
+          if (route.path !== '/usage-monitor' && remoteUserSession.value) announcementStore.fetchAnnouncements(true)
         }, 3000)
       } else {
         // Page refresh restore (oldValue was undefined)
@@ -114,12 +124,13 @@ watch(
 
 // Route change trigger (throttled by store)
 router.afterEach(() => {
-  if (route.path !== '/usage-monitor' && authStore.isAuthenticated) {
+  if (route.path !== '/usage-monitor' && remoteUserSession.value) {
     announcementStore.fetchAnnouncements()
   }
 })
 
 onBeforeUnmount(() => {
+  if (announcementTimer) clearTimeout(announcementTimer)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('admin-compliance-required', onAdminComplianceRequired)
   document.documentElement.classList.remove('desktop-runtime', 'desktop-native-chrome')
@@ -127,6 +138,7 @@ onBeforeUnmount(() => {
 
 async function initializeApplication() {
   if (route.path === '/usage-monitor') return
+  if (desktopRuntime && getActiveConnection()?.type !== 'sub2api') return
   // 连接恢复已由 router 守卫首次导航完成,这里只加载公共设置
   // 远程模式 /settings/public 可能不存在(cliproxy),失败由 appStore catch 兜底
   await appStore.fetchPublicSettings()
@@ -138,6 +150,7 @@ async function initializeApplication() {
 watch(() => route.path, (_next, previous) => {
   if (previous === '/usage-monitor') void initializeApplication()
 })
+watch(connectionScopeKey, () => { void initializeApplication() })
 
 onMounted(async () => {
   document.documentElement.classList.toggle('desktop-runtime', desktopRuntime)

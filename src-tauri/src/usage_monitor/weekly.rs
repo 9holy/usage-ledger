@@ -22,6 +22,8 @@ pub struct WeeklyUsage {
     first_record_at_ms: Option<i64>,
     last_record_at_ms: Option<i64>,
     totals: Totals,
+    unlocated_totals: Totals,
+    unlocated_by_tool: BTreeMap<String, Totals>,
     reference: Vec<ReferenceSummary>,
     forecast: Vec<ForecastSummary>,
     by_tool: Vec<WeeklyTool>,
@@ -34,6 +36,7 @@ struct WeeklyTool {
     tool: String,
     model: Option<String>,
     totals: Totals,
+    unlocated_totals: Totals,
     reference: Vec<ReferenceSummary>,
     forecast: Vec<ForecastSummary>,
 }
@@ -63,6 +66,7 @@ struct ReferenceTotal {
 struct Group {
     billing_totals: BTreeMap<String,Totals>,
     totals: Totals,
+    unlocated_totals: Totals,
     reference: BTreeMap<String, ReferenceTotal>,
     series: BTreeMap<String, PriceSeries>,
     unpriced: i64,
@@ -161,6 +165,11 @@ fn saved_totals(usage: &UsageRecord, cost: SavedCost) -> Totals {
         cache_read_tokens: usage.cache_read_tokens,
         cache_write_tokens: usage.cache_write_tokens,
         request_count: 1,
+        unitemized_records: i64::from(usage.is_unitemized()),
+        input_unknown_requests: i64::from(usage.unknown_fields.iter().any(|field| field == "input_tokens")),
+        output_unknown_requests: i64::from(usage.unknown_fields.iter().any(|field| field == "output_tokens")),
+        cache_read_unknown_requests: i64::from(usage.unknown_fields.iter().any(|field| field == "cache_read_tokens")),
+        cache_write_unknown_requests: i64::from(usage.unknown_fields.iter().any(|field| field == "cache_write_tokens")),
         priced_cost_usd: cost.usd.unwrap_or(0.),
         priced_cost_cny: cost.cny.unwrap_or(0.),
         unpriced_requests: i64::from(cost.usd.is_none() && cost.cny.is_none()),
@@ -213,8 +222,9 @@ fn finish_group(
     start: i64,
     end: i64,
     horizon: Option<i64>,
-) -> (Totals, Vec<ReferenceSummary>, Vec<ForecastSummary>,BTreeMap<String,Totals>) {
+) -> (Totals, Vec<ReferenceSummary>, Vec<ForecastSummary>, BTreeMap<String, Totals>, Totals) {
     store::finish_totals(&mut group.totals);
+    store::finish_totals(&mut group.unlocated_totals);
     for totals in group.billing_totals.values_mut(){store::finish_totals(totals);}
     for series in group.series.values_mut() {
         series.seal();
@@ -251,7 +261,7 @@ fn finish_group(
             rule_version: pricing::VERSION,
         });
     }
-    (group.totals, references, forecasts,group.billing_totals)
+    (group.totals, references, forecasts, group.billing_totals, group.unlocated_totals)
 }
 
 fn read_with_catalog(
@@ -261,13 +271,25 @@ fn read_with_catalog(
     forecast_end_ms: Option<i64>,
     catalog: &CatalogSnapshot,
 ) -> Result<WeeklyUsage, String> {
+    // Keep the guard and usage projection on one snapshot, including direct
+    // callers. An existing outer read transaction already provides this scope.
+    if conn.is_autocommit() {
+        let transaction = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        let result = read_with_catalog(&transaction, start_ms, end_ms, forecast_end_ms, catalog)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        return Ok(result);
+    }
+    store::validate_token_totals(conn)?;
     let mut global = Group::default();
     let mut groups: BTreeMap<String, Group> =
         ["codex", "claude", "antigravity", "deepseek-harness"]
             .into_iter()
             .map(|tool| (tool.into(), Group::default()))
             .collect();
-    let mut statement=conn.prepare("SELECT usage,CASE WHEN timestamp_ms>=?1 THEN cost END FROM monitor_requests WHERE timestamp_ms>=?2 AND timestamp_ms<?3 ORDER BY timestamp_ms").map_err(|error|error.to_string())?;
+    let unlocated = "(EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='timestamp') OR COALESCE(json_extract(usage,'$.usageBasis'),'') IN ('legacy_initial_cumulative','legacy_cumulative_delta'))";
+    let mut statement = conn.prepare(&format!(
+        "SELECT usage,CASE WHEN timestamp_ms>=?1 OR {unlocated} THEN cost END FROM monitor_requests WHERE (timestamp_ms>=?2 AND timestamp_ms<?3) OR {unlocated} ORDER BY timestamp_ms"
+    )).map_err(|error| error.to_string())?;
     let rows = statement
         .query_map(
             params![start_ms, end_ms.saturating_sub(28 * DAY), end_ms],
@@ -280,6 +302,12 @@ fn read_with_catalog(
         let saved = cost
             .map(|json| saved_request_totals(&usage, &json))
             .transpose()?;
+        if !usage.has_period_timestamp() {
+            let saved = saved.as_ref().ok_or("Missing saved cost for unlocated record")?;
+            store::merge_totals(&mut global.unlocated_totals, saved);
+            store::merge_totals(&mut groups.entry(usage.tool.clone()).or_default().unlocated_totals, saved);
+            continue;
+        }
         let reference = pricing::standard_reference(&usage, catalog);
         let quote = reference
             .usd
@@ -343,23 +371,25 @@ fn read_with_catalog(
     }
     let first_record_at_ms = global.first;
     let last_record_at_ms = global.last;
-    let (totals, reference, forecast,billing_totals) =
+    let (totals, reference, forecast, billing_totals, unlocated_totals) =
         finish_group(global, catalog, start_ms, end_ms, forecast_end_ms);
-    let by_tool = groups
+    let by_tool: Vec<WeeklyTool> = groups
         .into_iter()
         .map(|(tool, group)| {
-            let (totals, reference, forecast,billing_totals) =
+            let (totals, reference, forecast, billing_totals, unlocated_totals) =
                 finish_group(group, catalog, start_ms, end_ms, forecast_end_ms);
             WeeklyTool {
                 billing_totals,
                 tool,
                 model: None,
                 totals,
+                unlocated_totals,
                 reference,
                 forecast,
             }
         })
         .collect();
+    let unlocated_by_tool = by_tool.iter().map(|row| (row.tool.clone(), row.unlocated_totals.clone())).collect();
     Ok(WeeklyUsage {
         billing_totals,
         start_ms,
@@ -368,6 +398,8 @@ fn read_with_catalog(
         first_record_at_ms,
         last_record_at_ms,
         totals,
+        unlocated_totals,
+        unlocated_by_tool,
         reference,
         forecast,
         by_tool,
@@ -409,6 +441,18 @@ pub async fn usage_monitor_weekly(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsafe_legacy_totals_cannot_publish_a_weekly_number() {
+        let conn = Connection::open_in_memory().unwrap();
+        store::initialize(&conn).unwrap();
+        insert(&conn,"unsafe","codex",1000,"gpt-6.1-sol",serde_json::json!({"usd":2.}));
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.inputTokens',?1,'$.outputTokens',1)",
+            [store::MAX_EXACT_TOKENS]).unwrap();
+        let result = read_with_catalog(&conn,900,2000,None,&CatalogSnapshot::default());
+        assert!(result.err().unwrap().contains("exact"));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+    }
     #[test]
     fn billing_totals_are_disjoint_and_conserve_the_full_week() {
         let conn=Connection::open_in_memory().unwrap();store::initialize(&conn).unwrap();
@@ -447,6 +491,31 @@ mod tests {
         };
         conn.execute("INSERT INTO monitor_requests(tool,id,session_key,timestamp_ms,usage,cost) VALUES(?1,?2,'s',?3,?4,?5)",params![tool,id,time,serde_json::to_string(&usage).unwrap(),cost.to_string()]).unwrap();
     }
+    #[test]
+    fn weekly_does_not_date_unknown_times_or_cumulative_history_by_file_mtime() {
+        let conn=Connection::open_in_memory().unwrap();store::initialize(&conn).unwrap();
+        for (id,time,basis,unknown) in [
+            ("known",1000,"provider_reported",vec![]),
+            ("old-unknown",1,"provider_reported",vec!["timestamp"]),
+            ("future-unknown",9000,"provider_reported",vec!["timestamp"]),
+            ("initial",1200,"legacy_initial_cumulative",vec!["per_request_input_tokens"]),
+            ("delta",1300,"legacy_cumulative_delta",vec!["per_request_input_tokens"]),
+        ] {
+            insert(&conn,id,"codex",time,"gpt-6.1-sol",serde_json::json!({"usd":2.}));
+            conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.usageBasis',?2,'$.unknownFields',json(?3)) WHERE id=?1",params![id,basis,serde_json::to_string(&unknown).unwrap()]).unwrap();
+        }
+        let week=read_with_catalog(&conn,1000,2000,None,&CatalogSnapshot::default()).unwrap();
+        assert_eq!((week.totals.request_count,week.totals.total_tokens,week.totals.priced_cost_usd),(1,1100,2.));
+        assert_eq!((week.first_record_at_ms,week.last_record_at_ms),(Some(1000),Some(1000)));
+        let data=serde_json::to_value(week).unwrap();
+        assert_eq!(data["unlocatedTotals"]["requestCount"],4);
+        assert_eq!(data["unlocatedTotals"]["totalTokens"],4400);
+        assert_eq!(data["unlocatedTotals"]["pricedCostUsd"],8.);
+        assert_eq!(data["unlocatedTotals"]["unitemizedRecords"],2);
+        assert_eq!(data["unlocatedByTool"]["codex"]["requestCount"],4);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|row|row.get::<_,i64>(0)).unwrap(),5);
+    }
+
     #[test]
     fn weekly_keeps_saved_quotes_separate_and_uses_half_open_window() {
         let conn = Connection::open_in_memory().unwrap();
@@ -609,5 +678,161 @@ mod tests {
             .unwrap();
         assert_eq!(claude.reference[0].currency, "CNY");
         assert!(claude.reference[0].amount.is_some());
+    }
+}
+
+#[cfg(test)]
+mod review3_snapshot_tests {
+    use super::*;
+    use std::ffi::{c_char, c_int, c_void, CStr};
+
+    struct ConcurrentWrite {
+        writer: Connection,
+        fired: bool,
+        error: Option<String>,
+    }
+
+    unsafe extern "C" fn change_before_usage_scan(
+        context: *mut c_void,
+        action: c_int,
+        _table: *const c_char,
+        column: *const c_char,
+        _database: *const c_char,
+        _trigger: *const c_char,
+    ) -> c_int {
+        let state = &mut *context.cast::<ConcurrentWrite>();
+        if !state.fired
+            && action == rusqlite::ffi::SQLITE_READ
+            && !column.is_null()
+            && CStr::from_ptr(column).to_bytes() == b"cost"
+        {
+            state.fired = true;
+            // A second connection commits after the numeric guard's SELECT,
+            // immediately before the week's independent usage query is prepared.
+            // Both rows are individually valid. Separate session writes can
+            // cross the global exact-integer boundary after the read guard.
+            let usage = UsageRecord {
+                id: "late".into(),
+                tool: "claude".into(),
+                session_id: "late".into(),
+                timestamp_ms: 1500,
+                input_tokens: store::MAX_EXACT_TOKENS,
+                ..Default::default()
+            };
+            let written =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+                    let tx = state
+                        .writer
+                        .transaction()
+                        .map_err(|error| error.to_string())?;
+                    store::save_usage_with_catalog(
+                        &tx,
+                        &usage,
+                        i64::MAX,
+                        0,
+                        &CatalogSnapshot::default(),
+                    )?;
+                    tx.commit().map_err(|error| error.to_string())
+                }))
+                .unwrap_or_else(|_| Err("concurrent writer panicked".to_string()));
+            state.error = written.err();
+        }
+        rusqlite::ffi::SQLITE_OK
+    }
+
+    struct AuthorizerGuard<'a>(&'a Connection);
+    impl Drop for AuthorizerGuard<'_> {
+        fn drop(&mut self) {
+            unsafe {
+                rusqlite::ffi::sqlite3_set_authorizer(self.0.handle(), None, std::ptr::null_mut());
+            }
+        }
+    }
+
+    #[test]
+    fn weekly_validation_and_aggregation_share_one_database_snapshot() {
+        let directory = std::env::temp_dir().join(format!(
+            "monitor-weekly-snapshot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("ledger.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+                .unwrap(),
+            "wal"
+        );
+        store::initialize(&conn).unwrap();
+        let usage = UsageRecord {
+            id: "stable".into(),
+            tool: "codex".into(),
+            session_id: "s".into(),
+            timestamp_ms: 1000,
+            input_tokens: 1000,
+            output_tokens: 100,
+            ..Default::default()
+        };
+        conn.execute(
+            "INSERT INTO monitor_requests VALUES('codex','stable','codex:s',1000,?1,?2)",
+            params![
+                serde_json::to_string(&usage).unwrap(),
+                serde_json::json!({"usd":2.}).to_string()
+            ],
+        )
+        .unwrap();
+        let mut context = Box::new(ConcurrentWrite {
+            writer: Connection::open(&path).unwrap(),
+            fired: false,
+            error: None,
+        });
+        context
+            .writer
+            .busy_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        // SQLite's test-only authorizer provides a deterministic interleaving;
+        // it does not alter the reader connection or mock any business operation.
+        let installed = unsafe {
+            rusqlite::ffi::sqlite3_set_authorizer(
+                conn.handle(),
+                Some(change_before_usage_scan),
+                (&mut *context as *mut ConcurrentWrite).cast(),
+            )
+        };
+        assert_eq!(installed, rusqlite::ffi::SQLITE_OK);
+        let guard = AuthorizerGuard(&conn);
+        let result = read_with_catalog(&conn, 900, 2000, None, &CatalogSnapshot::default());
+        drop(guard);
+        assert!(
+            context.fired,
+            "the writer must run between validation and aggregation"
+        );
+        assert!(
+            context.error.is_none(),
+            "writer failed: {:?}",
+            context.error
+        );
+        let week = result.unwrap();
+        assert_eq!(
+            (
+                week.totals.request_count,
+                week.totals.total_tokens,
+                week.totals.priced_cost_usd
+            ),
+            (1, 1100, 2.),
+            "a report must not publish a newer, unvalidated snapshot"
+        );
+        assert!(
+            read_with_catalog(&conn, 900, 2000, None, &CatalogSnapshot::default()).is_err(),
+            "the next report must observe and reject the committed unsafe total"
+        );
+        drop(context);
+        drop(conn);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

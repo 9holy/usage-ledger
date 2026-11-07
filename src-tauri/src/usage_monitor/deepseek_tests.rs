@@ -258,6 +258,100 @@ fn disappeared_newest_generation_cannot_roll_back_history_after_restart() {
 }
 
 #[test]
+fn waiting_old_generation_cannot_replace_a_newer_committed_snapshot() {
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    static WAITING: AtomicBool = AtomicBool::new(false);
+    WAITING.store(false, Ordering::SeqCst);
+    let f = Fixture::new();
+    let old = f.0.join("session.v2.jsonl");
+    fs::write(&old, format!("{}{}", header().replace("\"version\":4", "\"version\":2"), event(0, 1))).unwrap();
+    let db = f.0.join("ledger.sqlite");
+    let mut conn = Connection::open(&db).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    store::initialize(&conn).unwrap();
+    let mut competing = Connection::open(&db).unwrap();
+    competing.busy_handler(Some(|attempt| {
+        WAITING.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1));
+        attempt < 10_000
+    })).unwrap();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+    let worker = std::thread::spawn(move || deepseek::ingest(&mut competing, &old, i64::MAX));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !WAITING.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(WAITING.load(Ordering::SeqCst), "old snapshot did not reach the write lock");
+    let newer = f.0.join("session.v4.jsonl");
+    let source = format!("{}{}{}", header(), event(0, 1), event(1, 2));
+    let (session, records) = super::deepseek_parser::parse_lines(source.as_bytes()).unwrap();
+    store::save_session(&tx, &session).unwrap();
+    let catalog = crate::model_catalog::snapshot();
+    for record in &records {
+        store::save_snapshot_usage_with_catalog(&tx, record, i64::MAX, 0, &catalog).unwrap();
+    }
+    // The selected newer generation may already be archived or removed by the
+    // time the blocked writer wakes up; the committed registry is authoritative.
+    tx.execute("INSERT INTO monitor_files(path,tool,offset,signature,state) VALUES(?1,?2,0,?3,'{}')",
+        rusqlite::params![newer.to_string_lossy(), deepseek::TOOL, format!("{:x}", md5::compute(source.as_bytes()))]).unwrap();
+    let before_cost: String = tx.query_row("SELECT group_concat(cost,'') FROM (SELECT cost FROM monitor_requests ORDER BY id)", [], |row| row.get(0)).unwrap();
+    tx.commit().unwrap();
+    worker.join().unwrap().unwrap();
+    assert_eq!(totals(&conn), (2, 60), "stale generation erased the newer request");
+    assert_eq!(conn.query_row::<i64, _, _>("SELECT SUM(json_extract(usage,'$.outputTokens')) FROM monitor_requests", [], |row| row.get(0)).unwrap(), 6);
+    assert_eq!(conn.query_row::<String, _, _>("SELECT group_concat(cost,'') FROM (SELECT cost FROM monitor_requests ORDER BY id)", [], |row| row.get(0)).unwrap(), before_cost);
+    assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM monitor_files", [], |row| row.get(0)).unwrap(), 1);
+}
+
+#[test]
+fn waiting_snapshot_cannot_replace_a_newer_checkpoint_for_the_same_artifact() {
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+    static WAITING: AtomicBool = AtomicBool::new(false);
+    WAITING.store(false, Ordering::SeqCst);
+    let f = Fixture::new();
+    let path = f.0.join("session.v4.jsonl");
+    fs::write(&path, format!("{}{}", header(), event(0, 1))).unwrap();
+    let db = f.0.join("ledger.sqlite");
+    let mut conn = Connection::open(&db).unwrap();
+    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+    store::initialize(&conn).unwrap();
+    let mut competing = Connection::open(&db).unwrap();
+    competing.busy_handler(Some(|attempt| {
+        WAITING.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1));
+        attempt < 10_000
+    })).unwrap();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+    let worker_path = path.clone();
+    let worker = std::thread::spawn(move || deepseek::ingest(&mut competing, &worker_path, i64::MAX));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !WAITING.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(WAITING.load(Ordering::SeqCst), "old snapshot did not reach the write lock");
+    let source = format!("{}{}{}", header(), event(0, 1), event(1, 2));
+    fs::write(&path, &source).unwrap();
+    let (session, records) = super::deepseek_parser::parse_lines(source.as_bytes()).unwrap();
+    store::save_session(&tx, &session).unwrap();
+    let catalog = crate::model_catalog::snapshot();
+    for record in &records {
+        store::save_snapshot_usage_with_catalog(&tx, record, i64::MAX, 0, &catalog).unwrap();
+    }
+    let signature = format!("{:x}", md5::compute(source.as_bytes()));
+    tx.execute("INSERT INTO monitor_files(path,tool,offset,signature,state) VALUES(?1,?2,0,?3,'{}')",
+        rusqlite::params![path.to_string_lossy(), deepseek::TOOL, signature]).unwrap();
+    let before_cost: String = tx.query_row("SELECT group_concat(cost,'') FROM (SELECT cost FROM monitor_requests ORDER BY id)", [], |row| row.get(0)).unwrap();
+    tx.commit().unwrap();
+    worker.join().unwrap().unwrap();
+    assert_eq!(totals(&conn), (2, 60), "stale parsed snapshot erased the concurrent append");
+    assert_eq!(conn.query_row::<i64, _, _>("SELECT SUM(json_extract(usage,'$.outputTokens')) FROM monitor_requests", [], |row| row.get(0)).unwrap(), 6);
+    assert_eq!(conn.query_row::<String, _, _>("SELECT group_concat(cost,'') FROM (SELECT cost FROM monitor_requests ORDER BY id)", [], |row| row.get(0)).unwrap(), before_cost);
+    assert_eq!(conn.query_row::<String, _, _>("SELECT signature FROM monitor_files", [], |row| row.get(0)).unwrap(), signature);
+}
+
+#[test]
 fn snapshot_reconciliation_cannot_remove_another_tools_same_request_identity() {
     let f = Fixture::new();
     let path = f.0.join("session.v4.jsonl");

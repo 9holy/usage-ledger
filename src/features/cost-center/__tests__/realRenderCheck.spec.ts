@@ -1,3 +1,4 @@
+import './costDataI18n'
 /**
  * 真机渲染核对（**可复跑的端到端验证**，默认跳过）。
  *
@@ -28,7 +29,7 @@ import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mount } from '@vue/test-utils'
+import { mountWithCostI18n as mount } from '../components/__tests__/costI18n'
 import { defineComponent, h } from 'vue'
 import {
   mergeIdenticalQuotaChannels,

@@ -31,12 +31,12 @@ vi.mock('@/stores/connection', () => ({ errMsg: (e: unknown, fallback: string) =
 it('switches ingest explanations while retaining source identities, raw diagnostics and outcome counts', () => {
   const value = source({ label: '原始来源 Alpha', scannedRows: 12, upsertedBuckets: 3 })
   i18n.global.locale.value = 'en'
-  expect(describeLedgerSource(value)).toContain('原始来源 Alpha: scanned 12 rows / updated 3 buckets')
+  expect(describeLedgerSource(value)).toContain('原始来源 Alpha: read 12 records / updated 3 groups')
   expect(describeLedgerSource({ ...value, sourceAvailable: false, reason: '来源诊断原文' })).toContain('来源诊断原文')
-  expect(describeLedgerIngest(null)).toContain('Ledger ingest not run')
+  expect(describeLedgerIngest(null)).toContain('Ledger records were not read')
   expect(value.scannedRows).toBe(12)
   i18n.global.locale.value = 'zh'
-  expect(describeLedgerSource(value)).toContain('扫描 12 行 / 更新 3 桶')
+  expect(describeLedgerSource(value)).toContain('读取 12 条 / 更新 3 组')
 })
 
 function source(overrides: Partial<LedgerSourceOutcome> = {}): LedgerSourceOutcome {
@@ -142,7 +142,7 @@ describe('逐源判定', () => {
   it('ledgerSourceLabel：定位失败时退回 sourceName，再退回"未知源"', () => {
     expect(ledgerSourceLabel(source({ label: 'X' }))).toBe('X')
     expect(ledgerSourceLabel(source({ label: '', sourceName: 'codex_sessions' }))).toBe('codex_sessions')
-    expect(ledgerSourceLabel(source({ label: '', sourceName: '' }))).toBe('未知源')
+    expect(ledgerSourceLabel(source({ label: '', sourceName: '' }))).toBe('未知来源')
   })
 
   it('describeLedgerSource：不可用时把 reason 原样带出', () => {
@@ -150,26 +150,26 @@ describe('逐源判定', () => {
       source({ sourceName: 'codex_sessions', sourceAvailable: false, reason: '会话库不存在' }),
     )
     expect(text).toContain('会话库不存在')
-    expect(text).not.toContain('扫描')
+    expect(text).not.toContain('181823')
   })
 
   it('describeLedgerSource：让路不算失败', () => {
-    expect(describeLedgerSource(source({ skipped: true }))).toContain('已有摄取在执行')
+    expect(describeLedgerSource(source({ skipped: true }))).toContain('正在读取，请稍候')
   })
 
   it('describeLedgerSource：源库重建 → 提示世代', () => {
     const text = describeLedgerSource(source({ sourceResetDetected: true, sourceGeneration: 3 }))
-    expect(text).toContain('世代 3')
+    expect(text).toContain('来源数据库已重建，标记 3')
   })
 })
 
 describe('describeLedgerIngest · 人话摘要', () => {
   it('未执行（null）', () => {
-    expect(describeLedgerIngest(null)).toContain('未执行')
+    expect(describeLedgerIngest(null)).toContain('未读取账本记录')
   })
 
   it('没有可用数据源时如实说明', () => {
-    expect(describeLedgerIngest(result({ sources: [] }))).toContain('没有可用的数据源')
+    expect(describeLedgerIngest(result({ sources: [] }))).toContain('没有可用的数据来源')
   })
 
   it('多源 → 逐源分行，两源行数都要出现（不许合并成一个数字）', () => {

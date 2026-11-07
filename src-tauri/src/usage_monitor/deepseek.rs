@@ -97,7 +97,7 @@ fn fingerprint(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hash.compute()))
 }
 
-pub fn ingest(conn: &mut Connection, path: &Path, live_after: i64) -> Result<bool, String> {
+fn current_artifact(conn: &Connection, path: &Path) -> Result<bool, String> {
     // Watch notifications may mention retired generations; reconcile selection before reading.
     let parent = path.parent().ok_or("Session artifact has no parent")?;
     if let Some(version) = generation(path) {
@@ -123,6 +123,13 @@ pub fn ingest(conn: &mut Connection, path: &Path, live_after: i64) -> Result<boo
         }
     }
     if generation(path).is_none() && !legacy_filename(path) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+pub fn ingest(conn: &mut Connection, path: &Path, live_after: i64) -> Result<bool, String> {
+    if !current_artifact(conn, path)? {
         return Ok(false);
     }
     let signature = fingerprint(path)?;
@@ -153,6 +160,23 @@ pub fn ingest(conn: &mut Connection, path: &Path, live_after: i64) -> Result<boo
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
+    // Selection and checkpoint reads before parsing are only an optimization.
+    // Recheck them under the write reservation before replacing session history.
+    if !current_artifact(&tx, path)? {
+        return Ok(false);
+    }
+    let current: Option<String> = tx.query_row(
+        "SELECT signature FROM monitor_files WHERE path=?1", [key.as_ref()], |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    if current.as_deref() == Some(&signature) {
+        return Ok(false);
+    }
+    if current != previous {
+        return Ok(true);
+    }
+    if fingerprint(path)? != signature {
+        return Err("DeepSeek Harness artifact changed while waiting for the write lock; retry snapshot".into());
+    }
     store::save_session(&tx, &session)?;
     let retained: HashSet<&str> = records.iter().map(|r| r.id.as_str()).collect();
     let session_key = store::session_key(TOOL, &session.id);

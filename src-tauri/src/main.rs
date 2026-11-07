@@ -51,23 +51,39 @@ fn read_cost_profiles() -> Result<String, String> {
 /// 写本地成本档案 JSON(全量覆盖)。前端序列化为字符串传入,Rust 侧只负责落盘。
 #[tauri::command]
 fn write_cost_profiles(json: String) -> Result<(), String> {
-    use std::io::Write;
-    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = WRITE_LOCK.lock().map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    if !value.is_object() {
+    if !serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?.is_object() {
         return Err("Cost profiles must be a JSON object".to_string());
     }
-    let dir = console_data_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    let target = dir.join("cockpit_cost_profiles.json");
-    let pending = dir.join("cockpit_cost_profiles.json.pending");
-    // Persist the replacement before touching the valid file.
-    let mut file = std::fs::File::create(&pending).map_err(|e| e.to_string())?;
-    file.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
+    write_json_atomically(&console_data_dir()?.join("cockpit_cost_profiles.json"), &json)
+}
+
+/// Validate and durably write the complete replacement before touching a good
+/// JSON file. Unique siblings also prevent concurrent commands from sharing a
+/// partially written staging file.
+fn write_json_atomically(target: &std::path::Path, json: &str) -> Result<(), String> {
+    use std::io::Write;
+    serde_json::from_str::<serde_json::Value>(json).map_err(|error| format!("Invalid JSON: {error}"))?;
+    let parent = target.parent().ok_or("Missing JSON parent directory")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).map_err(|error| error.to_string())?;
+    let suffix: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let pending = parent.join(format!(".usage-ledger-{suffix}.pending"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&pending).map_err(|error| error.to_string())?;
+    let saved = file.write_all(json.as_bytes()).and_then(|_| file.sync_all());
     drop(file);
-    std::fs::rename(&pending, &target).map_err(|e| format!("Cost profile replacement failed: {e}"))
+    let replaced = saved.and_then(|_| std::fs::rename(&pending, target));
+    if replaced.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    replaced.map_err(|error| format!("Cannot replace JSON file {}: {error}", target.display()))
 }
 
 /// 读 cockpit 用量台账 JSON。台账保留"已从 cockpit 移除的账号"的历史用量,
@@ -86,9 +102,10 @@ fn read_cost_ledger() -> Result<String, String> {
 /// 写 cockpit 用量台账 JSON(全量覆盖;前端先做 2000 上限裁剪再传入)。
 #[tauri::command]
 fn write_cost_ledger(json: String) -> Result<(), String> {
-    let dir = console_data_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    std::fs::write(dir.join("cockpit_usage_ledger.json"), json).map_err(|e| format!("写入失败: {e}"))
+    if !serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?.is_object() {
+        return Err("Cost ledger must be a JSON object".into());
+    }
+    write_json_atomically(&console_data_dir()?.join("cockpit_usage_ledger.json"), &json)
 }
 
 /// 写 cockpit 本地 JSON 文件(账号导入/路由规则更新等)。
@@ -105,8 +122,7 @@ fn write_cockpit_file(name: String, content: String) -> Result<(), String> {
         return Err(format!("非法文件名: {name}(仅允许 a-z_0-9 + .json)"));
     }
     let dir = cockpit_data_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    std::fs::write(dir.join(&name), content).map_err(|e| format!("写入 {name} 失败: {e}"))
+    write_json_atomically(&dir.join(&name), &content)
 }
 
 /// 读 cockpit 本地 JSON 文件。name 仅允许 [a-z_0-9]+\.json(前缀至少 1 字符),防目录穿越;根目录固定。
@@ -265,6 +281,9 @@ fn summarize_cockpit_api_logs(
     }
     if !(1..=168).contains(&bucket_hours) {
         return Err("bucket_hours 必须在 1..=168".into());
+    }
+    if start_ms.zip(end_ms).is_some_and(|(start, end)| start > end) {
+        return Err("start_ms 不能晚于 end_ms".into());
     }
     let bucket_ms: i64 = bucket_hours as i64 * 3_600_000;
 
@@ -602,12 +621,12 @@ fn regex_matches(input: &str, pattern: &str) -> bool {
 
 /// 校验 YYYY-MM-DD 日期格式。
 fn is_date(s: &str) -> bool {
-    s.len() == 10
-        && s.as_bytes()[4] == b'-'
-        && s.as_bytes()[7] == b'-'
-        && s[0..4].chars().all(|c| c.is_ascii_digit())
-        && s[5..7].chars().all(|c| c.is_ascii_digit())
-        && s[8..10].chars().all(|c| c.is_ascii_digit())
+    let bytes = s.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if index == 4 || index == 7 { *byte == b'-' } else { byte.is_ascii_digit() }
+        })
+        && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
 }
 
 /// 探测 cockpit-tools 是否在运行:读 server.json 是否存在且含 pid 字段。
@@ -718,6 +737,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             desktop_shell::set_desktop_locale,
+            proxy::get_proxy_token,
             model_catalog::model_catalog_status,
             model_catalog::model_catalog_refresh,
             model_catalog::model_catalog_quote_batch,
@@ -765,7 +785,7 @@ fn main() {
         .setup(move |app| {
             use tauri::Manager;
             // Single-instance detection runs before setup, so only the primary binds the proxy.
-            proxy::spawn_proxy();
+            proxy::spawn_proxy()?;
             model_catalog::start();
             app.state::<usage_monitor::MonitorRuntime>().start();
             setup_desktop_shell(app)
@@ -1453,4 +1473,31 @@ mod tests {
         assert!(!tmp.join("2api-console/cockpit_cost_profiles.json.pending").exists());
         std::fs::remove_dir_all(&tmp).ok();
     }
+    #[test]
+    fn malformed_calendar_dates_and_unicode_are_rejected_without_panicking() {
+        for date in ["1234-1é-1", "2026-02-29", "2026-13-01", "2026-00-10", "2026-04-31"] {
+            assert!(!is_date(date), "invalid date was accepted: {date}");
+        }
+        assert!(is_date("2024-02-29"));
+        assert!(is_date("2026-11-07"));
+    }
+
+    #[test]
+    fn atomic_json_writes_preserve_good_data_on_validation_or_replacement_failure() {
+        let dir = std::env::temp_dir().join(format!("ledger-json-{}-{}", std::process::id(), ledger_db::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("costs.json");
+        write_json_atomically(&target, r#"{"old":1}"#).unwrap();
+        assert!(write_json_atomically(&target, "{partial").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), r#"{"old":1}"#);
+        let directory = dir.join("directory.json");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(write_json_atomically(&directory, "{}").is_err());
+        assert!(directory.is_dir());
+        assert!(std::fs::read_dir(&dir).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".pending")));
+        write_json_atomically(&target, r#"{"new":2}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), r#"{"new":2}"#);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

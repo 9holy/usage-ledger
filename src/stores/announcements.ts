@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { connectionScopeKey } from './connectionScope'
 import { announcementsAPI } from '@/api'
 import type { UserAnnouncement } from '@/types'
 
@@ -15,6 +16,8 @@ export const useAnnouncementStore = defineStore('announcements', () => {
 
   // Session-scoped dedup set — not reactive, used as plain lookup only
   let shownPopupIds = new Set<number>()
+  let generation = 0
+  let popupTimer: ReturnType<typeof setTimeout> | null = null
 
   // Getters
   const unreadCount = computed(() =>
@@ -30,18 +33,21 @@ export const useAnnouncementStore = defineStore('announcements', () => {
 
     // Set immediately to prevent concurrent duplicate requests
     lastFetchTime.value = now
+    const requestedGeneration = ++generation
 
     try {
       loading.value = true
       const all = await announcementsAPI.list(false)
+      if (requestedGeneration !== generation) return
       announcements.value = all.slice(0, 20)
       enqueueNewPopups()
     } catch (err: any) {
+      if (requestedGeneration !== generation) return
       // Revert throttle timestamp on failure so retry is allowed
       lastFetchTime.value = 0
       console.error('Failed to fetch announcements:', err)
     } finally {
-      loading.value = false
+      if (requestedGeneration === generation) loading.value = false
     }
   }
 
@@ -81,13 +87,15 @@ export const useAnnouncementStore = defineStore('announcements', () => {
 
     // Show next popup after a short delay
     if (popupQueue.value.length > 0) {
-      setTimeout(() => showNextPopup(), 300)
+      popupTimer = setTimeout(() => { popupTimer = null; showNextPopup() }, 300)
     }
   }
 
   async function markAsRead(id: number) {
+    const requestedGeneration = generation
     try {
       await announcementsAPI.markRead(id)
+      if (requestedGeneration !== generation) return
       const ann = announcements.value.find((a) => a.id === id)
       if (ann) {
         ann.read_at = new Date().toISOString()
@@ -100,10 +108,12 @@ export const useAnnouncementStore = defineStore('announcements', () => {
   async function markAllAsRead() {
     const unread = announcements.value.filter((a) => !a.read_at)
     if (unread.length === 0) return
+    const requestedGeneration = generation
 
     try {
       loading.value = true
       await Promise.all(unread.map((a) => announcementsAPI.markRead(a.id)))
+      if (requestedGeneration !== generation) return
       announcements.value.forEach((a) => {
         if (!a.read_at) {
           a.read_at = new Date().toISOString()
@@ -113,11 +123,14 @@ export const useAnnouncementStore = defineStore('announcements', () => {
       console.error('Failed to mark all as read:', err)
       throw err
     } finally {
-      loading.value = false
+      if (requestedGeneration === generation) loading.value = false
     }
   }
 
   function reset() {
+    generation += 1
+    if (popupTimer) clearTimeout(popupTimer)
+    popupTimer = null
     announcements.value = []
     lastFetchTime.value = 0
     shownPopupIds = new Set()
@@ -125,6 +138,8 @@ export const useAnnouncementStore = defineStore('announcements', () => {
     currentPopup.value = null
     loading.value = false
   }
+
+  watch(connectionScopeKey, reset, { flush: 'sync' })
 
   return {
     // State

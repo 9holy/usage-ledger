@@ -3,8 +3,8 @@
  */
 import axios from 'axios'
 import type { SetupEnvironment } from '@/features/desktop/setupEnvironment'
-import { buildGatewayUrl } from './url'
-import { isDesktopRuntime } from './url'
+import { buildGatewayUrl, captureAuthConnection, getGatewayTargetBase, isAuthConnectionCurrent, isDesktopRuntime, PROXY_PORT } from './url'
+import { getDesktopProxyHeaders } from './desktopProxy'
 
 // Create a separate client for setup endpoints (not under /api/v1)
 const setupClient = axios.create({
@@ -13,6 +13,19 @@ const setupClient = axios.create({
   headers: {
     'Content-Type': 'application/json'
   }
+})
+
+setupClient.interceptors.request.use(async (config) => {
+  const context = captureAuthConnection()
+  config.baseURL = buildGatewayUrl('/').replace(/\/+$/, '')
+  if (isDesktopRuntime() && context.connection?.type !== 'cliproxy') {
+    const target = getGatewayTargetBase()
+    const proxyHeaders = await getDesktopProxyHeaders(target)
+    if (!isAuthConnectionCurrent(context)) throw new axios.CanceledError('Connection changed before the request was sent')
+    config.baseURL = `http://127.0.0.1:${PROXY_PORT}`
+    Object.assign(config.headers, proxyHeaders)
+  }
+  return config
 })
 
 export interface SetupStatus {

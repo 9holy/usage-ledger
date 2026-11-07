@@ -129,7 +129,7 @@ interface Offender {
 }
 
 /**
- * 把注释（`//` / `/* *​/` / `<!-- -->`）与字符串字面量（' " `）挖成空格。
+ * 把行注释、块注释、HTML 注释与字符串字面量挖成空格。
  * **保留换行**，所以行号与原文一一对应。
  */
 export function maskCommentsAndStrings(text: string): string {

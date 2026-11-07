@@ -37,6 +37,11 @@ export interface MonitorTotals {
   cacheReadTokens: number
   cacheWriteTokens: number
   requestCount: number
+  unitemizedRecords?: number
+  inputUnknownRequests?: number
+  outputUnknownRequests?: number
+  cacheReadUnknownRequests?: number
+  cacheWriteUnknownRequests?: number
   pricedCostUsd: number
   pricedCostCny?: number
   scenarioRequests?: number
@@ -261,6 +266,8 @@ export interface LiveWindow {
   coveredMs: number
   complete: boolean
   sourceComplete?: boolean
+  /** False when observed output is only a known lower bound. */
+  outputComplete?: boolean
 }
 
 export interface LiveGroup {
@@ -277,6 +284,8 @@ export interface LiveBucket {
   outputTokens: number | null
   coveredMs: number
   sourceComplete?: boolean
+  /** False when observed output is only a known lower bound. */
+  outputComplete?: boolean
 }
 
 export interface RecordedOutputBucket {
@@ -331,6 +340,8 @@ export interface MonitorAnalysis {
   startMs: number | null
   endMs: number
   totals: MonitorTotals
+  unlocatedTotals?: MonitorTotals
+  unlocatedByTool?: Record<string, MonitorTotals>
   byTool: Array<{ tool: string; model: null; totals: MonitorTotals }>
   toolOverview?: Array<{ tool: string; model: string | null; totals: MonitorTotals }>
   byModel: Array<{ tool: string; model: string | null; totals: MonitorTotals }>
@@ -348,9 +359,11 @@ export interface MonitorWeeklyUsage {
   firstRecordAtMs: number | null
   lastRecordAtMs: number | null
   totals: MonitorTotals
+  unlocatedTotals?: MonitorTotals
+  unlocatedByTool?: Record<string, MonitorTotals>
   reference?: MonitorReferenceSummary[]
   forecast?: MonitorForecastSummary[]
-  byTool: Array<{ tool: string; model: null; totals: MonitorTotals; billingTotals?: Record<string, MonitorTotals>; reference?: MonitorReferenceSummary[]; forecast?: MonitorForecastSummary[] }>
+  byTool: Array<{ tool: string; model: null; totals: MonitorTotals; unlocatedTotals?: MonitorTotals; billingTotals?: Record<string, MonitorTotals>; reference?: MonitorReferenceSummary[]; forecast?: MonitorForecastSummary[] }>
 }
 
 export interface MonitorReferenceSummary {
@@ -448,6 +461,39 @@ export function monitorCacheRatio(totals: MonitorTotals | null | undefined): str
 export function monitorCacheCoverage(totals: MonitorTotals | null | undefined): string {
   return totals?.cacheHitRatio == null && totals?.knownCacheHitRatio != null
     ? t('usageMonitor.format.completeCacheFields', { known: (totals.cacheKnownRequests ?? 0).toLocaleString(usageLocale()), total: totals.requestCount.toLocaleString(usageLocale()) }) : ''
+}
+
+type MonitorTokenTotalField = 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'totalTokens'
+const tokenUnknownFields = {
+  inputTokens: 'inputUnknownRequests', outputTokens: 'outputUnknownRequests',
+  cacheReadTokens: 'cacheReadUnknownRequests', cacheWriteTokens: 'cacheWriteUnknownRequests',
+} as const
+
+/** Totals contain known subtotals. A zero placeholder with no known field is not an observed zero. */
+export function monitorKnownTokenTotal(totals: MonitorTotals | null | undefined, field: MonitorTokenTotalField): number | null {
+  if (!totals) return null
+  if (field === 'totalTokens') {
+    if (totals.requestCount > 0 && monitorKnownTokenTotal(totals, 'inputTokens') == null && monitorKnownTokenTotal(totals, 'outputTokens') == null) return null
+  } else if (totals.requestCount > 0 && (totals[tokenUnknownFields[field]] ?? 0) >= totals.requestCount) return null
+  const value = totals[field]
+  return Number.isFinite(value) && value >= 0 ? value : null
+}
+
+export function monitorTokenCoverage(totals: MonitorTotals | null | undefined, field: Exclude<MonitorTokenTotalField, 'totalTokens'>): string {
+  const unknown = totals?.[tokenUnknownFields[field]] ?? 0
+  return totals && unknown > 0 && unknown < totals.requestCount
+    ? t('usageMonitor.text.knownTokenSubtotal', { known: (totals.requestCount - unknown).toLocaleString(usageLocale()), total: totals.requestCount.toLocaleString(usageLocale()) }) : ''
+}
+
+export function monitorRequestCountLabel(totals: MonitorTotals | null | undefined): string {
+  if (!totals) return t('usageMonitor.text.unknown')
+  return (totals.unitemizedRecords ?? 0) > 0
+    ? t('usageMonitor.text.unitemizedRecordCount', { count: totals.requestCount.toLocaleString(usageLocale()), unitemized: totals.unitemizedRecords!.toLocaleString(usageLocale()) })
+    : t('usageMonitor.text.requests6', { value0: totals.requestCount.toLocaleString(usageLocale()) })
+}
+
+export function monitorIsUnitemizedRecord(record: Pick<MonitorRequest, 'usageBasis'>): boolean {
+  return record.usageBasis === 'legacy_initial_cumulative' || record.usageBasis === 'legacy_cumulative_delta'
 }
 
 export interface MonitorRequestFilters {

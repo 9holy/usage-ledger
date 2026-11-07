@@ -27,6 +27,7 @@ const props = defineProps<{
     color: string
   }>
   total?: number
+  recordCounts?: boolean
   available: number | null
   loaded: boolean
 }>()
@@ -79,7 +80,7 @@ const paths = computed(() => [
         <div
           class="coverage-landscape"
           role="img"
-          :aria-label="t('usageMonitor.text.requestsIdentifiedModesWithPricingEvidence', { value0: count(total!), value1: count(matchedMode!), value2: count(known!.count) })"
+          :aria-label="t(recordCounts ? 'usageMonitor.text.recordsIdentifiedModesWithPricingEvidence' : 'usageMonitor.text.requestsIdentifiedModesWithPricingEvidence', { value0: count(total!), value1: count(matchedMode!), value2: count(known!.count) })"
         >
           <img :src="scenery" alt="" />
           <img
@@ -92,17 +93,17 @@ const paths = computed(() => [
           />
 
           <div class="scene-count incoming">
-            <strong :title="count(total!) + t('usageMonitor.text.requests7')">{{ compact(total!) }}</strong
-            ><span>{{ t('usageMonitor.text.requests8') }}</span>
+            <strong :title="count(total!) + t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests7')">{{ compact(total!) }}</strong
+            ><span>{{ t(recordCounts ? 'usageMonitor.text.usageRecords' : 'usageMonitor.text.requests8') }}</span>
           </div>
           <div class="scene-count identified stage-count">
-            <strong :title="count(matchedMode!) + t('usageMonitor.text.requests7')">{{
+            <strong :title="count(matchedMode!) + t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests7')">{{
               compact(matchedMode!)
             }}</strong
             ><span>{{ t('usageMonitor.text.identifiedModes') }}</span>
           </div>
           <div class="scene-count priced stage-count">
-            <strong :title="count(known!.count) + t('usageMonitor.text.requests7')">{{
+            <strong :title="count(known!.count) + t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests7')">{{
               compact(known!.count)
             }}</strong
             ><span>{{ t('usageMonitor.text.estimable') }}</span><b>{{ usagePercentLabel(known!.percent) }}</b>
@@ -116,8 +117,8 @@ const paths = computed(() => [
             :data-count="unknown!.count"
           >
             <span>{{ t('usageMonitor.text.modeGap') }}</span
-            ><strong :title="count(unknown!.count) + t('usageMonitor.text.requests7')"
-              >{{ compact(unknown!.count) }}<small>{{ t('usageMonitor.text.requests4') }}</small></strong
+            ><strong :title="count(unknown!.count) + t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests7')"
+              >{{ compact(unknown!.count) }}<small>{{ t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests4') }}</small></strong
             >
             <p :data-label="t('usageMonitor.format.missingModeInfo')">{{ usagePercentLabel(unknown!.percent) }} {{ t('usageMonitor.text.missingModeEvidence') }}</p>
           </div>
@@ -127,8 +128,8 @@ const paths = computed(() => [
             :data-count="missing!.count"
           >
             <span>{{ t('usageMonitor.text.priceGap') }}</span
-            ><strong :title="count(missing!.count) + t('usageMonitor.text.requests7')"
-              >{{ compact(missing!.count) }}<small>{{ t('usageMonitor.text.requests4') }}</small></strong
+            ><strong :title="count(missing!.count) + t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests7')"
+              >{{ compact(missing!.count) }}<small>{{ t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests4') }}</small></strong
             >
             <p :data-label="t('usageMonitor.format.missingUnitPrice')">
               {{ usagePercentLabel(missing!.percent) }} {{ t('usageMonitor.text.modeIdentifiedButMatchingCatalogPriceMissing') }}

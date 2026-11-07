@@ -1,3 +1,4 @@
+import './costDataI18n'
 /**
  * 回归:cockpit 侧的「幽灵 key 冒充实测」与「跨源残留」。
  *
@@ -72,8 +73,8 @@ describe('D7 · cockpitQuotaToAccountUsage 不得用 file.email 冒充 accountId
     const keys = Object.keys(result)
 
     expect(keys).toHaveLength(1)
-    // key 是 accountIdToNumber(accountId) 派生出的数字串,不是 email 本身
-    expect(keys[0]).toMatch(/^\d+$/)
+    // key 保留来源与完整 accountId,不能回退成未匹配的 email 或丢失来源。
+    expect(keys[0]).toBe('cockpit:acct-live')
     expect(keys[0]).not.toBe('live@example.com')
     expect(result[keys[0]].antigravity_quota?.['gpt-6-astra'].utilization).toBe(38)
   })

@@ -7,10 +7,14 @@ import { displayLiveRate } from '../liveRate'
 const window = (overrides: Partial<LiveWindow> = {}): LiveWindow => ({ seconds: 300, observedOutputTokens: 600, outputTokensPerSecond: null, coveredMs: 30000, complete: false, sourceComplete: true, ...overrides })
 
 describe('displayLiveRate', () => {
+  it.each([0, 600])('does not turn an incomplete output lower bound of %s into a measured rate', observedOutputTokens => {
+    expect(displayLiveRate(window({ observedOutputTokens, outputComplete: false }))).toEqual({ text: '输出不完整，速率未知', value: null, partial: true })
+    expect(displayLiveRate(window({ observedOutputTokens, outputComplete: false, complete: true, outputTokensPerSecond: 0 }))).toEqual({ text: '输出不完整，速率未知', value: null, partial: true })
+  })
   it('switches empty-state language without changing measured values or coverage semantics', () => {
     i18n.global.locale.value = 'en'
     expect(displayLiveRate()).toEqual({ text: 'No samples', value: null, partial: true })
-    expect(displayLiveRate(window({ observedOutputTokens: 0 }))).toEqual({ text: 'Insufficient sampling', value: null, partial: true })
+    expect(displayLiveRate(window({ observedOutputTokens: 0 }))).toEqual({ text: 'Not enough records', value: null, partial: true })
     expect(displayLiveRate(window({ observedOutputTokens: 0, outputTokensPerSecond: 0, complete: true, sourceComplete: false }))).toEqual({ text: 'Waiting for new records', value: null, partial: true })
     expect(displayLiveRate(window())).toEqual({ text: '2.00', value: 2, partial: true })
     i18n.global.locale.value = 'zh'
@@ -22,8 +26,8 @@ describe('displayLiveRate', () => {
 
   it('distinguishes measured silence, incomplete silence and missing samples', () => {
     expect(displayLiveRate(window({ observedOutputTokens: 0, outputTokensPerSecond: 0, complete: true, coveredMs: 300000 }))).toEqual({ text: '暂无输出', value: 0, partial: false })
-    expect(displayLiveRate(window({ observedOutputTokens: 0 }))).toEqual({ text: '采样不足', value: null, partial: true })
-    expect(displayLiveRate(window({ seconds: 60, observedOutputTokens: 0, outputTokensPerSecond: 0, sourceComplete: false }))).toEqual({ text: '采样不足', value: null, partial: true })
+    expect(displayLiveRate(window({ observedOutputTokens: 0 }))).toEqual({ text: '记录还不够', value: null, partial: true })
+    expect(displayLiveRate(window({ seconds: 60, observedOutputTokens: 0, outputTokensPerSecond: 0, sourceComplete: false }))).toEqual({ text: '记录还不够', value: null, partial: true })
     expect(displayLiveRate(window({ observedOutputTokens: 0, coveredMs: 0 }))).toEqual({ text: '暂无样本', value: null, partial: true })
     expect(displayLiveRate()).toEqual({ text: '暂无样本', value: null, partial: true })
   })

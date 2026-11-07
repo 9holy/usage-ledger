@@ -1,6 +1,7 @@
 import axios from 'axios'
 import type { ApiResponse } from '@/types'
 import { authConnectionBindingMatches, captureAuthConnection, isAuthConnectionCurrent, isDesktopRuntime, persistAuthConnectionBinding, syncConnectionJwt, type AuthConnectionContext } from './url'
+import { getDesktopProxyHeaders } from './desktopProxy'
 
 const AUTH_TOKEN_KEY = 'auth_token'
 const AUTH_USER_KEY = 'auth_user'
@@ -167,10 +168,12 @@ async function requestTokenPair(
   const peerRefreshDeadline = Date.now() + TOKEN_REFRESH_TIMEOUT_MS + PEER_REFRESH_GRACE_MS
 
   try {
+    const proxyHeaders = isDesktopRuntime() ? await getDesktopProxyHeaders(snapshot.context.targetBase) : {}
+    if (!isAuthConnectionCurrent(snapshot.context)) throw new Error('Session changed during token refresh')
     const response = await axios.post<ApiResponse<RefreshTokenResponse>>(
       `${snapshot.context.apiBase}/auth/refresh`,
       { refresh_token: snapshot.refreshToken },
-      { headers: { 'Content-Type': 'application/json', ...(isDesktopRuntime() ? { 'X-Target-Base': snapshot.context.targetBase } : {}) }, timeout: TOKEN_REFRESH_TIMEOUT_MS }
+      { headers: { 'Content-Type': 'application/json', ...proxyHeaders }, timeout: TOKEN_REFRESH_TIMEOUT_MS }
     )
     const payload = response.data
     if (payload.code !== 0 || !payload.data) {

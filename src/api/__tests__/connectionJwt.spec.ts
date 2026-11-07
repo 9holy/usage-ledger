@@ -6,7 +6,8 @@ vi.mock('@/api/client', () => ({ apiClient: { post: mocks.post, get: mocks.get }
 vi.mock('@/api/cliproxy', () => ({ cliproxyClient: { get: vi.fn() } }))
 vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ checkAuth: vi.fn(), connectWithApiKey: vi.fn() }) }))
 vi.mock('axios', () => ({ default: { post: mocks.refresh } }))
-import { login, login2FA } from '../auth'
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue('native-session-token') }))
+import { login, login2FA, logout } from '../auth'
 import { refreshAuthTokens } from '../tokenRefresh'
 import { getActiveConnection, setActiveConnection } from '../url'
 import { useConnectionStore } from '@/stores/connection'
@@ -32,6 +33,31 @@ beforeEach(() => {
 afterEach(() => { setActiveConnection(null); delete (window as any).__TAURI_INTERNALS__ })
 
 describe('connection-bound JWT commits', () => {
+  it('logout revokes only the captured source and cannot clear a newer session', async () => {
+    const { store } = currentConnection()
+    let finish!: (value: unknown) => void
+    mocks.refresh.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const pending = logout()
+    expect(localStorage.getItem('auth_token')).toBeNull()
+    const b = store.addConnection({ name: 'B', type: 'sub2api', authMode: 'login', baseUrl: 'https://source-b.example', apiKey: 'b-access' })
+    store.activeId = b
+    setActiveConnection(store.active)
+    localStorage.setItem('auth_token', 'b-access')
+    localStorage.setItem('refresh_token', 'b-refresh')
+    expect(mocks.refresh).toHaveBeenCalledWith('https://source-a.example/api/v1/auth/logout', { refresh_token: 'old-refresh' }, expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer old-access' }) }))
+    finish({ data: {} })
+    await pending
+    expect(localStorage.getItem('auth_token')).toBe('b-access')
+    expect(localStorage.getItem('refresh_token')).toBe('b-refresh')
+  })
+
+  it('does not send a different instance refresh token to the active connection', async () => {
+    currentConnection()
+    localStorage.setItem('auth_token', 'other-source-access')
+    await logout()
+    expect(mocks.refresh).not.toHaveBeenCalled()
+  })
+
   it('login updates global, active request credential, persisted connection and expiry together', async () => {
     const { store, id } = currentConnection()
     mocks.post.mockResolvedValueOnce({ data: response })
@@ -56,7 +82,7 @@ describe('connection-bound JWT commits', () => {
     ;(window as any).__TAURI_INTERNALS__ = {}
     mocks.refresh.mockResolvedValueOnce({ data: { code: 0, data: response } })
     await refreshAuthTokens({ failedAccessToken: 'old-access' })
-    expect(axios.post).toHaveBeenCalledWith('http://127.0.0.1:18765/auth/refresh', { refresh_token: 'old-refresh' }, expect.objectContaining({ headers: expect.objectContaining({ 'X-Target-Base': 'https://source-a.example/api/v1' }) }))
+    expect(axios.post).toHaveBeenCalledWith('http://127.0.0.1:18765/auth/refresh', { refresh_token: 'old-refresh' }, expect.objectContaining({ headers: expect.objectContaining({ 'X-Target-Base': 'https://source-a.example/api/v1', 'X-Proxy-Token': 'native-session-token' }) }))
     expect(getActiveConnection()?.apiKey).toBe('new-access')
     expect(localStorage.getItem('auth_token')).toBe('new-access')
   })

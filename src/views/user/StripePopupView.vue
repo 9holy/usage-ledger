@@ -58,7 +58,7 @@ import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { isMobileDevice } from '@/utils/device'
-import { buildApiUrl } from '@/api/client'
+import { fetchApi } from '@/api/fetch'
 
 interface StripeWithWechatPay {
   confirmWechatPayPayment(clientSecret: string, options: Record<string, unknown>): Promise<{ error?: { message?: string }; paymentIntent?: { status: string } }>
@@ -178,7 +178,7 @@ function startPolling() {
       // access token 存储在 localStorage 的 'auth_token' 键下（见 api/client.ts），
       // 之前误读 'token' 导致轮询请求不带认证、永远 401，支付成功无法被检测到。
       const token = localStorage.getItem('auth_token') || ''
-      const res = await fetch(buildApiUrl(`/payment/orders/${orderId}`), {
+      const res = await fetchApi(`/payment/orders/${orderId}`, {
         headers: token ? { Authorization: 'Bearer ' + token } : {},
         credentials: 'include',
       })

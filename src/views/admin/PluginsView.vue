@@ -351,7 +351,7 @@ import {
   stepUpBlockReason,
   useStepUp,
 } from "@/composables/useStepUp";
-import { buildApiUrl } from "@/api/url";
+import { buildUpstreamApiUrl } from "@/api/url";
 
 interface PluginBridgeMessage {
   source?: string;
@@ -375,11 +375,10 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const rolloutValues = ref<Record<number, number>>({});
 const configPlugin = ref<PluginInstallation | null>(null);
 const uiSession = ref<PluginUISession | null>(null);
-// 桌面端经本地反代访问远程,uiSession.url 是相对路径(/api/v1/plugin-ui/...),
-// 直接放进 iframe 会解析到 Tauri 源而 404;buildApiUrl 按当前连接拼出正确绝对地址,
-// 同源 web 部署下结果与原相对路径等价。
+// Browser navigations cannot send proxy control headers. The upstream session URL
+// already contains its scoped capability, so load it from its own server origin.
 const pluginUiUrl = computed(() =>
-  uiSession.value ? buildApiUrl(uiSession.value.url) : "",
+  uiSession.value ? buildUpstreamApiUrl(uiSession.value.url) : "",
 );
 const pluginFrame = ref<HTMLIFrameElement | null>(null);
 const uiLoading = ref(false);

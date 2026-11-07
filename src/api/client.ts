@@ -13,6 +13,7 @@ import {
   shouldMarkUserUIRequest,
 } from './adminUIRequest'
 import { captureAuthConnection, getAPIBaseURL, isDesktopRuntime, redirectToAppPath, getActiveConnection, getSub2apiTargetBase, getCostTargetBase } from './url'
+import { getDesktopProxyHeaders } from './desktopProxy'
 export { buildApiUrl, buildGatewayUrl } from './url'
 
 // 扩展 axios config:cost 服务请求显式指定 baseURL 时打标记,跳过拦截器的 baseURL 刷新。
@@ -55,8 +56,12 @@ const getUserTimezone = (): string => {
 }
 
 apiClient.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
-    config._authConnectionRevision = captureAuthConnection().revision
+  async (config: InternalAxiosRequestConfig) => {
+    const revision = captureAuthConnection().revision
+    if (config._authConnectionRevision != null && config._authConnectionRevision !== revision) {
+      throw new axios.CanceledError('Connection changed before the request was sent')
+    }
+    config._authConnectionRevision = revision
     refreshBaseURL(config)
 
     // 注入认证 header。sub2api 按 authMode 分流(curl 实测确认):
@@ -64,21 +69,30 @@ apiClient.interceptors.request.use(
     //   - apikey 模式:apiKey 存 Admin API Key → X-API-Key(sub2api admin key 必须走此 header,Bearer 会被当 JWT 解析返 INVALID_TOKEN)
     // cliproxy 一律 X-API-Key。apiKey 为空不注入(login 模式首次 /auth/login 前无凭证)。
     const conn = getActiveConnection()
-    if (conn && conn.apiKey && config.headers) {
-      if (conn.type === 'sub2api' && conn.authMode === 'login') {
-        config.headers.Authorization = `Bearer ${conn.apiKey}`
-      } else {
-        config.headers['X-API-Key'] = conn.apiKey
+    if (conn && config.headers) {
+      config.headers.delete('Authorization')
+      config.headers.delete('X-API-Key')
+      if (conn.apiKey) {
+        if (conn.type === 'sub2api' && conn.authMode === 'login') {
+          config.headers.Authorization = `Bearer ${conn.apiKey}`
+        } else {
+          config.headers['X-API-Key'] = conn.apiKey
+        }
       }
     }
 
     // 桌面运行时:baseURL 指本地反代,远程真实地址通过 X-Target-Base 传给反代转发。
     // 即使 apiKey 为空(login 首次请求)也要注入,否则 login 请求也跨域挂。
     // _explicitBaseURL 标记的 cost 请求用 cost target,其余用 sub2api target。
-    if (isDesktopRuntime() && config.headers) {
-      config.headers['X-Target-Base'] = config._explicitBaseURL
+    if (isDesktopRuntime() && conn?.type !== 'cliproxy' && config.headers) {
+      const target = config._explicitBaseURL
         ? getCostTargetBase()
         : getSub2apiTargetBase()
+      const proxyHeaders = await getDesktopProxyHeaders(target)
+      if (config._authConnectionRevision !== captureAuthConnection().revision) {
+        throw new axios.CanceledError('Connection changed before the request was sent')
+      }
+      Object.assign(config.headers, proxyHeaders)
     }
 
     // Attach locale for backend translations
@@ -146,13 +160,14 @@ apiClient.interceptors.response.use(
     if (error.response) {
       const { status, data } = error.response
       const url = String(error.config?.url || '')
+      const currentConnectionResponse = error.config?._authConnectionRevision == null || error.config._authConnectionRevision === captureAuthConnection().revision
 
       // Validate `data` shape to avoid HTML error pages breaking our error handling.
       const apiData = (typeof data === 'object' && data !== null ? data : {}) as Record<string, any>
 
       // Ops monitoring disabled: treat as feature-flagged 404, and proactively redirect away
       // from ops pages to avoid broken UI states.
-      if (status === 404 && apiData.message === 'Ops monitoring is disabled') {
+      if (status === 404 && apiData.message === 'Ops monitoring is disabled' && currentConnectionResponse) {
         try {
           localStorage.setItem('ops_monitoring_enabled_cached', 'false')
         } catch {
@@ -176,7 +191,7 @@ apiClient.interceptors.response.use(
         })
       }
 
-      if (status === 423 && apiData.code === 'ADMIN_COMPLIANCE_ACK_REQUIRED') {
+      if (status === 423 && apiData.code === 'ADMIN_COMPLIANCE_ACK_REQUIRED' && currentConnectionResponse) {
         try {
           window.dispatchEvent(new CustomEvent('admin-compliance-required', {
             detail: apiData.metadata || {}
@@ -199,7 +214,7 @@ apiClient.interceptors.response.use(
       if (status === 401) {
         const isAuthEndpoint =
           url.includes('/auth/login') || url.includes('/auth/register') || url.includes('/auth/refresh')
-        if (!isAuthEndpoint && (error.config?._authConnectionRevision == null || error.config._authConnectionRevision === captureAuthConnection().revision)) {
+        if (!isAuthEndpoint && currentConnectionResponse) {
           try {
             window.dispatchEvent(new CustomEvent('api:unauthorized'))
           } catch {

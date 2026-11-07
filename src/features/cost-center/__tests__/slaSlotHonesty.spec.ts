@@ -213,7 +213,7 @@ describe('D · SLA 不可得 ⇒ 中性灰，不给绿', () => {
 
 describe('E · value 是字面量的 MetricCell 不得声明 state="measured"', () => {
   it('「认证方式」格：state 是 estimated（自方知识），不是 measured', () => {
-    const line = VIEW.split('\n').find((l) => l.includes('label="认证方式"')) ?? ''
+    const line = VIEW.split('\n').find((l) => l.includes(":label=\"t('costCenter.text.authentication')\"")) ?? ''
     expect(line, '未找到「认证方式」单元格').not.toBe('')
     expect(line).toContain('value="X-API-Key / Bearer"')
     expect(line).toContain('state="estimated"')
@@ -251,7 +251,7 @@ describe('G · 探测耗时缺失 ⇒ 省略耗时片段', () => {
     expect(head).toContain('latencySampleMs(result.latency_ms)')
     expect(head).not.toContain('result.latency_ms || 0')
     // 缺失分支只报"连接测试完成"，不带耗时；有值时仍带 ms 数（不能把耗时整段删掉）
-    expect(head).toContain('`${account.name} 连接测试完成`')
-    expect(head).toContain('总耗时 ${formatInteger(latency)} ms')
+    expect(head).toContain("? t('costCenter.text.connectionTestComplete', { value0: account.name })")
+    expect(head).toContain(": t('costCenter.text.connectionTestCompleteTotalDurationMs', { value0: account.name, value1: formatInteger(latency) })")
   })
 })

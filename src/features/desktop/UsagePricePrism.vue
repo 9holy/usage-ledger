@@ -14,7 +14,7 @@ import champagneSideTexture from '@/assets/usage/champagne-side.png'
 import { usagePercentLabel } from './usageChartPalette'
 
 const { t } = useI18n()
-const props = defineProps<{ parts: CoveragePart[]; total?: number; compact?: boolean }>()
+const props = defineProps<{ parts: CoveragePart[]; total?: number; compact?: boolean; recordCounts?: boolean }>()
 const host = ref<HTMLElement>()
 const width = ref(760)
 const uid = `price-prism-${++nextPrismId}`
@@ -52,7 +52,7 @@ const quad = (
     .join(' ')
 }
 const positive = computed(() => props.parts.filter((part) => part.count > 0))
-const parts = computed(() => {
+const segments = computed(() => {
   const totalWeight = positive.value.reduce((sum, part) => sum + part.percent ** 0.63, 0)
   let start = 0
   return positive.value.map((part, index) => {
@@ -91,8 +91,8 @@ const parts = computed(() => {
     return result
   })
 })
-function captionLines(part: (typeof parts.value)[number]) {
-  const text = t('usageMonitor.text.requests10', { value0: labels.value[part.state], value1: number(part.count) })
+function captionLines(part: (typeof segments.value)[number]) {
+  const text = t(props.recordCounts ? 'usageMonitor.text.usageRecords10' : 'usageMonitor.text.requests10', { value0: labels.value[part.state], value1: number(part.count) })
   const advance = [...text].reduce(
     (sum, char) => sum + (char === ' ' || char === ',' ? 0.28 : char.charCodeAt(0) < 128 ? 0.56 : 1),
     0
@@ -104,11 +104,11 @@ function captionLines(part: (typeof parts.value)[number]) {
         ? 350
         : Math.min(part.labelX, 820 - part.labelX) * 2 - 6
   return advance * (positive.value.length === 3 ? 28 : part.state === 'known' ? 30 : 28) > available
-    ? [labels.value[part.state], t('usageMonitor.text.requests11', { value0: number(part.count) })]
+    ? [labels.value[part.state], t(props.recordCounts ? 'usageMonitor.text.usageRecords11' : 'usageMonitor.text.requests11', { value0: number(part.count) })]
     : [text]
 }
 const viewHeight = computed(() =>
-  Math.max(355, ...parts.value.map((part) => part.labelY + 76 + (captionLines(part).length - 1) * 32 + 10))
+  Math.max(355, ...segments.value.map((part) => part.labelY + 76 + (captionLines(part).length - 1) * 32 + 10))
 )
 // Keep optical detail in CSS pixels; do not shrink every material feature with the viewBox.
 const opticalScale = computed(() => Math.max(1, 820 / width.value))
@@ -129,7 +129,7 @@ onBeforeUnmount(() => observer?.disconnect())
     class="reference-prism"
     role="img"
     :aria-label="
-      parts.map((p) => t('usageMonitor.text.requests12', { value0: labels[p.state], value1: number(p.count), value2: usagePercentLabel(p.percent) })).join(t('usageMonitor.text.label10'))
+      segments.map((p) => t(recordCounts ? 'usageMonitor.text.usageRecords12' : 'usageMonitor.text.requests12', { value0: labels[p.state], value1: number(p.count), value2: usagePercentLabel(p.percent) })).join(t('usageMonitor.text.label10'))
     "
   >
     <svg :viewBox="`0 ${compact ? 48 : 0} 820 ${viewHeight - (compact ? 48 : 0)}`" aria-hidden="true">
@@ -389,7 +389,7 @@ onBeforeUnmount(() => observer?.disconnect())
       </defs>
       <ellipse cx="400" cy="285" rx="410" ry="125" :fill="url('floor')" />
       <g :mask="url('reflectionMask')" :filter="url('reflectionBlur')" opacity=".75">
-        <g v-for="part in parts" :key="part.state" opacity=".65">
+        <g v-for="part in segments" :key="part.state" opacity=".65">
           <polygon
             v-if="part.state === 'known'"
             :points="quad(part.start, part.bodyEnd, 'front', true, 0.65)"
@@ -412,7 +412,7 @@ onBeforeUnmount(() => observer?.disconnect())
         </g>
       </g>
       <g
-        v-for="part in parts.filter((p) => p.state === 'known')"
+        v-for="part in segments.filter((p) => p.state === 'known')"
         :key="`${part.state}-contact`"
         :filter="url('reflectionBlur')"
       >
@@ -425,7 +425,7 @@ onBeforeUnmount(() => observer?.disconnect())
       </g>
       <ellipse cx="393" cy="260" rx="382" ry="26" :fill="url('shadow')" transform="rotate(8.3 393 260)" />
       <path
-        v-for="part in parts.filter((p) => p.state === 'known')"
+        v-for="part in segments.filter((p) => p.state === 'known')"
         :key="part.state"
         :d="`M ${xy(point(part.start, 1.2 + 0.035 * part.start))} L ${xy(point(part.bodyEnd, 1.2 + 0.035 * part.bodyEnd))}`"
         fill="none"
@@ -434,7 +434,7 @@ onBeforeUnmount(() => observer?.disconnect())
         opacity=".45"
       />
       <g
-        v-for="part in parts.filter((p) => p.state === 'known')"
+        v-for="part in segments.filter((p) => p.state === 'known')"
         :key="`${part.state}-floor-guides`"
         stroke="#7ab89c"
         :stroke-width="0.9 * opticalScale"
@@ -453,10 +453,10 @@ onBeforeUnmount(() => observer?.disconnect())
         <circle cx="769" cy="62" :r="2.5 * Math.sqrt(opticalScale)" fill="#f5fff7" />
       </g>
       <text v-if="!compact" class="prism-total" x="404" y="29" text-anchor="middle">
-        {{ t('usageMonitor.text.all') }} {{ total == null ? t('usageMonitor.text.unavailable') : number(total) }} {{ t('usageMonitor.text.requests4') }}
+        {{ t('usageMonitor.text.all') }} {{ total == null ? t('usageMonitor.text.unavailable') : number(total) }} {{ t(recordCounts ? 'usageMonitor.text.records' : 'usageMonitor.text.requests4') }}
       </text>
       <g
-        v-for="part in parts"
+        v-for="part in segments"
         :key="part.state"
         :opacity="focused && focused !== part.state ? 0.34 : 1"
         class="prism-part"

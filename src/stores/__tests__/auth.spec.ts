@@ -139,6 +139,35 @@ describe('useAuthStore', () => {
   // --- logout ---
 
   describe('logout', () => {
+    it('clears immediately and does not erase a new session when revocation completes late', async () => {
+      mockLogin.mockResolvedValue(fakeAuthResponse)
+      let resolveLogout!: () => void
+      mockLogout.mockImplementationOnce(() => new Promise<void>((resolve) => { resolveLogout = resolve }))
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: '123456' })
+
+      const pending = store.logout()
+      expect(store.isAuthenticated).toBe(false)
+      expect(localStorage.getItem('auth_token')).toBeNull()
+
+      store.connectWithApiKey('new-connection-key')
+      localStorage.setItem('auth_token', 'new-session')
+      resolveLogout()
+      await pending
+      expect(store.token).toBe('new-connection-key')
+      expect(store.isAuthenticated).toBe(true)
+      expect(localStorage.getItem('auth_token')).toBe('new-session')
+    })
+
+    it('does not revoke a previous JWT through an API-key connection', async () => {
+      const store = useAuthStore()
+      localStorage.setItem('refresh_token', 'other-source-refresh')
+      store.connectWithApiKey('admin-key')
+      await store.logout()
+      expect(mockLogout).not.toHaveBeenCalled()
+      expect(localStorage.getItem('refresh_token')).toBeNull()
+    })
+
     it('注销后清除所有状态和 localStorage', async () => {
       mockLogin.mockResolvedValue(fakeAuthResponse)
       mockLogout.mockResolvedValue(undefined)
@@ -164,6 +193,21 @@ describe('useAuthStore', () => {
   // --- checkAuth ---
 
   describe('checkAuth', () => {
+    it('does not restore an unbound persisted JWT as an active desktop session', () => {
+      Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+      try {
+        localStorage.setItem('auth_token', 'saved-token')
+        localStorage.setItem('auth_user', JSON.stringify(fakeUser))
+        const store = useAuthStore()
+        store.checkAuth()
+        expect(store.isAuthenticated).toBe(false)
+        expect(mockGetCurrentUser).not.toHaveBeenCalled()
+        expect(localStorage.getItem('auth_token')).toBe('saved-token')
+      } finally {
+        delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+      }
+    })
+
     it('从 localStorage 恢复持久化状态', () => {
       localStorage.setItem('auth_token', 'saved-token')
       localStorage.setItem('auth_user', JSON.stringify(fakeUser))
@@ -348,6 +392,17 @@ describe('useAuthStore', () => {
   // --- refreshUser ---
 
   describe('refreshUser', () => {
+    it.each(['apikey', 'login'] as const)('does not let an old user refresh probe a new %s connection before login finishes', async (authMode) => {
+      mockLogin.mockResolvedValue(fakeAuthResponse)
+      const store = useAuthStore()
+      await store.login({ email: 'test@example.com', password: 'fixture' })
+      mockGetCurrentUser.mockClear()
+      setActiveConnection({ id: 'new', name: 'New', type: 'sub2api', authMode, baseUrl: 'https://new.example', apiKey: 'new-key', lastUsed: 0 })
+      await expect(store.refreshUser()).rejects.toThrow('Session is not bound to the current connection')
+      expect(mockGetCurrentUser).not.toHaveBeenCalled()
+      expect(store.token).toBe(fakeAuthResponse.access_token)
+    })
+
     it.each([false, true])('does not replace or clear a new session after an old /auth/me response (401=%s)', async (failed) => {
       mockLogin.mockResolvedValue(fakeAuthResponse)
       const store = useAuthStore()

@@ -145,7 +145,7 @@ describe('FIX 1 · cockpit/cliproxy 的模型审计格不得用 0 冒充实测',
     expect(COST_CENTER_SOURCE_KEYS).toContain('modelRoutes')
     const states = createDataSourceStates('unavailable')
     expect(states.modelAudit.label).toContain('模型审计')
-    expect(states.modelRoutes.label).toContain('路由')
+    expect(states.modelRoutes.label).toBe('模型调用明细')
   })
 
   it('5 个审计格读 sourceStates.modelAudit,不读 modelRoutes(路由明细表仍用 modelRoutes)', () => {

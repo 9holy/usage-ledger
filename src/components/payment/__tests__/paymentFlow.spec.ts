@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CreateOrderResult, MethodLimit } from '@/types/payment'
 import {
   buildCreateOrderPayload,
+  createPaymentRecoverySnapshot,
   decidePaymentLaunch,
   getVisibleMethods,
   readPaymentRecoverySnapshot,
@@ -74,6 +75,49 @@ describe('getVisibleMethods', () => {
 })
 
 describe('decidePaymentLaunch', () => {
+  it('preserves locally generated hash-router payment URLs for desktop recovery', () => {
+    const decision = decidePaymentLaunch(createOrderResult({ client_secret: 'stripe-secret' }), {
+      visibleMethod: 'stripe', orderType: 'balance', isMobile: false,
+      stripeRouteUrl: '#/payment/stripe?order_id=101',
+    })
+    expect(decision.kind).toBe('stripe_route')
+    expect(decision.paymentState.payUrl).toBe('#/payment/stripe?order_id=101')
+    expect(readPaymentRecoverySnapshot(JSON.stringify(decision.recovery))?.payUrl)
+      .toBe('#/payment/stripe?order_id=101')
+  })
+
+  it.each(['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>', 'java\nscript:alert(1)'])(
+    'never launches or persists an executable payment URL: %s', (payUrl) => {
+      const decision = decidePaymentLaunch(createOrderResult({ pay_url: payUrl }), {
+        visibleMethod: 'alipay', orderType: 'balance', isMobile: true,
+      })
+      expect(decision.kind).toBe('unhandled')
+      expect(decision.paymentState.payUrl).toBe('')
+      expect(decision.recovery.payUrl).toBe('')
+    },
+  )
+
+  it('retains native QR payloads when an unsafe hosted link is discarded', () => {
+    const qrCode = 'weixin://wxpay/bizpayurl?pr=order-101'
+    const decision = decidePaymentLaunch(createOrderResult({
+      qr_code: qrCode, pay_url: 'javascript:alert(1)',
+    }), { visibleMethod: 'wxpay', orderType: 'balance', isMobile: true })
+    expect(decision.kind).toBe('qr_waiting')
+    expect(decision.recovery.qrCode).toBe(qrCode)
+    expect(decision.recovery.payUrl).toBe('')
+  })
+
+  it.each(['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>'])(
+    'rejects executable WeChat authorization URLs: %s', (authorizeUrl) => {
+      const decision = decidePaymentLaunch(createOrderResult({
+        result_type: 'oauth_required',
+        oauth: { authorize_url: authorizeUrl, appid: 'wx123', scope: 'snsapi_base', redirect_url: '/callback' },
+      }), { visibleMethod: 'wxpay', orderType: 'balance', isMobile: true })
+      expect(decision.kind).toBe('unhandled')
+      expect(decision.oauth).toBeUndefined()
+    },
+  )
+
   it('uses Stripe popup waiting flow for desktop Alipay client secret', () => {
     const decision = decidePaymentLaunch(createOrderResult({
       client_secret: 'cs_test',
@@ -376,6 +420,21 @@ describe('buildCreateOrderPayload', () => {
 })
 
 describe('readPaymentRecoverySnapshot', () => {
+  it.each(['javascript:alert(1)', 'data:text/html,<script>alert(1)</script>'])(
+    'removes executable URLs from both new and previously saved snapshots: %s', (payUrl) => {
+      const decision = decidePaymentLaunch(createOrderResult({ qr_code: 'weixin://wxpay/bizpayurl?pr=abc' }), {
+        visibleMethod: 'wxpay', orderType: 'balance', isMobile: false,
+      })
+      const unsafeSnapshot = { ...decision.recovery, payUrl }
+      const created = createPaymentRecoverySnapshot(unsafeSnapshot)
+      const restored = readPaymentRecoverySnapshot(JSON.stringify(unsafeSnapshot))
+      expect(created.payUrl).toBe('')
+      expect(restored?.payUrl).toBe('')
+      expect(restored?.qrCode).toBe('weixin://wxpay/bizpayurl?pr=abc')
+      expect(restored?.orderId).toBe(101)
+    },
+  )
+
   it('restores an unexpired snapshot when the resume token matches', () => {
     const snapshot: PaymentRecoverySnapshot = {
       orderId: 33,

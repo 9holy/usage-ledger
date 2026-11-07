@@ -11,6 +11,9 @@ pub struct ParserState {
     pub(crate) quota_account_id: Option<String>,
     pub(crate) quota_identity_loaded: bool,
     pub(crate) quota_identity_error: Option<String>,
+    // Collector checkpoint evidence; absent in cursors written by older releases.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) file_tail_digest: Option<String>,
     turn_id: String,
     root_turn_id: Option<String>,
     requested_model: Option<String>,
@@ -28,6 +31,9 @@ pub struct ParserState {
     last_total: Option<Tokens>,
     canonical_total: Option<Tokens>,
     pending_usage: Option<UsageOccurrence>,
+    // Keep the latest legacy endpoint while raw_response_completed is followed
+    // by its richer token_usage_record. Both identify the same native response.
+    pending_legacy_usage: Option<UsageOccurrence>,
     recent: VecDeque<UsageRecord>,
 }
 
@@ -44,6 +50,8 @@ struct UsageOccurrence {
     total: Option<Tokens>,
     canonical: bool,
     paired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timestamp_ms: Option<i64>,
 }
 
 #[derive(Default, Debug)]
@@ -82,7 +90,26 @@ impl ParserState {
         }
     }
 
+    fn has_newer_cached_usage(&self, record: &UsageRecord) -> bool {
+        if record.unknown_fields.iter().any(|field| field == "timestamp") {
+            return false;
+        }
+        self.previous(&record.id).is_some_and(|known| {
+            known.session_id == record.session_id
+                && known.timestamp_ms > record.timestamp_ms
+                && !known.unknown_fields.iter().any(|field| field == "timestamp")
+        }) || self.pending_usage.as_ref().is_some_and(|pending| {
+            pending.canonical && pending.id == record.id
+                && pending.timestamp_ms.is_some_and(|time| time > record.timestamp_ms)
+        })
+    }
+
     fn remember(&mut self, record: UsageRecord) {
+        if self.has_newer_cached_usage(&record) {
+            // The durable store may still enrich missing fields from this older
+            // event. Do not let its old counters seed a later partial response.
+            return;
+        }
         self.recent.retain(|r| r.id != record.id);
         self.recent.push_back(record);
         // Only partial-chunk association lives here; durable identity/upserts belong to SQLite.
@@ -117,9 +144,9 @@ fn number(v: &Value, key: &str) -> Result<Option<i64>, String> {
         None => Ok(None),
         Some(v) => v
             .as_i64()
-            .filter(|n| *n >= 0)
+            .filter(|n| (0..=super::store::MAX_EXACT_TOKENS).contains(n))
             .map(Some)
-            .ok_or_else(|| format!("invalid nonnegative integer: {key}")),
+            .ok_or_else(|| format!("invalid nonnegative exact integer: {key}")),
     }
 }
 
@@ -172,7 +199,8 @@ impl Tokens {
             input: number(v, "input_tokens")?,
             output: number(v, "output_tokens")?,
             read,
-            write: number(v, "cache_write_input_tokens")?,
+            write: number(v, "cache_write_input_tokens")?
+                .or(number(&v["input_tokens_details"], "cache_write_tokens")?),
             reasoning: number(v, "reasoning_output_tokens")?
                 .or(number(&v["output_tokens_details"], "reasoning_tokens")?),
         })
@@ -228,6 +256,9 @@ impl Tokens {
         {
             return Err("reasoning tokens exceed output tokens".into());
         }
+        record.input_tokens.checked_add(record.output_tokens)
+            .filter(|total| *total <= super::store::MAX_EXACT_TOKENS)
+            .ok_or("token count overflow")?;
         Ok(())
     }
 
@@ -256,6 +287,42 @@ fn fallback_id(path: &Path) -> String {
         .into_owned()
 }
 
+pub(super) fn codex_request_id(thread: &str, response: &str) -> String {
+    // Native IDs are only unique within their issuing provider. Different
+    // configured providers/threads can legitimately reuse the same response ID.
+    format!("response-v2:{}:{thread}{response}", thread.len())
+}
+
+pub(super) fn scope_cursor_response_ids(state: &mut Value) -> Result<bool, String> {
+    let session = state["session"]["id"].as_str().map(str::to_owned);
+    let mut owners = std::collections::BTreeMap::new();
+    let mut changed = false;
+    if let Some(recent) = state.get_mut("recent").and_then(Value::as_array_mut) {
+        for usage in recent {
+            if usage["tool"] != "codex" { continue; }
+            let Some(old) = usage["id"].as_str().filter(|id| id.starts_with("response:")).map(str::to_owned) else { continue; };
+            let thread = usage["sessionId"].as_str().filter(|id| !id.is_empty())
+                .ok_or("Stored Codex response cursor lacks a session identity")?.to_owned();
+            let response = old.strip_prefix("response:").unwrap();
+            owners.insert(old.clone(), thread.clone());
+            usage["id"] = Value::String(codex_request_id(&thread, response));
+            if usage["requestId"].is_null() {
+                usage["requestId"] = Value::String(response.to_owned());
+            }
+            changed = true;
+        }
+    }
+    for field in ["pending_usage", "pending_legacy_usage"] {
+        let Some(pending) = state.get_mut(field).filter(|value| value.is_object()) else { continue; };
+        let Some(old) = pending["id"].as_str().filter(|id| id.starts_with("response:")).map(str::to_owned) else { continue; };
+        let thread = owners.get(&old).or(session.as_ref())
+            .filter(|id| !id.is_empty()).ok_or("Stored Codex pending response lacks a session identity")?;
+        pending["id"] = Value::String(codex_request_id(thread, old.strip_prefix("response:").unwrap()));
+        changed = true;
+    }
+    Ok(changed)
+}
+
 fn session(state: &mut ParserState, tool: &str, id: String, time: i64) {
     if state.session.is_none() {
         state.session = Some(SessionMeta {
@@ -275,6 +342,7 @@ fn set_turn(state: &mut ParserState, id: String) {
         state.root_turn_id = None;
         state.rerouted_model = None;
         state.pending_usage = None;
+        state.pending_legacy_usage = None;
         if let Some(session) = &mut state.session {
             session.turn_timing = None;
         }
@@ -390,6 +458,11 @@ fn codex(
         let id = string(payload, "id")
             .or_else(|| string(payload, "thread_id"))
             .unwrap_or_else(|| fallback_id(path));
+        if state.session.as_ref().is_some_and(|session| session.id != id) {
+            // A concatenated/replaced stream may explicitly begin another
+            // session. Its counters, response cache and context are independent.
+            *state = ParserState::default();
+        }
         let parent = string(payload, "parent_thread_id")
             .or_else(|| {
                 string(
@@ -539,14 +612,29 @@ fn codex(
             if !value.is_object() {
                 return Ok(result);
             }
-            if let Some(turn) = string(payload, "turn_id") {
-                set_turn(state, turn);
+            let response_turn = string(payload, "turn_id");
+            if state.turn_id.is_empty() {
+                if let Some(turn) = response_turn.as_ref() {
+                    set_turn(state, turn.clone());
+                }
             }
-            let id = format!("response:{response_id}");
+            let id = codex_request_id(&state.session.as_ref().unwrap().id, &response_id);
             let mut usage = state
                 .previous(&id)
                 .cloned()
                 .unwrap_or_else(|| record(state, "codex", id.clone(), time, known));
+            if let Some(turn) = response_turn {
+                if state.previous(&id).is_none() && turn != state.turn_id {
+                    // A delayed response names its own turn, not the active
+                    // turn's requested model/mode. Do not move the live context.
+                    usage.model = None;
+                    usage.model_basis = "unknown".into();
+                    usage.requested_model = None;
+                    usage.requested_mode = None;
+                    usage.root_turn_id = None;
+                }
+                usage.turn_id = turn;
+            }
             usage.request_id = Some(response_id);
             usage.root_turn_id = string(payload, "root_turn_id").or(usage.root_turn_id);
             if known {
@@ -585,42 +673,53 @@ fn codex(
                 .filter(|v| v.is_object())
                 .map(Tokens::codex)
                 .transpose()?;
-            let advances = total.as_ref().is_none_or(|now| {
+            let stale = state.has_newer_cached_usage(&usage);
+            let advances = !stale && total.as_ref().is_none_or(|now| {
                 state
                     .canonical_total
                     .as_ref()
                     .is_none_or(|old| now.delta(old).is_some() && !now.same_endpoint(old))
             });
-            let new_occurrence = advances && state.previous(&id).is_none();
-            let paired_legacy = state.pending_usage.as_ref().is_some_and(|pending| {
-                !pending.canonical
-                    && new_occurrence
-                    && pending.turn_id == state.turn_id
+            let new_occurrence = advances && state.previous(&id).is_none_or(|previous| {
+                event == "token_usage_record" && previous.usage_basis == "raw_response_completed"
+            });
+            let legacy = state.pending_legacy_usage.as_ref().or_else(|| {
+                state.pending_usage.as_ref().filter(|pending| !pending.canonical)
+            });
+            let paired_legacy = legacy.filter(|pending| {
+                new_occurrence
+                    && pending.turn_id == usage.turn_id
+                    && (!pending.id.starts_with("response-v2:") || pending.id == id)
                     && pending.tokens.same_usage(&tokens)
                     && pending
                         .total
                         .as_ref()
                         .zip(total.as_ref())
                         .is_some_and(|(a, b)| a.same_endpoint(b))
-            });
-            if paired_legacy {
-                result
-                    .delete_ids
-                    .push(state.pending_usage.as_ref().unwrap().id.clone());
+            }).map(|pending| pending.id.clone());
+            if let Some(legacy) = &paired_legacy {
+                // A legacy event may already carry this exact native response ID.
+                // Only a distinct provisional identity becomes a permanent alias.
+                if legacy != &id {
+                    result.delete_ids.push(legacy.clone());
+                }
+                state.pending_legacy_usage = None;
             }
             let existing = state
                 .pending_usage
                 .as_ref()
                 .filter(|p| p.canonical && p.id == id);
-            let paired = paired_legacy || existing.is_some_and(|p| p.paired);
-            if new_occurrence || existing.is_some() {
+            let paired = paired_legacy.is_some() || existing.is_some_and(|p| p.paired);
+            if !stale && (new_occurrence || existing.is_some()) && usage.turn_id == state.turn_id {
                 state.pending_usage = Some(UsageOccurrence {
                     id: id.clone(),
-                    turn_id: state.turn_id.clone(),
+                    turn_id: usage.turn_id.clone(),
                     tokens,
                     total: total.clone(),
                     canonical: true,
                     paired,
+                    timestamp_ms: (!usage.unknown_fields.iter().any(|field| field == "timestamp"))
+                        .then_some(usage.timestamp_ms),
                 });
             }
             if advances && total.is_some() {
@@ -639,37 +738,68 @@ fn codex(
                 .filter(|v| v.is_object())
                 .map(Tokens::codex)
                 .transpose()?;
-            if total
-                .as_ref()
-                .zip(state.last_total.as_ref())
-                .is_some_and(|(a, b)| a.same_endpoint(b))
-            {
-                return Ok(result);
-            }
-            let previous = state.last_total.clone();
-            if let Some(total) = &total {
-                state.last_total = Some(total.clone());
-            }
-            if state.fork && !state.own_activity {
-                return Ok(result);
-            }
-            let provisional = total.as_ref().and_then(|t| provisional_id(state, t));
             let last = info
                 .get("last_token_usage")
                 .filter(|v| v.is_object())
                 .map(Tokens::codex)
                 .transpose()?;
+            let native_id = string(payload, "response_id");
+            let native_key = native_id.as_ref().map(|id| codex_request_id(&state.session.as_ref().unwrap().id, id));
+            if let (Some(id), None, Some(endpoint)) = (&native_key, &last, &total) {
+                let confirmed = state.pending_usage.as_ref().is_some_and(|pending| {
+                    pending.canonical && &pending.id == id
+                        && pending.total.as_ref().is_some_and(|known| known.same_endpoint(endpoint))
+                });
+                if !confirmed {
+                    return Err("Ambiguous Codex native response with cumulative-only usage; per-request evidence is required".into());
+                }
+                // This confirms the counter endpoint, not a larger usage amount
+                // for that response. Preserve the canonical request and its units.
+                state.last_total = total;
+                result.request_quotas = super::codex_quota_accounts::request_quotas(payload, id);
+                return Ok(result);
+            }
+            let same_native = native_key.as_ref().is_none_or(|id| {
+                state.pending_usage.as_ref().is_some_and(|pending| &pending.id == id)
+                    || state.pending_legacy_usage.as_ref().is_some_and(|pending| &pending.id == id)
+                    || state.previous(id).is_some()
+            });
+            if same_native && total
+                .as_ref()
+                .zip(state.last_total.as_ref())
+                .is_some_and(|(a, b)| a == b)
+            {
+                if let Some(id) = &native_key {
+                    result.request_quotas = super::codex_quota_accounts::request_quotas(payload, id);
+                }
+                return Ok(result);
+            }
+            let previous = state.last_total.clone();
+            if state.fork && !state.own_activity {
+                if let Some(total) = &total {
+                    state.last_total = Some(total.clone());
+                }
+                return Ok(result);
+            }
+            let provisional = total.as_ref().and_then(|t| provisional_id(state, t));
             let delta = total
                 .as_ref()
                 .zip(previous.as_ref())
                 .and_then(|(a, b)| a.delta(b));
+            if last.is_none() && total.is_some() && previous.is_some() && delta.is_none() {
+                return Err("Codex cumulative usage decreased without per-request usage; cannot infer a new request".into());
+            }
+            if let Some(total) = &total {
+                state.last_total = Some(total.clone());
+            }
             let pending = state
                 .pending_usage
                 .as_ref()
                 .filter(|p| p.canonical && !p.paired && p.turn_id == state.turn_id);
             // Context compaction can shift legacy totals; the source occurrence and counter transition establish this pair.
             let paired = pending.is_some_and(|p| {
-                last.as_ref().is_some_and(|last| last.same_usage(&p.tokens))
+                native_key.as_ref().is_none_or(|id| id == &p.id)
+                    && last.as_ref().is_some_and(|last| last.same_usage(&p.tokens))
                     && (delta.as_ref().is_some_and(|d| d.same_usage(&p.tokens))
                         || p.total
                             .as_ref()
@@ -695,10 +825,7 @@ fn codex(
                 return Ok(result);
             };
             state.sequence += 1;
-            let native_id = string(payload, "response_id");
-            let id = native_id
-                .as_ref()
-                .map(|id| format!("response:{id}"))
+            let id = native_key
                 .or(provisional)
                 .unwrap_or_else(|| {
                     format!(
@@ -717,14 +844,17 @@ fn codex(
             }
             usage.usage_basis = basis.into();
             response_evidence(&mut usage, payload);
-            state.pending_usage = Some(UsageOccurrence {
+            let pending = UsageOccurrence {
                 id,
                 turn_id: state.turn_id.clone(),
                 tokens,
                 total: occurrence_total,
                 canonical: false,
                 paired: false,
-            });
+                timestamp_ms: known.then_some(time),
+            };
+            state.pending_legacy_usage = Some(pending.clone());
+            state.pending_usage = Some(pending);
             result.request_quotas = super::codex_quota_accounts::request_quotas(payload, &usage.id);
             result.usage.push(usage);
         }
@@ -816,7 +946,9 @@ fn claude(
         .cloned()
         .unwrap_or_else(|| record(state, "claude", id.clone(), time, known));
     usage.request_id = request_id.or(message_id);
-    usage.timestamp_ms = time;
+    if known {
+        usage.timestamp_ms = time;
+    }
     if let Some(model) = string(message, "model") {
         usage.model = Some(model.clone());
         usage.model_basis = "response_model".into();
@@ -1017,7 +1149,7 @@ mod tests {
         }}));
         assert!(parsed.usage.is_empty());
         assert_eq!(parsed.request_quotas.len(),1);
-        assert_eq!(parsed.request_quotas[0].id,"response:quota-response");
+        assert_eq!(parsed.request_quotas[0].id,codex_request_id("thread", "quota-response"));
         assert_eq!(parsed.request_quotas[0].reset_ms,1800000000000);
     }
 
@@ -1040,6 +1172,172 @@ mod tests {
         let restored: ParserState =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(restored.last_total, s.last_total);
+    }
+    #[test]
+    fn older_canonical_update_cannot_destroy_the_pending_legacy_pair() {
+        let mut state = ParserState::default();
+        meta(&mut state);
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        let canonical = |time, output| json!({"type":"token_usage_record","timestamp":time,"payload":{
+            "thread_id":"thread","turn_id":"turn","response_id":"pending-pair","response_model":"gpt-6.1-sol",
+            "service_tier":"default","usage":counts(100,output),"thread_token_usage":counts(100,output)}});
+        let rows = [
+            canonical("2026-10-15T17:02:00Z", 10),
+            canonical("2026-10-15T17:01:00Z", 5),
+            json!({"type":"event_msg","timestamp":"2026-10-15T17:02:00Z","payload":{"type":"token_count","info":{
+                "last_token_usage":counts(100,10),"total_token_usage":counts(100,10)}}}),
+        ];
+        let mut original_cost = String::new();
+        for (index, row) in rows.into_iter().enumerate() {
+            let parsed = feed(&mut state, row);
+            let tx = conn.transaction().unwrap();
+            if let Some(session) = &parsed.session {
+                super::super::store::save_session(&tx, session).unwrap();
+            }
+            for id in parsed.delete_ids {
+                super::super::store::delete_request(&tx, "codex", &id).unwrap();
+            }
+            for usage in parsed.usage {
+                super::super::store::save_usage_with_catalog(&tx, &usage, i64::MAX, 0,
+                    &crate::model_catalog::CatalogSnapshot::default()).unwrap();
+            }
+            tx.commit().unwrap();
+            if index == 0 {
+                original_cost = conn.query_row("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap();
+            }
+            // The association is a durable cursor fact, not just an in-memory fix.
+            state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        }
+        let totals = super::super::store::sum_sessions(&super::super::store::sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (1, 100, 10),
+            "the older native sample made the matching legacy event look like another request");
+        let amount = serde_json::from_str::<super::super::types::CostEstimate>(&original_cost).unwrap().usd.unwrap();
+        assert!(amount > 0.0);
+        assert!((totals.priced_cost_usd - amount).abs() < 1e-12);
+        assert_eq!(conn.query_row::<String, _, _>("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap(), original_cost);
+    }
+
+    #[test]
+    fn raw_response_between_legacy_and_canonical_does_not_lose_the_alias() {
+        let mut state = ParserState::default();
+        meta(&mut state);
+        let legacy_id = legacy(&mut state, 10, 2).usage.remove(0).id;
+        let raw = feed(&mut state, json!({"type":"event_msg","timestamp":"2026-10-15T17:01:00Z",
+            "payload":{"type":"raw_response_completed","response_id":"same-response","token_usage":counts(10,2)}}));
+        assert_eq!(raw.usage[0].id, codex_request_id("thread", "same-response"));
+        state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let canonical = modern(&mut state, "same-response", 10, 2);
+        assert_eq!(canonical.delete_ids, vec![legacy_id]);
+        assert_eq!(canonical.usage[0].id, raw.usage[0].id);
+        assert!(legacy(&mut state, 10, 2).usage.is_empty());
+    }
+
+    #[test]
+    fn late_response_cannot_replace_the_active_turn_or_borrow_its_model() {
+        let mut state = ParserState::default();
+        meta(&mut state);
+        feed(&mut state, json!({"type":"turn_context","payload":{"turn_id":"new-turn",
+            "model":"gpt-6.1-sol","service_tier":"priority"}}));
+        let late = scoped_response(&mut state, "late-old", "old-turn");
+        assert_eq!(late.turn_id, "old-turn");
+        assert_eq!(late.model, None);
+        assert_eq!(late.requested_model, None);
+        assert_eq!(late.requested_mode, None);
+        assert_eq!(state.turn_id, "new-turn");
+        let current = legacy(&mut state, 20, 4).usage.remove(0);
+        assert_eq!(current.turn_id, "new-turn");
+        assert_eq!(current.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(current.requested_mode.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn same_cumulative_endpoint_can_enrich_cache_and_reasoning_breakdowns() {
+        let mut state = ParserState::default();
+        meta(&mut state);
+        let mut row = json!({"type":"event_msg","payload":{"type":"token_count","info":{
+            "total_token_usage":counts(100,20),"last_token_usage":counts(100,20)}}});
+        let first = feed(&mut state, row.clone()).usage.remove(0);
+        for field in ["total_token_usage", "last_token_usage"] {
+            row["payload"]["info"][field]["cached_input_tokens"] = json!(40);
+            row["payload"]["info"][field]["reasoning_output_tokens"] = json!(5);
+        }
+        let correction = feed(&mut state, row.clone()).usage.remove(0);
+        assert_eq!(correction.id, first.id);
+        assert_eq!((correction.input_tokens, correction.output_tokens, correction.cache_read_tokens,
+            correction.reasoning_tokens), (100,20,40,Some(5)));
+        assert!(feed(&mut state, row).usage.is_empty());
+    }
+
+    #[test]
+    fn decreasing_cumulative_without_request_usage_cannot_be_counted_as_a_fresh_total() {
+        let mut state = ParserState::default();
+        meta(&mut state);
+        let row = |input,output| json!({"type":"event_msg","payload":{"type":"token_count","info":{
+            "total_token_usage":counts(input,output)}}});
+        assert_eq!(feed(&mut state, row(100,20)).usage[0].input_tokens, 100);
+        let before = state.last_total.clone();
+        let error = parse_line(&mut state, "codex", Path::new("rollout.jsonl"), &row(80,10).to_string(), 0).unwrap_err();
+        assert!(error.contains("cumulative usage decreased"));
+        assert_eq!(state.last_total, before);
+        let next = feed(&mut state, row(120,30)).usage.remove(0);
+        assert_eq!((next.input_tokens,next.output_tokens), (20,10));
+        assert_eq!(next.usage_basis, "legacy_cumulative_delta");
+    }
+
+    #[test]
+    fn a_new_session_header_clears_old_counters_and_request_context() {
+        let mut state = ParserState::default();
+        meta(&mut state);
+        legacy(&mut state, 100,20);
+        modern(&mut state, "same-upstream-id", 100,20);
+        feed(&mut state, json!({"type":"session_meta","payload":{"id":"other-thread"}}));
+        let usage = feed(&mut state, json!({"type":"token_usage_record","payload":{
+            "thread_id":"other-thread","turn_id":"other-turn","response_id":"same-upstream-id",
+            "usage":counts(7,3)}})).usage.remove(0);
+        assert_eq!(usage.session_id, "other-thread");
+        assert_eq!(usage.turn_id, "other-turn");
+        assert_eq!(usage.model, None);
+        assert_eq!(state.last_total, None);
+    }
+
+    #[test]
+    fn native_response_identity_is_scoped_without_ambiguous_concatenation() {
+        assert_ne!(codex_request_id("a", "bc"), codex_request_id("ab", "c"));
+        assert_ne!(codex_request_id("a:b", "c"), codex_request_id("a", "b:c"));
+        assert_ne!(codex_request_id("中", "x:y"), codex_request_id("中x", ":y"));
+        let mut ids = Vec::new();
+        for thread in ["first", "second"] {
+            let mut state = ParserState::default();
+            feed(&mut state, json!({"type":"session_meta","payload":{"id":thread}}));
+            let usage = feed(&mut state, json!({"type":"token_usage_record","payload":{
+                "thread_id":thread,"turn_id":"turn","response_id":"provider-local-id",
+                "usage":counts(10,2)}})).usage.remove(0);
+            assert_eq!(usage.request_id.as_deref(), Some("provider-local-id"));
+            ids.push(usage.id);
+        }
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn response_api_details_keep_cache_and_reasoning_inside_their_parent_buckets() {
+        let mut state = ParserState::default();
+        meta(&mut state);
+        // Mirrors the official Codex SSE parser's parses_cache_write_token_usage fixture.
+        let usage = feed(&mut state, json!({"type":"raw_response_completed","payload":{
+            "response_id":"api-details","token_usage":{"input_tokens":100,
+            "input_tokens_details":{"cached_tokens":40,"cache_write_tokens":60},
+            "output_tokens":10,"output_tokens_details":{"reasoning_tokens":5},"total_tokens":110}}}))
+            .usage.remove(0);
+        assert_eq!((usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens,
+            usage.output_tokens, usage.reasoning_tokens), (100,40,60,10,Some(5)));
+        assert!(!usage.unknown_fields.iter().any(|field| field.ends_with("_tokens")));
+    }
+
+    #[test]
+    fn normalized_input_plus_output_overflow_is_an_error() {
+        let tokens = Tokens { input: Some(i64::MAX), output: Some(1), ..Default::default() };
+        assert_eq!(tokens.apply(&mut UsageRecord::default()).unwrap_err(), "token count overflow");
     }
     #[test]
     fn ambiguous_late_equal_tokens_are_not_merged_and_cursor_history_is_bounded() {
@@ -1524,6 +1822,23 @@ mod tests {
             .usage
             .is_empty());
     }
+    #[test]
+    fn claude_partial_without_timestamp_keeps_the_confirmed_request_time() {
+        let path = Path::new("projects/session.jsonl");
+        let mut state = ParserState::default();
+        let mut row = json!({"type":"assistant","sessionId":"session","timestamp":"2026-10-15T17:00:00Z",
+            "message":{"id":"partial-time","model":"claude-opus-5-5","usage":{
+                "input_tokens":10,"output_tokens":2,"cache_read_input_tokens":20,"cache_creation_input_tokens":0}}});
+        let first = parse_line(&mut state, "claude", path, &row.to_string(), 1).unwrap().usage.remove(0);
+        row.as_object_mut().unwrap().remove("timestamp");
+        row["message"]["usage"]["output_tokens"] = json!(7);
+        let partial = parse_line(&mut state, "claude", path, &row.to_string(), first.timestamp_ms + 86_400_000)
+            .unwrap().usage.remove(0);
+        assert_eq!(partial.timestamp_ms, first.timestamp_ms);
+        assert!(!partial.unknown_fields.contains(&"timestamp".into()));
+        assert_eq!(partial.output_tokens, 7);
+    }
+
     #[test]
     fn unknown_breakdowns_are_not_known_zero_and_content_is_never_saved() {
         let mut s = ParserState::default();

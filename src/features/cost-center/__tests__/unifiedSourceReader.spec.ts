@@ -5,6 +5,7 @@ import type { AdminUsageLog } from '@/types'
 const mocks = vi.hoisted(() => ({ create: vi.fn(), get: vi.fn() }))
 vi.mock('axios', () => ({ default: { create: mocks.create, isAxiosError: (value: { response?: unknown }) => !!value?.response } }))
 vi.mock('@/api/url', () => ({ isDesktopRuntime: () => true, PROXY_PORT: 18765 }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue('native-session-token') }))
 import { readSub2apiWindow } from '../unifiedSourceReader'
 
 const window = { start: new Date('2026-10-16T11:00:00Z'), end: new Date('2026-10-16T12:00:00Z') }
@@ -16,7 +17,7 @@ describe('source-bound Sub2API window reader', () => {
   it('captures its own target and API key without global auth, and never treats user billing as account cost', async () => {
     mocks.get.mockResolvedValue({ data: { data: { items: [log(1)] } } })
     const result = await readSub2apiWindow(connection, window)
-    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ baseURL: 'http://127.0.0.1:18765', headers: { 'X-API-Key': 'own-fixture-key', 'X-Target-Base': 'https://instance.example.test/api/v1', 'X-Admin-UI-Request': '1' } }))
+    expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ baseURL: 'http://127.0.0.1:18765', headers: { 'X-API-Key': 'own-fixture-key', 'X-Target-Base': 'https://instance.example.test/api/v1', 'X-Proxy-Token': 'native-session-token', 'X-Admin-UI-Request': '1' } }))
     expect(result).toMatchObject({ instanceId: 'sub2api:own-instance', costUsd: 1, records: 1, tokens: 2, state: 'measured', coverageBasis: 'stored_records' })
   })
 
@@ -50,7 +51,7 @@ describe('source-bound Sub2API window reader', () => {
     const partial = await readSub2apiWindow(connection, window)
     expect(partial).toMatchObject({ costUsd: 1, state: 'partial' })
     mocks.get.mockRejectedValueOnce({ response: { status: 401 } })
-    expect(await readSub2apiWindow(connection, window)).toMatchObject({ costUsd: null, state: 'unavailable', reason: '本实例只读查询失败（HTTP 401）' })
+    expect(await readSub2apiWindow(connection, window)).toMatchObject({ costUsd: null, state: 'unavailable', reason: expect.stringContaining('HTTP 401') })
     mocks.get.mockResolvedValueOnce({ data: { items: [] } })
     expect(await readSub2apiWindow(connection, window)).toMatchObject({ costUsd: 0, tokens: 0, records: 0, state: 'empty' })
   })

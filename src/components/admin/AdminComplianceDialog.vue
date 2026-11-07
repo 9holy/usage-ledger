@@ -106,6 +106,8 @@ import Input from '@/components/common/Input.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAdminComplianceStore, useAppStore, useAuthStore } from '@/stores'
 import { getLocale } from '@/i18n'
+import { redirectToAppPath } from '@/api/url'
+import { sanitizeNavigationUrl } from '@/utils/url'
 import zhDocument from '../../../docs/legal/admin-compliance.zh.md?raw'
 import enDocument from '../../../docs/legal/admin-compliance.en.md?raw'
 
@@ -127,9 +129,9 @@ const canSubmit = computed(() => typedPhrase.value.trim() === expectedPhrase.val
 const currentDocument = computed(() => getLocale() === 'zh' ? zhDocument : enDocument)
 const documentUrl = computed(() => {
   if (getLocale() === 'zh') {
-    return complianceStore.status?.document_url_zh || 'https://github.com/Wei-Shaw/sub2api/blob/main/docs/legal/admin-compliance.zh.md'
+    return sanitizeNavigationUrl(complianceStore.status?.document_url_zh) || 'https://github.com/Wei-Shaw/sub2api/blob/main/docs/legal/admin-compliance.zh.md'
   }
-  return complianceStore.status?.document_url_en || 'https://github.com/Wei-Shaw/sub2api/blob/main/docs/legal/admin-compliance.en.md'
+  return sanitizeNavigationUrl(complianceStore.status?.document_url_en) || 'https://github.com/Wei-Shaw/sub2api/blob/main/docs/legal/admin-compliance.en.md'
 })
 const inputError = computed(() => {
   if (!attemptedSubmit.value || canSubmit.value) {
@@ -179,7 +181,7 @@ async function submit(): Promise<void> {
 
 async function logout(): Promise<void> {
   await authStore.logout()
-  window.location.href = '/login'
+  redirectToAppPath('/login')
 }
 </script>
 

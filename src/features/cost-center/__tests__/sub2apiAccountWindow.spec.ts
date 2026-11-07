@@ -277,7 +277,7 @@ describe('sub2api 逐账号观察窗口统计接入', () => {
     expect(Object.values(data.rangeAccountStats.value).reduce((n, row) => n + row.requests, 0)).toBe(2)
     expect(data.accounts.value.map(row => String(row.id))).not.toContain(UNATTRIBUTED_USAGE_ACCOUNT_ID)
     expect(data.sourceStates.value.rangeStats.status).toBe('partial')
-    expect(data.sourceStates.value.rangeStats.reason).toContain('1 条请求未归属账号')
+    expect(data.sourceStates.value.rangeStats.reason).toContain('1 条请求还不能确定所属账号')
     expect(data.rangeAccountStatsWindow.value).not.toBeNull()
     expect(data.rangeAccountStatsScope.value?.source).toBe('sub2api')
   })

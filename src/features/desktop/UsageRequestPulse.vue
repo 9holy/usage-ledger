@@ -2,27 +2,34 @@
 import { usageLocale } from '@/utils/usageFormat'
 import { useI18n } from 'vue-i18n'
 import { computed } from 'vue'
-import { monitorToken, type MonitorRequest } from '@/api/usageMonitor'
+import { monitorIsUnitemizedRecord, monitorToken, type MonitorRequest } from '@/api/usageMonitor'
 import { usageColors, usageIntensityColor } from './usageChartPalette'
 
 const { t } = useI18n()
 const props = defineProps<{ requests: MonitorRequest[]; selected: string | null }>()
 const emit = defineEmits<{ select: [id: string, event: MouseEvent] }>()
 const rows = computed(() => props.requests.map(row => ({ ...row, output: monitorToken(row, 'output_tokens') })))
+const unitemizedCount = computed(() => props.requests.filter(monitorIsUnitemizedRecord).length)
+const recordCounts = computed(() => unitemizedCount.value > 0)
 const knownCount = computed(() => rows.value.filter(row => row.output != null).length)
 const maximum = computed(() => Math.max(0, ...rows.value.map(row => row.output ?? 0)))
 const peakIndex = computed(() => maximum.value > 0 ? rows.value.findIndex(row => row.output === maximum.value) : -1)
 const total = computed(() => rows.value.reduce((sum, row) => sum + (row.output ?? 0), 0))
 const number = (value: number) => value.toLocaleString(usageLocale())
-const title = (row: typeof rows.value[number], index: number) => t('usageMonitor.text.requestOnThisPage', { value0: index + 1, value1: row.model || t('usageMonitor.text.modelNotRecorded2'), value2: row.output == null ? t('usageMonitor.text.outputNotRecorded') : number(row.output) + t('usageMonitor.text.outputTokens2'), value3: new Date(row.timestampMs).toLocaleTimeString(usageLocale(), { hour12: false }) })
+function recordedTime(row: MonitorRequest): string {
+  if (row.unknownFields.includes('timestamp')) return t('usageMonitor.text.requestTimeUnknown')
+  if (monitorIsUnitemizedRecord(row)) return t('usageMonitor.text.cumulativeIntervalUnknown')
+  return new Date(row.timestampMs).toLocaleTimeString(usageLocale(), { hour12: false })
+}
+const title = (row: typeof rows.value[number], index: number) => t(recordCounts.value ? 'usageMonitor.text.usageRecordOnThisPage' : 'usageMonitor.text.requestOnThisPage', { value0: index + 1, value1: row.model || t('usageMonitor.text.modelNotRecorded2'), value2: row.output == null ? t('usageMonitor.text.outputNotRecorded') : number(row.output) + t('usageMonitor.text.outputTokens2'), value3: recordedTime(row) })
 </script>
 
 <template>
-  <section v-if="requests.length" class="request-pulse" :aria-label="t('usageMonitor.text.outputForEachRequestOnTheCurrentPage')">
-    <header><div><h3>{{ t('usageMonitor.text.outputPerRequest') }}</h3><p>{{ t('usageMonitor.text.currentPage') }} {{ requests.length }} {{ t('usageMonitor.text.requests13') }} <template v-if="knownCount">{{ t('usageMonitor.text.recorded2') }} {{ number(total) }} {{ t('usageMonitor.text.outputTokens') }}<span v-if="knownCount < requests.length"> · {{ requests.length - knownCount }} {{ t('usageMonitor.text.requestsLackOutputRecords') }}</span></template><template v-else>{{ t('usageMonitor.text.outputCountsUnavailable') }}</template></p></div><span>{{ rows.some(row => row.output != null) ? t('usageMonitor.text.maximum') + number(maximum) + ' Token' : t('usageMonitor.text.outputNotYetRecorded') }}</span></header>
+  <section v-if="requests.length" class="request-pulse" :aria-label="t(recordCounts ? 'usageMonitor.text.outputForEachUsageRecordOnTheCurrentPage' : 'usageMonitor.text.outputForEachRequestOnTheCurrentPage')">
+    <header><div><h3>{{ t(recordCounts ? 'usageMonitor.text.outputPerUsageRecord' : 'usageMonitor.text.outputPerRequest') }}</h3><p>{{ t('usageMonitor.text.currentPage') }} <template v-if="recordCounts">{{ t('usageMonitor.text.unitemizedRecordCount', { count: number(requests.length), unitemized: number(unitemizedCount) }) }} · </template><template v-else>{{ requests.length }} {{ t('usageMonitor.text.requests13') }}</template> <template v-if="knownCount">{{ t('usageMonitor.text.recorded2') }} {{ number(total) }} {{ t('usageMonitor.text.outputTokens') }}<span v-if="knownCount < requests.length"> · {{ requests.length - knownCount }} {{ t(recordCounts ? 'usageMonitor.text.recordsLackOutputRecords' : 'usageMonitor.text.requestsLackOutputRecords') }}</span></template><template v-else>{{ t('usageMonitor.text.outputCountsUnavailable') }}</template></p></div><span>{{ rows.some(row => row.output != null) ? t('usageMonitor.text.maximum') + number(maximum) + ' Token' : t('usageMonitor.text.outputNotYetRecorded') }}</span></header>
     <div class="pulse-key"><span>{{ t('usageMonitor.text.outputOnThisPage') }}</span><span>{{ t('usageMonitor.text.less') }}</span><i aria-hidden="true" /><span>{{ t('usageMonitor.text.more') }}</span></div>
-    <div class="pulse-scroll" tabindex="0" role="region" :aria-label="t('usageMonitor.text.requestOutputChart')"><div class="pulse-grid" :style="{ gridTemplateColumns: `repeat(${requests.length}, minmax(16px, 1fr))` }"><button v-for="(row, index) in rows" :key="row.id" :class="{ 'is-selected': selected === row.id, unknown: row.output == null, peak: index === peakIndex }" :style="{ '--pulse-color': row.output == null ? usageColors.unknown : usageIntensityColor(row.output, maximum) }" :aria-label="title(row, index)" :aria-pressed="selected === row.id" :title="title(row, index)" @click="emit('select', row.id, $event)"><span class="pulse-column"><i v-if="row.output != null" :style="{ height: (maximum ? row.output / maximum * 100 : 0) + '%' }" /><b v-else>?</b></span><span class="pulse-dot" /><small v-if="index === 0 || index === rows.length - 1 || (index + 1) % 10 === 0">{{ index + 1 }}</small></button></div></div>
-    <footer><span>{{ t('usageMonitor.text.usesTheOrderOfTheListBelowDoesNot') }}</span><span v-if="rows.some(row => row.output == null)">{{ t('usageMonitor.text.meansOutputWasNotRecordedForThatRequest') }}</span></footer>
+    <div class="pulse-scroll" tabindex="0" role="region" :aria-label="t(recordCounts ? 'usageMonitor.text.usageRecordOutputChart' : 'usageMonitor.text.requestOutputChart')"><div class="pulse-grid" :style="{ gridTemplateColumns: `repeat(${requests.length}, minmax(16px, 1fr))` }"><button v-for="(row, index) in rows" :key="row.id" :class="{ 'is-selected': selected === row.id, unknown: row.output == null, peak: index === peakIndex }" :style="{ '--pulse-color': row.output == null ? usageColors.unknown : usageIntensityColor(row.output, maximum) }" :aria-label="title(row, index)" :aria-pressed="selected === row.id" :title="title(row, index)" @click="emit('select', row.id, $event)"><span class="pulse-column"><i v-if="row.output != null" :style="{ height: (maximum ? row.output / maximum * 100 : 0) + '%' }" /><b v-else>?</b></span><span class="pulse-dot" /><small v-if="index === 0 || index === rows.length - 1 || (index + 1) % 10 === 0">{{ index + 1 }}</small></button></div></div>
+    <footer><span>{{ t('usageMonitor.text.usesTheOrderOfTheListBelowDoesNot') }}</span><span v-if="rows.some(row => row.output == null)">{{ t(recordCounts ? 'usageMonitor.text.meansOutputWasNotRecordedForThatRecord' : 'usageMonitor.text.meansOutputWasNotRecordedForThatRequest') }}</span></footer>
   </section>
 </template>
 

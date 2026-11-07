@@ -1,6 +1,33 @@
 use super::{pricing, types::*};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
+pub(super) const MAX_EXACT_TOKENS: i64 = 9_007_199_254_740_991;
+
+pub(super) fn validate_token_totals(conn: &Connection) -> Result<(), String> {
+    // SUM each integer bucket separately: adding JSON integers inside SQLite can
+    // promote an overflowing expression to REAL before SUM notices the problem.
+    let sums: (i64,i64,i64,i64,i64,i64,i64,i64,i64,i64) = conn.query_row("SELECT
+        COALESCE(SUM(json_extract(usage,'$.inputTokens')),0),
+        COALESCE(SUM(json_extract(usage,'$.outputTokens')),0),
+        COALESCE(SUM(json_extract(usage,'$.cacheReadTokens')),0),
+        COALESCE(SUM(json_extract(usage,'$.cacheWriteTokens')),0),
+        COALESCE(SUM(json_extract(usage,'$.reasoningTokens')),0),
+        COALESCE(MIN(json_extract(usage,'$.inputTokens')),0),
+        COALESCE(MIN(json_extract(usage,'$.outputTokens')),0),
+        COALESCE(MIN(json_extract(usage,'$.cacheReadTokens')),0),
+        COALESCE(MIN(json_extract(usage,'$.cacheWriteTokens')),0),
+        COALESCE(MIN(json_extract(usage,'$.reasoningTokens')),0)
+        FROM monitor_requests INDEXED BY monitor_requests_token_totals", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)))
+        .map_err(|error| format!("Usage token totals cannot be represented exactly: {error}"))?;
+    if [sums.0,sums.1,sums.2,sums.3,sums.4].into_iter().any(|value| !(0..=MAX_EXACT_TOKENS).contains(&value))
+        || [sums.5,sums.6,sums.7,sums.8,sums.9].into_iter().any(|minimum| minimum < 0)
+        || sums.0.checked_add(sums.1).is_none_or(|total| total > MAX_EXACT_TOKENS)
+    {
+        return Err("Usage token totals exceed the exact supported integer range".into());
+    }
+    Ok(())
+}
+
 pub fn initialize(conn: &Connection) -> Result<(), String> {
     super::billing::initialize(conn)?;
     conn.execute_batch(
@@ -16,6 +43,10 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
          CREATE INDEX IF NOT EXISTS monitor_requests_turn ON monitor_requests(session_key,json_extract(usage,'$.turnId'));
          CREATE INDEX IF NOT EXISTS monitor_requests_time ON monitor_requests(timestamp_ms);
          CREATE INDEX IF NOT EXISTS monitor_requests_tool_time ON monitor_requests(tool,timestamp_ms);
+         CREATE INDEX IF NOT EXISTS monitor_requests_token_totals ON monitor_requests(
+           json_extract(usage,'$.inputTokens'),json_extract(usage,'$.outputTokens'),
+           json_extract(usage,'$.cacheReadTokens'),json_extract(usage,'$.cacheWriteTokens'),
+           json_extract(usage,'$.reasoningTokens'));
          CREATE INDEX IF NOT EXISTS monitor_requests_request_timing ON monitor_requests(session_key,timestamp_ms DESC)
            WHERE json_extract(usage,'$.requestTiming.durationMs')>0;
          CREATE TABLE IF NOT EXISTS monitor_turns (
@@ -35,12 +66,125 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
          CREATE TABLE IF NOT EXISTS monitor_observations (
             tool TEXT NOT NULL, id TEXT NOT NULL, session_key TEXT NOT NULL,
             observed_ms INTEGER NOT NULL, output_tokens INTEGER NOT NULL);
-         CREATE INDEX IF NOT EXISTS monitor_observations_time ON monitor_observations(observed_ms);",
+         CREATE INDEX IF NOT EXISTS monitor_observations_time ON monitor_observations(observed_ms);
+         CREATE INDEX IF NOT EXISTS monitor_observations_request ON monitor_observations(tool,id,session_key,observed_ms);",
     ).map_err(|e| e.to_string())?;
     super::quota::initialize(conn)?;
     super::live::initialize(conn)?;
     supplement_cache_cohort(conn)?;
-    supplement_completeness(conn)
+    supplement_completeness(conn)?;
+    supplement_usage_quality(conn)?;
+    migrate_codex_response_namespace(conn)?;
+    supplement_live_observation_totals(conn)
+}
+
+fn migrate_codex_response_namespace(conn: &Connection) -> Result<(), String> {
+    let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let done: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='codex_response_namespace_v2')",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if done { return Ok(()); }
+    let requests = {
+        let mut query = tx.prepare("SELECT id,usage FROM monitor_requests WHERE tool='codex' AND id LIKE 'response:%'")
+            .map_err(|e| e.to_string())?;
+        let rows = query.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?
+    };
+    for (old, json) in requests {
+        let usage: UsageRecord = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        let response = old.strip_prefix("response:").unwrap();
+        if usage.session_id.is_empty() || usage.request_id.as_deref().is_some_and(|id| id != response) {
+            return Err("Stored Codex response has inconsistent native/session identity".into());
+        }
+        let id = super::parser::codex_request_id(&usage.session_id, response);
+        // A collision here represents inconsistent pre-existing rows, not a
+        // migration choice that can safely be resolved by dropping either row.
+        let conflict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM monitor_requests WHERE tool='codex' AND id=?1)", [&id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if conflict { return Err("Conflicting already-namespaced Codex response; ledger preserved".into()); }
+        tx.execute("UPDATE monitor_requests SET id=?2,usage=json_set(usage,'$.id',?2,'$.requestId',?3) WHERE tool='codex' AND id=?1",
+            params![old,id,response]).map_err(|e| e.to_string())?;
+        tx.execute("UPDATE monitor_original_api_quotes SET id=?2 WHERE tool='codex' AND id=?1", params![old,id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("INSERT OR IGNORE INTO monitor_api_requests SELECT ?2 FROM monitor_api_requests WHERE id=?1", params![old,id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM monitor_api_requests WHERE id=?1", [&old]).map_err(|e| e.to_string())?;
+        tx.execute("INSERT OR IGNORE INTO monitor_request_quota_evidence SELECT ?2,home,reset_ms,plan FROM monitor_request_quota_evidence WHERE id=?1", params![old,id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM monitor_request_quota_evidence WHERE id=?1", [&old]).map_err(|e| e.to_string())?;
+    }
+    let observations = {
+        let mut query = tx.prepare("SELECT DISTINCT id,session_key FROM monitor_observations WHERE tool='codex' AND id LIKE 'response:%'")
+            .map_err(|e| e.to_string())?;
+        let rows = query.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?
+    };
+    for (old, session) in observations {
+        // Old overwrites could leave observations from both threads. Their own
+        // session keys remain evidence; never move all of them to the survivor.
+        let thread = session.strip_prefix("codex:").filter(|id| !id.is_empty())
+            .ok_or("Stored Codex observation lacks a session identity")?;
+        let id = super::parser::codex_request_id(thread, old.strip_prefix("response:").unwrap());
+        tx.execute("UPDATE monitor_observations SET id=?3 WHERE tool='codex' AND id=?1 AND session_key=?2", params![old,session,id])
+            .map_err(|e| e.to_string())?;
+    }
+    let files = {
+        let mut query = tx.prepare("SELECT path,state FROM monitor_files WHERE tool='codex'")
+            .map_err(|e| e.to_string())?;
+        let rows = query.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?
+    };
+    for (path, saved) in files {
+        let mut state: serde_json::Value = serde_json::from_str(&saved).map_err(|e| e.to_string())?;
+        if super::parser::scope_cursor_response_ids(&mut state)? {
+            tx.execute("UPDATE monitor_files SET state=?2 WHERE path=?1", params![path,serde_json::to_string(&state).map_err(|e| e.to_string())?])
+                .map_err(|e| e.to_string())?;
+        }
+        // A previously overwritten request can only be recovered from its raw
+        // source. Keep missing files' existing cursor/history; replay when present.
+        tx.execute("INSERT OR IGNORE INTO monitor_state VALUES(?1,'1')", [format!("codex_identity_replay_v2:{path}")])
+            .map_err(|e| e.to_string())?;
+    }
+    super::billing::invalidate_proxy_matches(&tx)?;
+    tx.execute("INSERT INTO monitor_state VALUES('codex_response_namespace_v2','1')", [])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn supplement_live_observation_totals(conn: &Connection) -> Result<(), String> {
+    let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let done: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='live_observation_corrections_v1')",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if done { return Ok(()); }
+    let excess = {
+        let mut query = tx.prepare("SELECT o.tool,o.id,o.session_key,
+            SUM(o.output_tokens)-json_extract(r.usage,'$.outputTokens')
+          FROM monitor_observations o JOIN monitor_requests r
+            ON r.tool=o.tool AND r.id=o.id AND r.session_key=o.session_key
+          WHERE o.output_tokens>0 AND json_type(r.usage,'$.outputTokens')='integer'
+            AND json_extract(r.usage,'$.outputTokens')>=0
+            AND NOT EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='output_tokens')
+          GROUP BY o.tool,o.id,o.session_key,r.usage
+          HAVING SUM(o.output_tokens)>json_extract(r.usage,'$.outputTokens')")
+            .map_err(|e| e.to_string())?;
+        let rows = query.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,
+            row.get::<_,String>(2)?,row.get::<_,i64>(3)?))).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?
+    };
+    for (tool,id,session,excess) in excess {
+        retract_output_observations(&tx,&tool,&id,Some(&session),excess)?;
+    }
+    tx.execute("INSERT INTO monitor_state VALUES('live_observation_corrections_v1','1')",[])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 fn supplement_cache_cohort(conn: &Connection) -> Result<(), String> {
@@ -69,6 +213,38 @@ fn supplement_cache_cohort(conn: &Connection) -> Result<(), String> {
             '$.cacheKnownRequests',COALESCE((SELECT requests FROM cohort WHERE session_key=monitor_sessions.key),0),
             '$.knownCacheHitRatio',(SELECT reads*1.0/NULLIF(input,0) FROM cohort WHERE session_key=monitor_sessions.key));
           INSERT INTO monitor_state(key,data) VALUES('cache_cohort_totals_v1','1');").map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn supplement_usage_quality(conn: &Connection) -> Result<(), String> {
+    let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let done: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='usage_quality_totals_v1')",
+        [], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !done {
+        // Preserve all other totals/extension fields while deriving completeness
+        // from the durable records, including pre-upgrade sessions.
+        tx.execute_batch("WITH quality AS MATERIALIZED (
+            SELECT session_key,
+              SUM(COALESCE(json_extract(usage,'$.usageBasis') IN
+                ('legacy_initial_cumulative','legacy_cumulative_delta'),0)) AS unitemized,
+              SUM(EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='input_tokens')) AS input_unknown,
+              SUM(EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='output_tokens')) AS output_unknown,
+              SUM(EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='cache_read_tokens')) AS read_unknown,
+              SUM(EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='cache_write_tokens')) AS write_unknown
+            FROM monitor_requests GROUP BY session_key
+          )
+          UPDATE monitor_sessions SET totals=json_set(totals,
+            '$.unitemizedRecords',COALESCE((SELECT unitemized FROM quality WHERE session_key=monitor_sessions.key),0),
+            '$.inputUnknownRequests',COALESCE((SELECT input_unknown FROM quality WHERE session_key=monitor_sessions.key),0),
+            '$.outputUnknownRequests',COALESCE((SELECT output_unknown FROM quality WHERE session_key=monitor_sessions.key),0),
+            '$.cacheReadUnknownRequests',COALESCE((SELECT read_unknown FROM quality WHERE session_key=monitor_sessions.key),0),
+            '$.cacheWriteUnknownRequests',COALESCE((SELECT write_unknown FROM quality WHERE session_key=monitor_sessions.key),0));
+          INSERT INTO monitor_state VALUES('usage_quality_totals_v1','1');")
+            .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())
 }
@@ -585,10 +761,20 @@ pub fn apply_runtime_mode_batch(
     observations: &[RuntimeModeObservation],
     next_cursor: &RuntimeModeCursor,
 ) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    apply_runtime_mode_batch_in_transaction(&tx, source_path, observations, next_cursor)?;
+    tx.commit().map_err(|error| error.to_string())
+}
+
+pub(super) fn apply_runtime_mode_batch_in_transaction(
+    tx: &Transaction<'_>,
+    source_path: &str,
+    observations: &[RuntimeModeObservation],
+    next_cursor: &RuntimeModeCursor,
+) -> Result<(), String> {
     if source_path.is_empty() || next_cursor.id < 0 {
         return Err("Invalid runtime mode source cursor".into());
     }
-    let tx = conn.transaction().map_err(|error| error.to_string())?;
     let mut changed = std::collections::BTreeSet::new();
     for observation in observations {
         let mode = if matches!(observation.mode.as_str(), "auto" | "unknown") {
@@ -707,7 +893,7 @@ pub fn apply_runtime_mode_batch(
     }
     tx.execute("INSERT INTO monitor_state(key,data) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET data=excluded.data",
         params![format!("codex_runtime_mode_cursor:{source_path}"),serde_json::to_string(next_cursor).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
-    tx.commit().map_err(|error| error.to_string())
+    Ok(())
 }
 
 pub fn save_session(tx: &Transaction<'_>, meta: &SessionMeta) -> Result<(), String> {
@@ -815,11 +1001,25 @@ pub(super) fn adjust(
     merge_price_summary(&mut totals.price_summary, &summary, sign);
     let automatic = usage_automatic_price_summary(usage, cost);
     merge_automatic_price_summary(&mut totals.automatic_price_summary, &automatic, sign);
-    totals.input_tokens += sign * usage.input_tokens;
-    totals.output_tokens += sign * usage.output_tokens;
-    totals.cache_read_tokens += sign * usage.cache_read_tokens;
-    totals.cache_write_tokens += sign * usage.cache_write_tokens;
+    for (target, value) in [
+        (&mut totals.input_tokens, usage.input_tokens),
+        (&mut totals.output_tokens, usage.output_tokens),
+        (&mut totals.cache_read_tokens, usage.cache_read_tokens),
+        (&mut totals.cache_write_tokens, usage.cache_write_tokens),
+    ] {
+        *target = value.checked_mul(sign).and_then(|change| target.checked_add(change))
+            .ok_or("session token aggregate overflow")?;
+    }
     totals.request_count += sign;
+    totals.unitemized_records += sign * i64::from(usage.is_unitemized());
+    for (field, count) in [
+        ("input_tokens", &mut totals.input_unknown_requests),
+        ("output_tokens", &mut totals.output_unknown_requests),
+        ("cache_read_tokens", &mut totals.cache_read_unknown_requests),
+        ("cache_write_tokens", &mut totals.cache_write_unknown_requests),
+    ] {
+        *count += sign * i64::from(usage.unknown_fields.iter().any(|unknown| unknown == field));
+    }
     totals.priced_cost_usd += sign as f64 * cost.usd.unwrap_or(0.0);
     totals.priced_cost_cny += sign as f64 * cost.cny.unwrap_or(0.0);
     totals.unpriced_requests += sign * i64::from(cost.usd.is_none() && cost.cny.is_none());
@@ -841,20 +1041,32 @@ pub(super) fn adjust(
         .any(|f| matches!(f.as_str(), "input_tokens" | "cache_read_tokens"));
     totals.cache_unknown_requests += sign * i64::from(!cache_known);
     if cache_known {
-        totals.known_cache_input_tokens += sign * usage.input_tokens;
-        totals.known_cache_read_tokens += sign * usage.cache_read_tokens;
+        totals.known_cache_input_tokens = usage.input_tokens.checked_mul(sign)
+            .and_then(|change| totals.known_cache_input_tokens.checked_add(change)).ok_or("known-cache token aggregate overflow")?;
+        totals.known_cache_read_tokens = usage.cache_read_tokens.checked_mul(sign)
+            .and_then(|change| totals.known_cache_read_tokens.checked_add(change)).ok_or("known-cache token aggregate overflow")?;
         totals.cache_known_requests += sign;
     }
     totals.known_cache_hit_ratio = cache_ratio(
         totals.known_cache_input_tokens,
         totals.known_cache_read_tokens,
     );
-    totals.total_tokens = totals.input_tokens + totals.output_tokens;
+    totals.total_tokens = totals.input_tokens.checked_add(totals.output_tokens)
+        .filter(|total| *total <= MAX_EXACT_TOKENS).ok_or("Session token total overflow: exceeds the exact supported integer range")?;
     let unpriced = cost.usd.is_none() && cost.cny.is_none();
     let tokens_known = !usage
         .unknown_fields
         .iter()
         .any(|field| matches!(field.as_str(), "input_tokens" | "output_tokens"));
+    if let Some(reasoning) = usage.reasoning_tokens {
+        reasoning.checked_mul(sign).and_then(|change| totals.reasoning_tokens.checked_add(change))
+            .ok_or("reasoning token aggregate overflow")?;
+    }
+    let unpriced_tokens = (unpriced && tokens_known).then_some(usage.input_tokens + usage.output_tokens);
+    if let Some(tokens) = unpriced_tokens {
+        tokens.checked_mul(sign).and_then(|change| totals.unpriced_tokens.checked_add(change))
+            .ok_or("unpriced token aggregate overflow")?;
+    }
     add_completeness(
         &mut totals,
         usage.reasoning_tokens,
@@ -863,7 +1075,7 @@ pub(super) fn adjust(
             .as_deref()
             .filter(|_| usage.mode_basis == "response_reported"),
         usage.requested_mode.as_deref(),
-        (unpriced && tokens_known).then_some(usage.input_tokens + usage.output_tokens),
+        unpriced_tokens,
         unpriced_reason(unpriced, !cost.scenarios.is_empty(), cost.reason.as_deref()),
         sign,
     );
@@ -960,7 +1172,10 @@ fn backfill_unquoted_with_catalog(
             if old.usd.is_some() || old.cny.is_some() || !old.scenarios.is_empty() {
                 continue;
             }
-            let next = pricing::estimate_with_catalog(&usage, catalog);
+            let api = pricing::estimate_with_catalog(&usage, catalog);
+            // Backfill uses the same billing projection as ordinary ingestion,
+            // including the frozen API quote needed to reverse subscription evidence.
+            let next = super::billing::price(&tx, &usage, &api, None)?;
             if serde_json::to_string(&old).map_err(|e| e.to_string())?
                 == serde_json::to_string(&next).map_err(|e| e.to_string())?
             {
@@ -1129,6 +1344,11 @@ pub(super) fn remove_snapshot_request(
             params![tool, id],
         )
         .map_err(|e| e.to_string())?;
+        if tool == "codex" {
+            // Matching cardinality can change solely because an obsolete peer
+            // disappeared, even when the retained request is an unchanged replay.
+            super::billing::invalidate_proxy_matches(tx)?;
+        }
     }
     Ok(())
 }
@@ -1169,6 +1389,114 @@ pub(super) fn save_snapshot_usage_with_catalog(
     save_usage_impl(tx, incoming, live_after_ms, observed_ms, catalog, false)
 }
 
+fn enrich_usage_partial(merged: &mut UsageRecord, known: &UsageRecord) -> Result<(), String> {
+    // Late partial chunks may enrich a completed request, but cannot erase known usage.
+    for field in merged.unknown_fields.clone().iter() {
+        if known.unknown_fields.contains(field) {
+            continue;
+        }
+        match field.as_str() {
+            "input_tokens" => {
+                merged.input_tokens = known.input_tokens;
+                merged.context_tokens = known.context_tokens;
+            }
+            "output_tokens" => merged.output_tokens = known.output_tokens,
+            "timestamp" => merged.timestamp_ms = known.timestamp_ms,
+            "cache_read_tokens" => merged.cache_read_tokens = known.cache_read_tokens,
+            "cache_write_tokens" => {
+                merged.cache_write_tokens = known.cache_write_tokens;
+                merged.cache_write_5m_tokens = known.cache_write_5m_tokens;
+                merged.cache_write_1h_tokens = known.cache_write_1h_tokens;
+            }
+            "per_request_input_tokens" => merged.context_tokens = known.context_tokens,
+            _ => continue,
+        }
+        merged.unknown_fields.retain(|v| v != field);
+    }
+    if merged.model.is_none()
+        || known.model_basis == "response_model"
+            && matches!(merged.model_basis.as_str(), "unknown" | "" | "turn_context_requested" | "model_reroute")
+    {
+        // Replayed/late partials can carry the current requested model. It
+        // cannot replace the model already reported for this exact response.
+        merged.model = known.model.clone();
+        merged.model_basis = known.model_basis.clone();
+    }
+    if merged.session_id == known.session_id {
+        if merged.turn_id.is_empty() {
+            merged.turn_id = known.turn_id.clone();
+        }
+        if merged.root_turn_id.is_none() {
+            merged.root_turn_id = known.root_turn_id.clone();
+        }
+    }
+    if merged.source_input_tokens.is_none() {
+        merged.source_input_tokens = known.source_input_tokens;
+    }
+    if merged.tool == "claude" && merged.usage_basis == "assistant_message_usage" {
+        if let Some(uncached) = merged.source_input_tokens {
+            // Claude's source input bucket excludes cache. A late partial chunk can
+            // update cache after the parser's small recent-message cache is evicted.
+            merged.input_tokens = uncached
+                .checked_add(merged.cache_read_tokens)
+                .and_then(|tokens| tokens.checked_add(merged.cache_write_tokens))
+                .ok_or("token count overflow")?;
+            merged.unknown_fields.retain(|field| field != "uncached_input_tokens");
+            let cache_known = !merged.unknown_fields.iter().any(|field| {
+                matches!(field.as_str(), "cache_read_tokens" | "cache_write_tokens")
+            });
+            if cache_known {
+                merged.context_tokens = Some(merged.input_tokens);
+                merged.unknown_fields.retain(|field| field != "input_tokens");
+            } else {
+                merged.context_tokens = None;
+                if !merged.unknown_fields.iter().any(|field| field == "input_tokens") {
+                    merged.unknown_fields.push("input_tokens".into());
+                }
+            }
+        }
+    }
+    // A missing TTL breakdown is partial evidence, not a replacement. Only
+    // reuse it when the explicitly reported total still describes that split.
+    if merged.cache_write_tokens == known.cache_write_tokens {
+        merged.cache_write_5m_tokens = merged.cache_write_5m_tokens.or(known.cache_write_5m_tokens);
+        merged.cache_write_1h_tokens = merged.cache_write_1h_tokens.or(known.cache_write_1h_tokens);
+    }
+    if merged.mode.is_none() {
+        merged.mode = known.mode.clone();
+        merged.mode_basis = known.mode_basis.clone();
+    }
+    if merged.provider.is_none() {
+        merged.provider = known.provider.clone();
+        merged.provider_basis = known.provider_basis.clone();
+    }
+    if merged.reasoning_tokens.is_none() {
+        merged.reasoning_tokens = known.reasoning_tokens.filter(|tokens| *tokens <= merged.output_tokens);
+    }
+    if merged.runtime_mode.is_none()
+        && merged.session_id == known.session_id
+        && merged.turn_id == known.turn_id
+    {
+        merged.runtime_mode = known.runtime_mode.clone();
+    }
+    if merged.duration_ms.is_none() {
+        merged.duration_ms = known.duration_ms;
+    }
+    if let Some(old) = &known.request_timing {
+        if let Some(timing) = &mut merged.request_timing {
+            timing.started_at_ms = timing.started_at_ms.or(old.started_at_ms);
+            timing.completed_at_ms = timing.completed_at_ms.or(old.completed_at_ms);
+            timing.duration_ms = timing.duration_ms.or(old.duration_ms);
+            timing.ttft_ms = timing.ttft_ms.or(old.ttft_ms);
+            timing.streaming_duration_ms =
+                timing.streaming_duration_ms.or(old.streaming_duration_ms);
+        } else {
+            merged.request_timing = Some(old.clone());
+        }
+    }
+    Ok(())
+}
+
 fn save_usage_impl(
     tx: &Transaction<'_>,
     incoming: &UsageRecord,
@@ -1191,66 +1519,17 @@ fn save_usage_impl(
     let old = previous(tx, &incoming.tool, &incoming.id)?;
     let mut merged = incoming.clone();
     if let Some((known, _)) = old.as_ref().filter(|_| enrich_partial) {
-        // Late partial chunks may enrich a completed request, but cannot erase known usage.
-        for field in incoming.unknown_fields.iter() {
-            if known.unknown_fields.contains(field) {
-                continue;
-            }
-            match field.as_str() {
-                "input_tokens" => {
-                    merged.input_tokens = known.input_tokens;
-                    merged.context_tokens = known.context_tokens;
-                }
-                "output_tokens" => merged.output_tokens = known.output_tokens,
-                "cache_read_tokens" => merged.cache_read_tokens = known.cache_read_tokens,
-                "cache_write_tokens" => {
-                    merged.cache_write_tokens = known.cache_write_tokens;
-                    merged.cache_write_5m_tokens = known.cache_write_5m_tokens;
-                    merged.cache_write_1h_tokens = known.cache_write_1h_tokens;
-                }
-                "per_request_input_tokens" => merged.context_tokens = known.context_tokens,
-                _ => continue,
-            }
-            merged.unknown_fields.retain(|v| v != field);
-        }
-        if merged.model.is_none() {
-            merged.model = known.model.clone();
-            merged.model_basis = known.model_basis.clone();
-        }
-        if merged.source_input_tokens.is_none() {
-            merged.source_input_tokens = known.source_input_tokens;
-        }
-        if merged.mode.is_none() {
-            merged.mode = known.mode.clone();
-            merged.mode_basis = known.mode_basis.clone();
-        }
-        if merged.provider.is_none() {
-            merged.provider = known.provider.clone();
-            merged.provider_basis = known.provider_basis.clone();
-        }
-        if merged.reasoning_tokens.is_none() {
-            merged.reasoning_tokens = known.reasoning_tokens;
-        }
-        if merged.runtime_mode.is_none()
-            && merged.session_id == known.session_id
-            && merged.turn_id == known.turn_id
-        {
-            merged.runtime_mode = known.runtime_mode.clone();
-        }
-        if merged.duration_ms.is_none() {
-            merged.duration_ms = known.duration_ms;
-        }
-        if let Some(old) = &known.request_timing {
-            if let Some(timing) = &mut merged.request_timing {
-                timing.started_at_ms = timing.started_at_ms.or(old.started_at_ms);
-                timing.completed_at_ms = timing.completed_at_ms.or(old.completed_at_ms);
-                timing.duration_ms = timing.duration_ms.or(old.duration_ms);
-                timing.ttft_ms = timing.ttft_ms.or(old.ttft_ms);
-                timing.streaming_duration_ms =
-                    timing.streaming_duration_ms.or(old.streaming_duration_ms);
-            } else {
-                merged.request_timing = Some(old.clone());
-            }
+        let incoming_is_older = known.session_id == incoming.session_id
+            && incoming.timestamp_ms < known.timestamp_ms
+            && !incoming.unknown_fields.iter().any(|field| field == "timestamp")
+            && !known.unknown_fields.iter().any(|field| field == "timestamp");
+        if incoming_is_older {
+            // Keep the newer known facts. The older event may still supply fields
+            // omitted from that newer partial; do not discard that evidence.
+            merged = known.clone();
+            enrich_usage_partial(&mut merged, incoming)?;
+        } else {
+            enrich_usage_partial(&mut merged, known)?;
         }
     }
     if merged.tool == "codex" && !merged.turn_id.is_empty() {
@@ -1274,12 +1553,34 @@ fn save_usage_impl(
         merged.runtime_mode =
             evidence.and_then(|evidence| runtime_mode_for_usage(&merged, evidence));
     }
+    for count in [Some(merged.input_tokens), Some(merged.output_tokens), Some(merged.cache_read_tokens),
+        Some(merged.cache_write_tokens), merged.source_input_tokens, merged.reasoning_tokens,
+        merged.cache_write_5m_tokens, merged.cache_write_1h_tokens, merged.context_tokens].into_iter().flatten()
+    {
+        if count < 0 { return Err("negative usage token count".into()); }
+        if count > MAX_EXACT_TOKENS { return Err("Usage token count exceeds the exact supported integer range".into()); }
+    }
+    merged.input_tokens.checked_add(merged.output_tokens).filter(|total| *total <= MAX_EXACT_TOKENS)
+        .ok_or("Usage token total overflow: exceeds the exact supported integer range")?;
+    let cached = merged.cache_read_tokens.checked_add(merged.cache_write_tokens)
+        .filter(|total| *total <= MAX_EXACT_TOKENS)
+        .ok_or("Cache token total overflow: exceeds the exact supported integer range")?;
+    if !merged.unknown_fields.iter().any(|field| field == "input_tokens")
+        && cached > merged.input_tokens
+    {
+        return Err("cache tokens exceed normalized input tokens".into());
+    }
+    if !merged.unknown_fields.iter().any(|field| field == "output_tokens")
+        && merged.reasoning_tokens.is_some_and(|tokens| tokens > merged.output_tokens)
+    {
+        return Err("reasoning tokens exceed output tokens".into());
+    }
     merged.billing_scope=super::billing::classify(tx,&merged)?;
     let usage = &merged;
     let json = serde_json::to_string(usage).map_err(|e| e.to_string())?;
     if let Some((ref u, _)) = old {
         if serde_json::to_string(u).map_err(|e| e.to_string())? == json {
-            return Ok(());
+            return clamp_output_observations(tx, usage);
         }
     }
     let key = session_key(&usage.tool, &usage.session_id);
@@ -1326,7 +1627,13 @@ fn save_usage_impl(
         ON CONFLICT(tool,id) DO UPDATE SET session_key=excluded.session_key,timestamp_ms=excluded.timestamp_ms,usage=excluded.usage,cost=excluded.cost").map_err(|e|e.to_string())?
         .execute(params![usage.tool,usage.id,key,usage.timestamp_ms,json,serde_json::to_string(&cost).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
     adjust(tx, usage, &cost, 1)?;
+    if usage.tool == "codex" {
+        super::billing::invalidate_proxy_matches(tx)?;
+    }
     let delta = usage.output_tokens - prior_output;
+    if delta < 0 {
+        retract_output_observations(tx, &usage.tool, &usage.id, None, -delta)?;
+    }
     // LS timestamps identify request start. Only its reported full duration can establish
     // a later freshness endpoint; this arithmetic endpoint is not an observed timestamp.
     let output_time = (usage.tool == "antigravity" && usage.timestamp_ms > 0)
@@ -1336,15 +1643,58 @@ fn save_usage_impl(
         .and_then(|duration| usage.timestamp_ms.checked_add(duration))
         .unwrap_or(usage.timestamp_ms);
     // Old history/catch-up is durable usage, but is not output generated since this collector started.
-    if delta > 0
-        && usage.usage_basis != "legacy_initial_cumulative"
+    let output_unknown = usage.unknown_fields.iter().any(|field| field == "output_tokens");
+    if (delta > 0 || output_unknown)
+        && !usage.is_unitemized()
         && !usage.unknown_fields.iter().any(|f| f == "timestamp")
         && output_time >= live_after_ms
         && output_time <= observed_ms + 5_000
         && output_time >= observed_ms - 60_000
     {
         tx.prepare_cached("INSERT INTO monitor_observations(tool,id,session_key,observed_ms,output_tokens) VALUES(?1,?2,?3,?4,?5)").map_err(|e| e.to_string())?
-            .execute(params![usage.tool,usage.id,key,observed_ms,delta]).map_err(|e| e.to_string())?;
+            .execute(params![usage.tool,usage.id,key,observed_ms,delta.max(0)]).map_err(|e| e.to_string())?;
+    }
+    clamp_output_observations(tx, usage)
+}
+
+fn clamp_output_observations(tx: &Transaction<'_>, usage: &UsageRecord) -> Result<(), String> {
+    if usage.unknown_fields.iter().any(|field| field == "output_tokens") { return Ok(()); }
+    let session = session_key(&usage.tool,&usage.session_id);
+    let observed: i64 = tx.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM monitor_observations
+        WHERE tool=?1 AND id=?2 AND session_key=?3 AND output_tokens>0",
+        params![usage.tool,usage.id,session], |row| row.get(0)).map_err(|e| e.to_string())?;
+    if observed > usage.output_tokens {
+        // Recovering a previously overwritten row can reconnect orphan observations.
+        // Cap only its own retained evidence; never manufacture missing history.
+        retract_output_observations(tx,&usage.tool,&usage.id,Some(&session),observed-usage.output_tokens)?;
+    }
+    Ok(())
+}
+
+// Correct an over-reported partial without inventing negative output in a
+// later rolling window. Already-pruned or never-live history needs no retraction.
+fn retract_output_observations(
+    tx: &Transaction<'_>, tool: &str, id: &str, session: Option<&str>, mut excess: i64,
+) -> Result<(), String> {
+    let rows = {
+        let mut query = tx.prepare_cached("SELECT rowid,output_tokens FROM monitor_observations
+            WHERE tool=?1 AND id=?2 AND (?3 IS NULL OR session_key=?3) AND output_tokens>0 ORDER BY observed_ms DESC,rowid DESC")
+            .map_err(|e| e.to_string())?;
+        let rows = query.query_map(params![tool,id,session], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?
+    };
+    for (rowid, tokens) in rows {
+        if excess == 0 { break; }
+        let removed = tokens.min(excess);
+        if removed == tokens {
+            tx.execute("DELETE FROM monitor_observations WHERE rowid=?1", [rowid])
+                .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute("UPDATE monitor_observations SET output_tokens=?2 WHERE rowid=?1", params![rowid,tokens-removed])
+                .map_err(|e| e.to_string())?;
+        }
+        excess -= removed;
     }
     Ok(())
 }
@@ -1500,7 +1850,7 @@ fn completed_turn_summaries(
           ), latest AS (SELECT session_key,turn_id,data FROM ranked WHERE rank=1)
           SELECT l.session_key,l.data,COUNT(r.id),SUM(json_extract(r.usage,'$.outputTokens')),
             SUM(CASE WHEN json_type(r.usage,'$.outputTokens') IS NOT 'integer'
-              OR json_extract(r.usage,'$.usageBasis')='legacy_initial_cumulative'
+              OR json_extract(r.usage,'$.usageBasis') IN ('legacy_initial_cumulative','legacy_cumulative_delta')
               OR EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='output_tokens') THEN 1 ELSE 0 END)
           FROM latest l LEFT JOIN monitor_requests r
             ON r.session_key=l.session_key AND json_extract(r.usage,'$.turnId')=l.turn_id
@@ -1572,6 +1922,7 @@ pub fn sessions(
     tool: Option<&str>,
     now: i64,
 ) -> Result<Vec<SessionSummary>, String> {
+    validate_token_totals(conn)?;
     let mut stmt=conn.prepare("SELECT key,meta,totals FROM monitor_sessions WHERE (?1 IS NULL OR tool=?1) ORDER BY updated_ms DESC").map_err(|e|e.to_string())?;
     let rows = stmt
         .query_map([tool], |r| {
@@ -1602,7 +1953,7 @@ pub fn sessions(
             latest_completed_turn: None,
         });
     }
-    let mut rates=conn.prepare("SELECT r.session_key,SUM(o.output_tokens)/60.0 FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND COALESCE(json_extract(r.usage,'$.usageBasis'),'')!='legacy_initial_cumulative' GROUP BY r.session_key").map_err(|e|e.to_string())?;
+    let mut rates=conn.prepare("SELECT r.session_key,SUM(o.output_tokens)/60.0 FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND COALESCE(json_extract(r.usage,'$.usageBasis'),'') NOT IN ('legacy_initial_cumulative','legacy_cumulative_delta') GROUP BY r.session_key").map_err(|e|e.to_string())?;
     let rate_rows = rates
         .query_map(params![now - 60_000, now], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
@@ -1662,6 +2013,11 @@ pub(super) fn merge_totals(t: &mut Totals, s: &Totals) {
     t.cache_read_tokens += s.cache_read_tokens;
     t.cache_write_tokens += s.cache_write_tokens;
     t.request_count += s.request_count;
+    t.unitemized_records += s.unitemized_records;
+    t.input_unknown_requests += s.input_unknown_requests;
+    t.output_unknown_requests += s.output_unknown_requests;
+    t.cache_read_unknown_requests += s.cache_read_unknown_requests;
+    t.cache_write_unknown_requests += s.cache_write_unknown_requests;
     t.priced_cost_usd += s.priced_cost_usd;
     t.priced_cost_cny += s.priced_cost_cny;
     t.scenario_requests += s.scenario_requests;
@@ -1872,13 +2228,15 @@ pub fn session_detail_with_descendants(
             .entry(turn_id.clone())
             .or_insert_with(|| TurnSummary {
                 id: turn_id,
-                started_at_ms: row.timestamp_ms,
-                updated_at_ms: row.timestamp_ms,
+                started_at_ms: 0,
+                updated_at_ms: 0,
                 totals: Totals::default(),
                 timing: None,
             });
-        turn.started_at_ms = turn.started_at_ms.min(row.timestamp_ms);
-        turn.updated_at_ms = turn.updated_at_ms.max(row.timestamp_ms);
+        if row.period_locatable {
+            turn.started_at_ms = if turn.started_at_ms == 0 { row.timestamp_ms } else { turn.started_at_ms.min(row.timestamp_ms) };
+            turn.updated_at_ms = turn.updated_at_ms.max(row.timestamp_ms);
+        }
         merge_totals(&mut turn.totals, &row.totals);
     })?;
     let mut query = conn
@@ -1911,6 +2269,12 @@ pub fn session_detail_with_descendants(
     let mut turns: Vec<_> = by_turn.into_values().collect();
     for (id, timing) in saved_timings {
         if let Some(turn) = turns.iter_mut().find(|turn| turn.id == id) {
+            if let Some(start) = timing.started_at_ms.filter(|time| *time > 0) {
+                turn.started_at_ms = if turn.started_at_ms == 0 { start } else { turn.started_at_ms.min(start) };
+            }
+            if let Some(end) = timing.completed_at_ms.or(timing.started_at_ms).filter(|time| *time > 0) {
+                turn.updated_at_ms = turn.updated_at_ms.max(end);
+            }
             turn.timing = Some(timing);
         } else if period.model.is_none() {
             if let Some(time) = timing
@@ -1976,6 +2340,580 @@ mod completeness_tests {
         )
         .unwrap();
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn late_partial_keeps_timestamp_and_cache_breakdown_across_parser_restart() {
+        use super::super::parser::{parse_line, ParserState};
+        use serde_json::json;
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let path = std::path::Path::new("projects/session.jsonl");
+        let mut row = json!({"type":"assistant","sessionId":"session","timestamp":"2026-10-15T17:00:00Z",
+            "message":{"id":"late","model":"claude-opus-5-5","usage":{
+                "input_tokens":50,"output_tokens":7,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,
+                "cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20},"speed":"standard"}}});
+        let original = parse_line(&mut ParserState::default(), "claude", path, &row.to_string(), 0)
+            .unwrap().usage.remove(0);
+        save(&mut conn, &original);
+        let original_cost: String = conn.query_row("SELECT cost FROM monitor_requests WHERE id=?1", [&original.id], |r| r.get(0)).unwrap();
+        row.as_object_mut().unwrap().remove("timestamp");
+        row["message"]["usage"].as_object_mut().unwrap().remove("cache_creation");
+        let incoming = parse_line(&mut ParserState::default(), "claude", path, &row.to_string(), original.timestamp_ms + 86_400_000)
+            .unwrap().usage.remove(0);
+        save(&mut conn, &incoming);
+        let (stored, cost): (String, String) = conn.query_row("SELECT usage,cost FROM monitor_requests WHERE id=?1", [&original.id], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        let stored: UsageRecord = serde_json::from_str(&stored).unwrap();
+        assert_eq!(stored.timestamp_ms, original.timestamp_ms);
+        assert!(!stored.unknown_fields.contains(&"timestamp".into()));
+        assert_eq!((stored.cache_write_5m_tokens, stored.cache_write_1h_tokens), (Some(10), Some(20)));
+        assert_eq!(cost, original_cost);
+        assert_eq!(sum_sessions(&sessions(&conn, None, original.timestamp_ms).unwrap()).request_count, 1);
+    }
+
+    #[test]
+    fn late_claude_cache_update_preserves_uncached_input_and_renormalizes_total() {
+        use super::super::parser::{parse_line, ParserState};
+        use serde_json::json;
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let path = std::path::Path::new("projects/session.jsonl");
+        let mut row = json!({"type":"assistant","sessionId":"session","timestamp":"2026-10-15T17:00:00Z",
+            "message":{"id":"cache-update","model":"claude-opus-5-5","usage":{
+                "input_tokens":50,"output_tokens":7,"cache_read_input_tokens":20,"cache_creation_input_tokens":0,"speed":"standard"}}});
+        let original = parse_line(&mut ParserState::default(), "claude", path, &row.to_string(), 0)
+            .unwrap().usage.remove(0);
+        save(&mut conn, &original);
+        row["message"]["usage"].as_object_mut().unwrap().remove("input_tokens");
+        row["message"]["usage"]["cache_read_input_tokens"] = json!(40);
+        let incoming = parse_line(&mut ParserState::default(), "claude", path, &row.to_string(), 0)
+            .unwrap().usage.remove(0);
+        save(&mut conn, &incoming);
+        let (stored, _) = previous(&conn, "claude", &original.id).unwrap().unwrap();
+        assert_eq!(stored.source_input_tokens, Some(50));
+        assert_eq!(stored.input_tokens, 90);
+        assert_eq!(stored.context_tokens, Some(90));
+        assert_eq!(stored.cache_read_tokens, 40);
+        assert!(stored.unknown_fields.is_empty());
+        let totals = sum_sessions(&sessions(&conn, None, original.timestamp_ms).unwrap());
+        assert_eq!((totals.input_tokens, totals.output_tokens, totals.request_count), (90, 7, 1));
+    }
+
+    #[test]
+    fn late_partial_preserves_confirmed_response_model_and_turn_across_restart() {
+        use super::super::parser::{parse_line, ParserState};
+        use serde_json::json;
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let path = std::path::Path::new("rollout-thread.jsonl");
+        let feed = |state: &mut ParserState, row: serde_json::Value| {
+            parse_line(state, "codex", path, &row.to_string(), 0).unwrap()
+        };
+        let mut state = ParserState::default();
+        feed(&mut state, json!({"type":"session_meta","payload":{"id":"thread"}}));
+        let original = feed(&mut state, json!({"type":"token_usage_record","timestamp":"2026-10-15T17:00:00Z",
+            "payload":{"thread_id":"thread","turn_id":"original-turn","root_turn_id":"root",
+            "response_id":"stable-response","response_model":"gpt-6-luna","usage":{
+                "input_tokens":100,"output_tokens":2,"cached_input_tokens":0,"cache_write_input_tokens":0}}}))
+            .usage.remove(0);
+        save(&mut conn, &original);
+        let mut restarted = ParserState::default();
+        feed(&mut restarted, json!({"type":"session_meta","payload":{"id":"thread"}}));
+        feed(&mut restarted, json!({"type":"thread_settings_applied","payload":{"thread_settings":{"model":"gpt-6.1-sol"}}}));
+        let partial = feed(&mut restarted, json!({"type":"raw_response_completed","timestamp":"2026-10-15T17:00:00Z",
+            "payload":{"response_id":"stable-response","token_usage":{"output_tokens":3}}}))
+            .usage.remove(0);
+        assert_eq!(partial.model_basis, "turn_context_requested");
+        assert!(partial.turn_id.is_empty());
+        save(&mut conn, &partial);
+        let (stored, _) = previous(&conn, "codex", &original.id).unwrap().unwrap();
+        assert_eq!(stored.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(stored.model_basis, "response_model");
+        assert_eq!(stored.turn_id, "original-turn");
+        assert_eq!(stored.root_turn_id.as_deref(), Some("root"));
+        assert_eq!((stored.input_tokens, stored.output_tokens), (100, 3));
+        assert_eq!(sum_sessions(&sessions(&conn, None, 0).unwrap()).request_count, 1);
+    }
+
+    #[test]
+    fn usage_quality_counters_follow_corrections_deletions_and_session_merges() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let mut cumulative = record("cumulative", "codex", 20);
+        cumulative.usage_basis = "legacy_cumulative_delta".into();
+        cumulative.unknown_fields.push("per_request_input_tokens".into());
+        save(&mut conn, &cumulative);
+        let mut partial = record("partial", "claude", 0);
+        partial.session_id = "other-session".into();
+        partial.input_tokens = 0;
+        partial.context_tokens = None;
+        partial.unknown_fields = ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]
+            .into_iter().map(str::to_owned).collect();
+        save(&mut conn, &partial);
+        let totals = sum_sessions(&sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.unitemized_records), (2, 1));
+        assert_eq!((totals.input_unknown_requests, totals.output_unknown_requests,
+            totals.cache_read_unknown_requests, totals.cache_write_unknown_requests), (1, 1, 1, 1));
+        partial.input_tokens = 100;
+        partial.output_tokens = 3;
+        partial.context_tokens = Some(100);
+        partial.unknown_fields.clear();
+        save(&mut conn, &partial);
+        let totals = sum_sessions(&sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.input_unknown_requests, totals.output_unknown_requests,
+            totals.cache_read_unknown_requests, totals.cache_write_unknown_requests), (0, 0, 0, 0));
+        let tx = conn.transaction().unwrap();
+        remove_snapshot_request(&tx, "codex", &cumulative.id).unwrap();
+        tx.commit().unwrap();
+        let totals = sum_sessions(&sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.unitemized_records, totals.input_tokens, totals.output_tokens), (1, 0, 100, 3));
+    }
+
+    #[test]
+    fn old_session_quality_is_backfilled_without_rewriting_other_totals() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let mut usage = record("old", "codex", 0);
+        usage.usage_basis = "legacy_initial_cumulative".into();
+        usage.unknown_fields = ["output_tokens", "cache_read_tokens", "cache_write_tokens"]
+            .into_iter().map(str::to_owned).collect();
+        save(&mut conn, &usage);
+        let before: String = conn.query_row("SELECT usage FROM monitor_requests WHERE id='old'", [], |row| row.get(0)).unwrap();
+        conn.execute("UPDATE monitor_sessions SET totals=json_set(json_remove(totals,
+            '$.unitemizedRecords','$.inputUnknownRequests','$.outputUnknownRequests',
+            '$.cacheReadUnknownRequests','$.cacheWriteUnknownRequests'),'$.externalField',json_object('keep',json('true')))", []).unwrap();
+        conn.execute("DELETE FROM monitor_state WHERE key='usage_quality_totals_v1'", []).unwrap();
+        initialize(&conn).unwrap();
+        let stored: String = conn.query_row("SELECT totals FROM monitor_sessions WHERE key='codex:session'", [], |row| row.get(0)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(value["externalField"]["keep"], true);
+        let totals: Totals = serde_json::from_str(&stored).unwrap();
+        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (1, 100, 0));
+        assert_eq!((totals.unitemized_records, totals.input_unknown_requests, totals.output_unknown_requests,
+            totals.cache_read_unknown_requests, totals.cache_write_unknown_requests), (1, 0, 1, 1, 1));
+        assert_eq!(conn.query_row("SELECT usage FROM monitor_requests WHERE id='old'", [], |row| row.get::<_,String>(0)).unwrap(), before);
+        initialize(&conn).unwrap();
+        assert_eq!(conn.query_row("SELECT totals FROM monitor_sessions WHERE key='codex:session'", [], |row| row.get::<_, String>(0)).unwrap(), stored);
+    }
+
+    #[test]
+    fn downward_output_corrections_retract_only_existing_live_observations() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let mut usage = record("corrected", "codex", 0);
+        let catalog = crate::model_catalog::CatalogSnapshot::default();
+        for (output, observed) in [(2, 1100), (7, 1200), (3, 1300), (5, 1400)] {
+            usage.output_tokens = output;
+            let tx = conn.transaction().unwrap();
+            save_usage_with_catalog(&tx, &usage, 0, observed, &catalog).unwrap();
+            tx.commit().unwrap();
+            let sum: i64 = conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM monitor_observations", [], |row| row.get(0)).unwrap();
+            assert_eq!(sum, output);
+            assert_eq!(sum_sessions(&sessions(&conn, None, observed).unwrap()).output_tokens, output);
+        }
+        let rows = {
+            let mut query = conn.prepare("SELECT observed_ms,output_tokens FROM monitor_observations ORDER BY observed_ms").unwrap();
+            query.query_map([], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?))).unwrap()
+                .collect::<Result<Vec<_>,_>>().unwrap()
+        };
+        assert_eq!(rows, vec![(1100,2),(1200,1),(1400,2)]);
+        for start in [0, 1100, 1150, 1200, 1300, 1400] {
+            let sum: i64 = conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM monitor_observations WHERE observed_ms>?1", [start], |row| row.get(0)).unwrap();
+            assert!(sum >= 0);
+        }
+        conn.execute("DELETE FROM monitor_observations", []).unwrap();
+        usage.output_tokens = 2;
+        let tx = conn.transaction().unwrap();
+        save_usage_with_catalog(&tx, &usage, 0, 1500, &catalog).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        usage.output_tokens = 4;
+        let tx = conn.transaction().unwrap();
+        save_usage_with_catalog(&tx, &usage, 0, 1600, &catalog).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(conn.query_row("SELECT SUM(output_tokens) FROM monitor_observations", [], |row| row.get::<_,i64>(0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn historical_live_overcounts_are_repaired_once_without_rebuilding_pruned_evidence() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        for id in ["legacy-overcount","already-pruned","unknown-output"] {
+            let mut usage=record(id,"codex",5);
+            if id=="unknown-output" { usage.unknown_fields.push("output_tokens".into()); }
+            save(&mut conn,&usage);
+            let samples: &[(i64,i64)] = if id=="already-pruned" { &[(1100,2)] } else { &[(1100,2),(1200,5),(1400,2)] };
+            for (at,tokens) in samples {
+                conn.execute("INSERT INTO monitor_observations VALUES('codex',?1,'codex:session',?2,?3)",params![id,at,tokens]).unwrap();
+            }
+        }
+        conn.execute("INSERT INTO monitor_observations VALUES('codex','legacy-overcount','codex:unrelated',1500,100)",[]).unwrap();
+        conn.execute("DELETE FROM monitor_state WHERE key='live_observation_corrections_v1'",[]).unwrap();
+        let total = |conn:&Connection,id:&str| conn.query_row("SELECT COALESCE(SUM(output_tokens),0) FROM monitor_observations WHERE id=?1 AND session_key='codex:session'",[id],|row|row.get::<_,i64>(0)).unwrap();
+        initialize(&conn).unwrap();
+        assert_eq!((total(&conn,"legacy-overcount"),total(&conn,"already-pruned"),total(&conn,"unknown-output")),(5,2,9));
+        assert_eq!(conn.query_row("SELECT output_tokens FROM monitor_observations WHERE session_key='codex:unrelated'",[],|row|row.get::<_,i64>(0)).unwrap(),100);
+        initialize(&conn).unwrap();
+        assert_eq!((total(&conn,"legacy-overcount"),total(&conn,"already-pruned"),total(&conn,"unknown-output")),(5,2,9));
+        // This unrelated row is not evidence for the corrected record below.
+        conn.execute("DELETE FROM monitor_observations WHERE session_key='codex:unrelated'",[]).unwrap();
+        let catalog=crate::model_catalog::CatalogSnapshot::default();
+        for (id,expected) in [("legacy-overcount",3),("already-pruned",0)] {
+            let usage=record(id,"codex",3);
+            let tx=conn.transaction().unwrap();
+            save_usage_with_catalog(&tx,&usage,0,1500,&catalog).unwrap();tx.commit().unwrap();
+            assert_eq!(total(&conn,id),expected,"a 5 -> 3 correction must withdraw the full delta even when history was pruned");
+            let usage=record(id,"codex",5);
+            let tx=conn.transaction().unwrap();
+            save_usage_with_catalog(&tx,&usage,0,1600,&catalog).unwrap();tx.commit().unwrap();
+            assert_eq!(total(&conn,id),expected+2);
+        }
+        // A raw-source replay may recover a request whose old observations survived.
+        conn.execute("INSERT INTO monitor_observations VALUES('codex','recovered','codex:session',1100,9)",[]).unwrap();
+        save(&mut conn,&record("recovered","codex",5));
+        assert_eq!(total(&conn,"recovered"),5);
+        save(&mut conn,&record("unknown-output","codex",5));
+        assert_eq!(total(&conn,"unknown-output"),5);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations WHERE output_tokens<0",[],|row|row.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
+    fn unknown_output_keeps_an_observation_without_polling_duplicates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let mut usage = record("unknown-live", "codex", 0);
+        usage.unknown_fields.push("output_tokens".into());
+        let catalog = crate::model_catalog::CatalogSnapshot::default();
+        for (output, observed) in [(0,1100),(0,1200),(3,1300),(3,1400),(2,1500)] {
+            usage.output_tokens = output;
+            let tx = conn.transaction().unwrap();
+            save_usage_with_catalog(&tx, &usage, 0, observed, &catalog).unwrap();
+            tx.commit().unwrap();
+        }
+        let count: (i64,i64) = conn.query_row("SELECT COUNT(*),SUM(output_tokens) FROM monitor_observations", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(count, (3,2));
+        usage.output_tokens = 5;
+        usage.unknown_fields.clear();
+        let tx = conn.transaction().unwrap();
+        save_usage_with_catalog(&tx, &usage, 0, 1600, &catalog).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(conn.query_row("SELECT SUM(output_tokens) FROM monitor_observations", [], |row| row.get::<_,i64>(0)).unwrap(), 5);
+    }
+
+    #[test]
+    fn older_known_events_do_not_regress_usage_but_authoritative_snapshots_can_correct_downward() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let mut latest = record("archived-response", "codex", 7);
+        latest.timestamp_ms = 2000;
+        save(&mut conn, &latest);
+        let before = cache_snapshot(&conn);
+        let mut older = latest.clone();
+        older.timestamp_ms = 1000;
+        older.output_tokens = 2;
+        save(&mut conn, &older);
+        assert_eq!(cache_snapshot(&conn), before);
+        latest.timestamp_ms = 3000;
+        latest.output_tokens = 3;
+        save(&mut conn, &latest);
+        assert_eq!(previous(&conn, "codex", &latest.id).unwrap().unwrap().0.output_tokens, 3);
+        let tx = conn.transaction().unwrap();
+        save_snapshot_usage_with_catalog(&tx, &older, i64::MAX, 0, &crate::model_catalog::CatalogSnapshot::default()).unwrap();
+        tx.commit().unwrap();
+        let totals = sum_sessions(&sessions(&conn, None, 0).unwrap());
+        assert_eq!((totals.request_count, totals.output_tokens), (1, 2));
+        assert_eq!(previous(&conn, "codex", &latest.id).unwrap().unwrap().0.timestamp_ms, 1000);
+    }
+
+    #[test]
+    fn older_complete_event_fills_newer_partial_without_replacing_newer_known_facts() {
+        use super::super::parser::{parse_line, ParserState};
+        use std::path::Path;
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let parse = |time: &str, usage: serde_json::Value| {
+            let row = serde_json::json!({"type":"token_usage_record","timestamp":time,"payload":{
+                "thread_id":"session","turn_id":"turn1","response_id":"late-complete",
+                "usage":usage}});
+            parse_line(&mut ParserState::default(),"codex",Path::new("rollout.jsonl"),&row.to_string(),0).unwrap().usage.remove(0)
+        };
+        let mut newer = parse("2026-10-15T17:02:00Z", serde_json::json!({"input_tokens":200,"cached_input_tokens":0,"cache_write_input_tokens":0}));
+        assert!(newer.unknown_fields.contains(&"output_tokens".into()));
+        newer.model = Some("newer-confirmed".into());
+        newer.model_basis = "response_model".into();
+        save(&mut conn, &newer);
+        let mut older = parse("2026-10-15T17:01:00Z", serde_json::json!({"input_tokens":100,"output_tokens":7,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":5}));
+        older.model = Some("older-model".into());
+        older.model_basis = "response_model".into();
+        save(&mut conn, &older);
+        let merged = previous(&conn,"codex",&newer.id).unwrap().unwrap().0;
+        assert_eq!((merged.input_tokens,merged.output_tokens,merged.timestamp_ms), (200,7,newer.timestamp_ms));
+        assert_eq!(merged.model, newer.model);
+        assert!(!merged.unknown_fields.contains(&"output_tokens".into()));
+        assert_eq!(merged.reasoning_tokens, Some(5));
+        newer.output_tokens = 3;
+        newer.unknown_fields.retain(|field| field != "output_tokens");
+        newer.reasoning_tokens = None;
+        save(&mut conn, &newer);
+        let corrected = previous(&conn,"codex",&newer.id).unwrap().unwrap().0;
+        assert_eq!(corrected.output_tokens,3);
+        assert_eq!(corrected.reasoning_tokens,None,"old reasoning cannot exceed corrected output");
+        let before = cache_snapshot(&conn);
+        save(&mut conn, &older);
+        assert_eq!(cache_snapshot(&conn),before);
+    }
+
+    #[test]
+    fn deleting_the_only_ambiguous_peer_reconciles_proxy_billing_without_new_usage() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute("INSERT INTO monitor_request_account_evidence VALUES('fixture',1,'thread','account:actual','gpt-6.1-sol',NULL,1000,3000,100,20,80)", []).unwrap();
+        let canonical = UsageRecord {
+            id: "canonical-proxy-match".into(), tool: "codex".into(), session_id: "thread".into(),
+            turn_id: "turn".into(), timestamp_ms: 2000, model: Some("gpt-6.1-sol".into()),
+            mode: Some("standard".into()), mode_basis: "response_reported".into(),
+            input_tokens: 100, output_tokens: 20, cache_read_tokens: 80, context_tokens: Some(100),
+            ..Default::default()
+        };
+        let mut legacy = canonical.clone();
+        legacy.id = "legacy-ambiguous-peer".into();
+        save(&mut conn, &canonical);
+        save(&mut conn, &legacy);
+        super::super::billing::bootstrap(&mut conn).unwrap();
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM monitor_api_requests", [], |row| row.get(0)).unwrap(), 0);
+        let original_cost: String = conn.query_row("SELECT cost FROM monitor_requests WHERE id=?1", [&canonical.id], |row| row.get(0)).unwrap();
+        let amount = serde_json::from_str::<CostEstimate>(&original_cost).unwrap().usd.unwrap();
+        assert!(amount > 0.0);
+        let tx = conn.transaction().unwrap();
+        delete_request(&tx, "codex", &legacy.id).unwrap();
+        tx.commit().unwrap();
+        // The canonical row is already complete; its idempotent replay cannot
+        // be relied on to mark proxy cardinality changes made by a deletion.
+        save(&mut conn, &canonical);
+        super::super::billing::reconcile_proxy_requests(&mut conn).unwrap();
+        let (stored, _) = previous(&conn, "codex", &canonical.id).unwrap().unwrap();
+        assert_eq!(stored.billing_scope.as_deref(), Some("api"));
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM monitor_api_requests", [], |row| row.get(0)).unwrap(), 1);
+        assert_eq!(conn.query_row::<String, _, _>("SELECT cost FROM monitor_requests WHERE id=?1", [&canonical.id], |row| row.get(0)).unwrap(), original_cost);
+        let totals = sum_sessions(&sessions(&conn, None, 3000).unwrap());
+        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens, totals.cache_read_tokens), (1, 100, 20, 80));
+        assert!((totals.priced_cost_usd - amount).abs() < 1e-12);
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM monitor_aliases WHERE tool='codex' AND id=?1", [&legacy.id], |row| row.get(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn older_parser_cache_cannot_poison_a_later_partial_response() {
+        use super::super::parser::{parse_line, ParserState};
+        use serde_json::json;
+        use std::path::Path;
+        for tool in ["codex", "claude"] {
+            let mut state = ParserState::default();
+            let mut conn = Connection::open_in_memory().unwrap();
+            initialize(&conn).unwrap();
+            let mut parse = |time, output: Option<i64>| {
+                let mut usage = if tool == "codex" {
+                    json!({"cached_input_tokens":20})
+                } else {
+                    json!({"cache_read_input_tokens":20})
+                };
+                if let Some(output) = output {
+                    usage["input_tokens"] = json!(if tool == "codex" { 100 } else { 80 });
+                    usage["output_tokens"] = json!(output);
+                    usage[if tool == "codex" { "cache_write_input_tokens" } else { "cache_creation_input_tokens" }] = json!(0);
+                }
+                let row = if tool == "codex" {
+                    json!({"type":"token_usage_record","timestamp":time,"payload":{
+                        "thread_id":"session","turn_id":"turn1","response_id":"cache-poison","usage":usage}})
+                } else {
+                    json!({"type":"assistant","sessionId":"session","timestamp":time,
+                        "message":{"id":"cache-poison","model":"claude-opus-5-5","usage":usage}})
+                };
+                parse_line(&mut state, tool, Path::new("rollout.jsonl"), &row.to_string(), 0)
+                    .unwrap().usage.remove(0)
+            };
+            let latest = parse("2026-10-15T17:02:00Z", Some(10));
+            save(&mut conn, &latest);
+            let cost: String = conn.query_row("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap();
+            let late_old = parse("2026-10-15T17:01:00Z", Some(5));
+            save(&mut conn, &late_old);
+            assert_eq!(previous(&conn, tool, &latest.id).unwrap().unwrap().0.output_tokens, 10);
+            let partial = parse("2026-10-15T17:03:00Z", None);
+            save(&mut conn, &partial);
+            let totals = sum_sessions(&sessions(&conn, None, 0).unwrap());
+            assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens, totals.cache_read_tokens),
+                (1, 100, 10, 20), "{tool}: partial event resurrected stale cached output");
+            assert_eq!(conn.query_row::<String, _, _>("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap(), cost);
+        }
+    }
+
+    #[test]
+    fn partial_merge_cannot_create_cache_or_reasoning_outside_parent_buckets() {
+        use super::super::parser::{parse_line, ParserState};
+        use serde_json::json;
+        use std::path::Path;
+        let parse = |usage: serde_json::Value| {
+            let row = json!({"type":"token_usage_record","timestamp":"2026-10-15T17:00:00Z","payload":{
+                "thread_id":"session","turn_id":"turn1","response_id":"partial-conflict","usage":usage}});
+            parse_line(&mut ParserState::default(), "codex", Path::new("rollout.jsonl"), &row.to_string(), 0)
+                .unwrap().usage.remove(0)
+        };
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let original = parse(json!({"input_tokens":100,"output_tokens":10,"cached_input_tokens":20,
+            "cache_write_input_tokens":0,"reasoning_output_tokens":4}));
+        save(&mut conn, &original);
+        let before = cache_snapshot(&conn);
+        let before_cost: String = conn.query_row("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap();
+        for (partial, message) in [
+            (json!({"cached_input_tokens":101}), "cache tokens exceed normalized input tokens"),
+            (json!({"reasoning_output_tokens":11}), "reasoning tokens exceed output tokens"),
+        ] {
+            // Each standalone partial is valid because its parent bucket is unknown.
+            // Merging with the retained exact parent makes the contradiction visible.
+            let incoming = parse(partial);
+            let tx = conn.transaction().unwrap();
+            let outcome = save_usage_with_catalog(&tx, &incoming, i64::MAX, 0,
+                &crate::model_catalog::CatalogSnapshot::default());
+            assert_eq!(outcome.unwrap_err(), message);
+            drop(tx);
+            assert_eq!(cache_snapshot(&conn), before);
+            assert_eq!(conn.query_row::<String, _, _>("SELECT cost FROM monitor_requests", [], |row| row.get(0)).unwrap(), before_cost);
+            let totals = sum_sessions(&sessions(&conn, None, 0).unwrap());
+            assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens, totals.cache_read_tokens), (1, 100, 10, 20));
+        }
+    }
+
+    #[test]
+    fn invalid_and_overflowing_usage_does_not_partially_commit() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let catalog = crate::model_catalog::CatalogSnapshot::default();
+        let mut invalid = record("invalid", "codex", 1);
+        invalid.input_tokens = MAX_EXACT_TOKENS;
+        let tx = conn.transaction().unwrap();
+        assert!(save_usage_with_catalog(&tx, &invalid, i64::MAX, 0, &catalog).unwrap_err().contains("overflow"));
+        tx.rollback().unwrap();
+        invalid.input_tokens = -1;
+        let tx = conn.transaction().unwrap();
+        assert!(save_usage_with_catalog(&tx, &invalid, i64::MAX, 0, &catalog).unwrap_err().contains("negative"));
+        tx.rollback().unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        let mut first = record("largest", "codex", 0);
+        first.input_tokens = MAX_EXACT_TOKENS;
+        first.context_tokens = Some(MAX_EXACT_TOKENS);
+        save(&mut conn, &first);
+        let before = cache_snapshot(&conn);
+        let mut next = record("overflow", "codex", 0);
+        next.input_tokens = 1;
+        next.context_tokens = Some(1);
+        let tx = conn.transaction().unwrap();
+        assert!(save_usage_with_catalog(&tx, &next, i64::MAX, 0, &catalog).unwrap_err().contains("overflow"));
+        tx.rollback().unwrap();
+        assert_eq!(cache_snapshot(&conn), before);
+    }
+
+    #[test]
+    fn cross_session_totals_outside_the_exact_integer_range_are_reported_as_errors() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        for (id, tokens) in [("large", MAX_EXACT_TOKENS), ("another", 1)] {
+            let mut usage = record(id, "codex", 0);
+            usage.session_id = id.into();
+            usage.input_tokens = tokens;
+            usage.context_tokens = Some(tokens);
+            save(&mut conn, &usage);
+        }
+        assert!(validate_token_totals(&conn).unwrap_err().contains("exact supported integer range"));
+        assert!(sessions(&conn, None, 0).unwrap_err().contains("exact supported integer range"));
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.inputTokens',9223372036854775807)", []).unwrap();
+        assert!(validate_token_totals(&conn).unwrap_err().contains("cannot be represented exactly"));
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.inputTokens',CASE WHEN id='large' THEN -1 ELSE 3 END)", []).unwrap();
+        assert!(validate_token_totals(&conn).is_err(), "a positive sum must not hide a negative record");
+    }
+
+    #[test]
+    fn turn_times_use_only_locatable_requests_or_reported_turn_timing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let mut unknown = record("unknown-time", "codex", 2);
+        unknown.timestamp_ms = 90_000;
+        unknown.unknown_fields.push("timestamp".into());
+        save(&mut conn, &unknown);
+        let mut cumulative = record("cumulative", "codex", 3);
+        cumulative.timestamp_ms = 80_000;
+        cumulative.usage_basis = "legacy_cumulative_delta".into();
+        save(&mut conn, &cumulative);
+        let read = |conn: &Connection| session_detail(conn, "codex:session", 0, 20, 100_000, false, &MonitorPeriod::default()).unwrap();
+        let detail = read(&conn);
+        assert_eq!((detail.turns[0].started_at_ms, detail.turns[0].updated_at_ms), (0,0));
+        assert_eq!((detail.filtered_totals.request_count, detail.filtered_totals.output_tokens), (2,5));
+        let mut known = record("known-time", "codex", 4);
+        known.timestamp_ms = 2000;
+        save(&mut conn, &known);
+        let detail = read(&conn);
+        assert_eq!((detail.turns[0].started_at_ms, detail.turns[0].updated_at_ms), (2000,2000));
+        let tx = conn.transaction().unwrap();
+        save_session(&tx, &SessionMeta { tool:"codex".into(), id:"session".into(),
+            turn_timing:Some(TurnTiming { turn_id:"turn1".into(), started_at_ms:Some(1500),
+                completed_at_ms:Some(2500), basis:"reported_turn_event".into(), ..Default::default() }),
+            ..Default::default() }).unwrap();
+        tx.commit().unwrap();
+        let detail = read(&conn);
+        assert_eq!((detail.turns[0].started_at_ms, detail.turns[0].updated_at_ms), (1500,2500));
+        assert_eq!((detail.filtered_totals.request_count, detail.filtered_totals.output_tokens), (3,9));
+    }
+
+    #[test]
+    fn legacy_response_namespace_migration_preserves_references_quotes_and_cursor_extensions() {
+        use serde_json::json;
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        let mut usage = record("response:local-id", "codex", 4);
+        usage.session_id = "thread:b".into();
+        usage.request_id = Some("local-id".into());
+        save(&mut conn, &usage);
+        let quote: String = conn.query_row("SELECT cost FROM monitor_requests WHERE id=?1", [&usage.id], |row| row.get(0)).unwrap();
+        let frozen_quote = format!(" {quote}\n");
+        conn.execute("UPDATE monitor_requests SET cost=?1,usage=json_set(usage,'$.extension',json_object('keep',json('true'))) WHERE id=?2", params![frozen_quote,usage.id]).unwrap();
+        conn.execute("INSERT INTO monitor_original_api_quotes VALUES('codex',?1,?2)", params![usage.id,frozen_quote]).unwrap();
+        conn.execute("INSERT INTO monitor_api_requests VALUES(?1)", [&usage.id]).unwrap();
+        conn.execute("INSERT INTO monitor_request_quota_evidence VALUES(?1,'home',604800000,'pro')", [&usage.id]).unwrap();
+        for (thread, output) in [("thread:a",2),("thread:b",4)] {
+            conn.execute("INSERT INTO monitor_observations VALUES('codex',?1,?2,1100,?3)", params![usage.id,session_key("codex",thread),output]).unwrap();
+        }
+        let cursor = json!({"session":SessionMeta {tool:"codex".into(),id:"thread:b".into(),..Default::default()},
+            "recent":[usage],"pending_usage":{"id":"response:local-id","turn_id":"turn1",
+                "tokens":{"input":100,"output":4},"total":null,"canonical":true,"paired":false},
+            "cursorExtension":{"keep":true}});
+        conn.execute("INSERT INTO monitor_files VALUES('missing-rollout.jsonl','codex',123,'signature',?1)", [cursor.to_string()]).unwrap();
+        let totals: String = conn.query_row("SELECT totals FROM monitor_sessions WHERE key='codex:thread:b'", [], |row| row.get(0)).unwrap();
+        conn.execute("DELETE FROM monitor_state WHERE key='codex_response_namespace_v2'", []).unwrap();
+        initialize(&conn).unwrap();
+        let id = super::super::parser::codex_request_id("thread:b", "local-id");
+        let (json, cost): (String,String) = conn.query_row("SELECT usage,cost FROM monitor_requests WHERE id=?1", [&id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(stored["extension"]["keep"], true);
+        assert_eq!(stored["requestId"], "local-id");
+        assert_eq!(stored["id"], id);
+        assert_eq!(cost, frozen_quote);
+        assert_eq!(super::super::billing::original_api(&conn, "codex", &id).unwrap().as_deref(), Some(frozen_quote.as_str()));
+        assert_eq!(conn.query_row("SELECT id FROM monitor_api_requests", [], |row| row.get::<_,String>(0)).unwrap(), id);
+        assert_eq!(conn.query_row("SELECT id FROM monitor_request_quota_evidence", [], |row| row.get::<_,String>(0)).unwrap(), id);
+        for thread in ["thread:a", "thread:b"] {
+            let observed: String = conn.query_row("SELECT id FROM monitor_observations WHERE session_key=?1", [session_key("codex",thread)], |row| row.get(0)).unwrap();
+            assert_eq!(observed, super::super::parser::codex_request_id(thread, "local-id"));
+        }
+        let migrated: String = conn.query_row("SELECT state FROM monitor_files", [], |row| row.get(0)).unwrap();
+        let cursor: serde_json::Value = serde_json::from_str(&migrated).unwrap();
+        assert_eq!(cursor["recent"][0]["id"], id);
+        assert_eq!(cursor["pending_usage"]["id"], id);
+        assert_eq!(cursor["cursorExtension"]["keep"], true);
+        serde_json::from_value::<super::super::parser::ParserState>(cursor).unwrap();
+        assert_eq!(conn.query_row("SELECT totals FROM monitor_sessions WHERE key='codex:thread:b'", [], |row| row.get::<_,String>(0)).unwrap(), totals);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_state WHERE key='codex_identity_replay_v2:missing-rollout.jsonl'", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
+        initialize(&conn).unwrap();
+        assert_eq!(conn.query_row("SELECT state FROM monitor_files", [], |row| row.get::<_,String>(0)).unwrap(), migrated);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |row| row.get::<_,i64>(0)).unwrap(), 1);
     }
 
     fn cache_fixture(conn: &mut Connection, count: i64) -> std::time::Duration {
@@ -2736,7 +3674,7 @@ mod catalog_tests {
         }
         tx.execute_batch("INSERT INTO monitor_files VALUES('fixture','codex',42,'signature','{}');
             INSERT INTO monitor_quotas VALUES(1,'codex','fixture','limit','week',10080,1000,'{}');
-            INSERT INTO monitor_account_cycles VALUES(1,'codex','fixture','week',10080,1000,2000,2000,1500,64,NULL);
+            INSERT INTO monitor_account_cycles(id,tool,account_key,slot,window_minutes,start_ms,end_ms,reset_ms,observed_ms,used_percent,exhausted_ms) VALUES(1,'codex','fixture','week',10080,1000,2000,2000,1500,64,NULL);
             INSERT INTO monitor_state VALUES('pricing_version','old-model-rules');").unwrap();
         tx.commit().unwrap();
         let requests = |conn: &Connection| -> Vec<(String, String)> {
@@ -4866,7 +5804,7 @@ mod completed_turn_tests {
     }
 
     #[test]
-    fn initial_cumulative_is_durable_but_not_live_output() {
+    fn unitemized_cumulative_is_durable_but_not_live_output() {
         let mut conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
         let tx = conn.transaction().unwrap();
@@ -4901,8 +5839,9 @@ mod completed_turn_tests {
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .unwrap();
-        assert_eq!(observed, (2, 150));
+        assert_eq!(observed, (1, 30));
         let stored = sum_sessions(&sessions(&conn, None, 1300).unwrap());
         assert_eq!((stored.request_count, stored.output_tokens), (4, 50_249));
+        assert_eq!(stored.unitemized_records, 2);
     }
 }

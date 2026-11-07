@@ -285,7 +285,9 @@ const vessels = computed(() => [
       </template>
       <p v-else class="token-empty">
         {{
-          total === 0
+          total === 0 && partial
+            ? t('usageMonitor.text.incompleteZeroTokenUsage')
+            : total === 0
             ? t('usageMonitor.text.noTokenUsageInTheSelectedPeriod')
             : t('usageMonitor.text.completeInputAndOutputRecordsNotYetAvailable')
         }}

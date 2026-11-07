@@ -27,7 +27,10 @@ describe('formatNumber formatter reuse', () => {
 
   it('constructs once per locale and notation, not once per table cell', async () => {
     const { formatNumber, formatNumberLocaleString } = await import('../format')
-    const constructors = vi.spyOn(Intl, 'NumberFormat')
+    const NumberFormat = Intl.NumberFormat
+    const constructors = vi.spyOn(Intl, 'NumberFormat').mockImplementation(function (locales, options) {
+      return new NumberFormat(locales, options)
+    })
     try {
       for (const locale of ['en', 'zh', 'en']) {
         language.value = locale

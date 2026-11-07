@@ -32,7 +32,7 @@ function injectBranding(html: string, config: { site_name?: string; site_logo?: 
   if (siteName) {
     brandedHtml = brandedHtml.replace(
       /<title>[^<]*<\/title>/i,
-      `<title>${escapeHtml(siteName)} - AI API Gateway</title>`,
+      () => `<title>${escapeHtml(siteName)} - AI API Gateway</title>`,
     )
   }
 
@@ -40,7 +40,7 @@ function injectBranding(html: string, config: { site_name?: string; site_logo?: 
   if (siteLogo && isSafeImageUrl(siteLogo)) {
     brandedHtml = brandedHtml.replace(
       /<link\s+rel=["']icon["'][^>]*>/i,
-      `<link rel="icon" href="${escapeHtml(siteLogo)}" />`,
+      () => `<link rel="icon" href="${escapeHtml(siteLogo)}" />`,
     )
   }
   return brandedHtml
@@ -64,8 +64,15 @@ function injectPublicSettings(backendUrl: string): Plugin {
           if (response.ok) {
             const data = await response.json()
             if (data.code === 0 && data.data) {
-              const script = `<script>window.__APP_CONFIG__=${JSON.stringify(data.data)};</script>`
-              return injectBranding(html, data.data).replace('</head>', `${script}\n</head>`)
+              // HTML parses </script> before JavaScript parses its string values.
+              // Escape every '<', including in nested settings, so remote public
+              // settings cannot close this script and inject executable markup.
+              const serialized = JSON.stringify(data.data)
+                .replace(/</g, '\\u003c')
+                .replace(/\u2028/g, '\\u2028')
+                .replace(/\u2029/g, '\\u2029')
+              const script = `<script>window.__APP_CONFIG__=${serialized};</script>`
+              return injectBranding(html, data.data).replace('</head>', () => `${script}\n</head>`)
             }
           }
         } catch (e) {
@@ -114,7 +121,9 @@ export default defineConfig(({ mode }) => {
     __INTLIFY_JIT_COMPILATION__: true
   },
     build: {
-    outDir: isDesktopBuild ? 'dist' : '../backend/internal/web/dist',
+    // This is a standalone repository. Never clear an unrelated sibling
+    // checkout's backend directory when running the ordinary build command.
+    outDir: 'dist',
     emptyOutDir: true,
     rollupOptions: {
       output: {
