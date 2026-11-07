@@ -52,6 +52,18 @@ export function useChannelQuota() {
   /** 过期条数（数据自身时间戳超 TTL）。 */
   const staleCount = computed(() => allSnapshots.value.filter((s) => s.stale).length)
 
+  /** A failed read does not create a new observation or make old evidence current. */
+  function markRetainedSnapshots(sourceError: string, channel?: string) {
+    snapshotsByChannel.value = Object.fromEntries(
+      Object.entries(snapshotsByChannel.value).map(([key, snapshots]) => [
+        key,
+        channel == null || key === channel
+          ? snapshots.map(snapshot => ({ ...snapshot, stale: true, sourceError }))
+          : snapshots,
+      ]),
+    )
+  }
+
   function reset() {
     sequence += 1
     sourceInstanceId.value = 'unavailable'
@@ -98,6 +110,7 @@ export function useChannelQuota() {
       if (request !== sequence) return
       if (!sameSource) { sourceInstanceId.value = 'unavailable'; channels.value = []; snapshotsByChannel.value = {}; loaded.value = false }
       error.value = errMsg(e, costDataText('failedToReadChannelQuota'))
+      if (sameSource) markRetainedSnapshots(error.value)
     } finally {
       if (request === sequence) loading.value = false
     }
@@ -125,6 +138,7 @@ export function useChannelQuota() {
       if (request !== sequence) return
       if (!sameSource) { sourceInstanceId.value = 'unavailable'; channels.value = []; snapshotsByChannel.value = {}; loaded.value = false }
       liveError.value = errMsg(e, costDataText('failedToReadChannelQuota'))
+      if (sameSource) markRetainedSnapshots(liveError.value, channel)
     } finally {
       if (request === sequence) refreshingChannel.value = null
     }

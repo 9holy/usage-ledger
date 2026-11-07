@@ -8,16 +8,16 @@
 
 ### Status
 
-macOS remains a preview target. See the v0.2.38 release's [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/BUILD-INFO.json) for source/build provenance. The configured minimum is macOS 13, but CI validation uses macOS 15. The release offers separate native `arm64` and `x86_64` DMGs; the default universal build is not validated. Packages use ad-hoc signing without Developer ID signing or notarization. Finder/Dock, full GUI, macOS 13, and real-account checks have not been checked. The Tauri config targets `app`/`dmg` with native window decorations, Dock re-open handling, and home-directory fallback; the Windows NSIS target is separate and unchanged.
+macOS remains a preview target. See the v0.2.39 release's [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/BUILD-INFO.json) for source/build provenance. The configured minimum is macOS 13, but CI validation uses macOS 15. The release offers separate native `arm64` and `x86_64` DMGs; the default universal build is not validated. Packages use ad-hoc signing without Developer ID signing or notarization. Finder/Dock, full GUI, macOS 13, and real-account checks have not been checked. The Tauri config targets `app`/`dmg` with native window decorations, Dock re-open handling, and home-directory fallback; the Windows NSIS target is separate and unchanged.
 
-The main repository workflow publishes v0.2.38 only after its required checks and all three platform builds and package verifications pass. Downloads are manual: no updater `.sig` files or `latest.json` feed are published. The source tree itself does not bundle an `.app` or `.dmg`. The 28-image Windows DEMO gallery is not Mac screenshot or runtime proof.
+The main repository workflow publishes v0.2.39 only after its required checks and all three platform builds and package verifications pass. Downloads are manual: no updater `.sig` files or `latest.json` feed are published. The source tree itself does not bundle an `.app` or `.dmg`. The 28-image Windows DEMO gallery is not Mac screenshot or runtime proof.
 
-### Download and install v0.2.38
+### Download and install v0.2.39
 
-The following manual downloads become available on the [v0.2.38 release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.38) after the release gates pass. The packages are macOS previews; manual desktop testing is still incomplete.
+The following manual downloads become available on the [v0.2.39 release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.39) after the release gates pass. The packages are macOS previews; manual desktop testing is still incomplete.
 
-- Apple Silicon (`arm64`): [Usage-Ledger_0.2.38_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_arm64.dmg)
-- Intel (`x86_64`): [Usage-Ledger_0.2.38_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_x64.dmg)
+- Apple Silicon (`arm64`): [Usage-Ledger_0.2.39_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_arm64.dmg)
+- Intel (`x86_64`): [Usage-Ledger_0.2.39_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_x64.dmg)
 
 Choose using Apple menu > About This Mac: an M-series chip is `arm64`; an Intel processor is `x86_64`.
 
@@ -42,7 +42,7 @@ The Mac build command must run on macOS; it does not cross-compile the Mac bundl
 
 ### Build from source
 
-The Mac build scripts are included on `main`. See the v0.2.38 release's `BUILD-INFO.json` for source/build provenance. The release includes separate native architecture preview DMGs.
+The Mac build scripts are included on `main`. See the v0.2.39 release's `BUILD-INFO.json` for source/build provenance. The release includes separate native architecture preview DMGs.
 
 ```sh
 git clone --branch main --single-branch https://github.com/9holy/usage-ledger.git
@@ -112,7 +112,7 @@ These interactive checks remain pending; background startup is not a substitute 
 
 ### Verification boundary
 
-For v0.2.38 source/build provenance, see the release's [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/BUILD-INFO.json), and verify downloads using [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/SHA256SUMS.txt). CI uses macOS 15 and does not establish behavior on the configured minimum macOS 13. Finder/Dock, full GUI/3D rendering, real-upstream integration, and the default universal binary remain outside the automated validation. Packages use ad-hoc signing without Developer ID signing or notarization. No automatic updates are provided by this release.
+For v0.2.39 source/build provenance, see the release's [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/BUILD-INFO.json), and verify downloads using [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/SHA256SUMS.txt). CI uses macOS 15 and does not establish behavior on the configured minimum macOS 13. Finder/Dock, full GUI/3D rendering, real-upstream integration, and the default universal binary remain outside the automated validation. Packages use ad-hoc signing without Developer ID signing or notarization. No automatic updates are provided by this release.
 
 ## 简体中文
 
@@ -120,16 +120,16 @@ For v0.2.38 source/build provenance, see the release's [BUILD-INFO.json](https:/
 
 ### 状态
 
-macOS 仍为预览目标。源码与构建来源见 v0.2.38 Release 附带的 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/BUILD-INFO.json)。配置的最低版本为 macOS 13，但 CI 验证使用 macOS 15。Release 提供分别构建的原生 `arm64` 与 `x86_64` DMG；默认通用构建尚未验证。安装包采用 ad-hoc 签名，没有 Developer ID 签名或公证。Finder/Dock、完整 GUI、macOS 13 和真实账号检查尚未检查。Tauri 配置仍以原生窗口装饰为 `app`/`dmg` 打包，保留 Dock 重新打开处理和主目录回退；Windows NSIS 目标独立且保持不变。
+macOS 仍为预览目标。源码与构建来源见 v0.2.39 Release 附带的 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/BUILD-INFO.json)。配置的最低版本为 macOS 13，但 CI 验证使用 macOS 15。Release 提供分别构建的原生 `arm64` 与 `x86_64` DMG；默认通用构建尚未验证。安装包采用 ad-hoc 签名，没有 Developer ID 签名或公证。Finder/Dock、完整 GUI、macOS 13 和真实账号检查尚未检查。Tauri 配置仍以原生窗口装饰为 `app`/`dmg` 打包，保留 Dock 重新打开处理和主目录回退；Windows NSIS 目标独立且保持不变。
 
-主仓库工作流只有在必要检查及三个平台的构建、安装包验证全部通过后，才发布 v0.2.38。仅提供手动下载，不发布 updater `.sig` 文件或 `latest.json` 自动更新清单。源码树本身不包含 `.app` 或 `.dmg`。Windows DEMO 配图不是 Mac 截图或运行验证证据。
+主仓库工作流只有在必要检查及三个平台的构建、安装包验证全部通过后，才发布 v0.2.39。仅提供手动下载，不发布 updater `.sig` 文件或 `latest.json` 自动更新清单。源码树本身不包含 `.app` 或 `.dmg`。Windows DEMO 配图不是 Mac 截图或运行验证证据。
 
-### 下载并安装 v0.2.38
+### 下载并安装 v0.2.39
 
-以下手动下载链接会在发布门禁通过后于 [v0.2.38 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.38)提供。macOS 安装包属于预览，人工桌面测试仍未完成。
+以下手动下载链接会在发布门禁通过后于 [v0.2.39 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.39)提供。macOS 安装包属于预览，人工桌面测试仍未完成。
 
-- Apple Silicon（`arm64`）：[Usage-Ledger_0.2.38_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_arm64.dmg)
-- Intel（`x86_64`）：[Usage-Ledger_0.2.38_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_x64.dmg)
+- Apple Silicon（`arm64`）：[Usage-Ledger_0.2.39_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_arm64.dmg)
+- Intel（`x86_64`）：[Usage-Ledger_0.2.39_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_x64.dmg)
 
 请在 Apple 菜单 > 关于本机中确认架构：M 系列芯片选择 `arm64`；Intel 处理器选择 `x86_64`。
 
@@ -154,7 +154,7 @@ Mac 构建命令必须在 macOS 上运行；不能从 Windows 交叉编译 Mac �
 
 ### 从源码构建
 
-macOS 构建脚本已包含在 `main`。源码和构建来源见 v0.2.38 Release 附带的 `BUILD-INFO.json`。Release 包含分别构建的原生架构预览 DMG。
+macOS 构建脚本已包含在 `main`。源码和构建来源见 v0.2.39 Release 附带的 `BUILD-INFO.json`。Release 包含分别构建的原生架构预览 DMG。
 
 ```sh
 git clone --branch main --single-branch https://github.com/9holy/usage-ledger.git
@@ -193,7 +193,7 @@ pnpm desktop:build:mac --target x86_64-apple-darwin
 
 独立的 [Mac 预览工作流](../../.github/workflows/macos-test.yml)仍只在 `test/macos-*` 分支运行，测试、构建和验证两种 Mac 包，测试产物保留三天，不发布 Release。两个工作流都不生成已签名的自动更新清单。流程定义不表示尚在等待的任务已经通过。
 
-v0.2.38 Release 提供的是分别构建的原生架构 DMG，并非一个通用二合一包。默认通用目标和 macOS 13 行为尚未验证。ad-hoc 打包不添加 Developer ID 签名或公证。Finder/Dock 交互、最小化与恢复、完整 GUI/3D 渲染及真实上游检查仍需手动执行，尚未检查。
+v0.2.39 Release 提供的是分别构建的原生架构 DMG，并非一个通用二合一包。默认通用目标和 macOS 13 行为尚未验证。ad-hoc 打包不添加 Developer ID 签名或公证。Finder/Dock 交互、最小化与恢复、完整 GUI/3D 渲染及真实上游检查仍需手动执行，尚未检查。
 
 ### 数据与集成
 
@@ -224,4 +224,4 @@ Mac 的 Info.plist 仅为应用自身的 `127.0.0.1` / `localhost` 桥接允许 
 
 ### 验证边界
 
-源码和构建来源见 v0.2.38 Release 附带的 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/BUILD-INFO.json)，下载文件可用 [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/SHA256SUMS.txt)核验。CI 使用 macOS 15；不证明配置最低版本 macOS 13 上的行为，也不验证 Finder/Dock、完整 GUI/3D 渲染、真实上游集成或默认通用二合一包。安装包使用 ad-hoc 签名，不包含 Developer ID 签名或公证，本版不提供应用内自动更新。
+源码和构建来源见 v0.2.39 Release 附带的 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/BUILD-INFO.json)，下载文件可用 [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/SHA256SUMS.txt)核验。CI 使用 macOS 15；不证明配置最低版本 macOS 13 上的行为，也不验证 Finder/Dock、完整 GUI/3D 渲染、真实上游集成或默认通用二合一包。安装包使用 ad-hoc 签名，不包含 Developer ID 签名或公证，本版不提供应用内自动更新。

@@ -1,5 +1,7 @@
 # Sub2API 成本数据通道源码核验（2026-11-07）
 
+> 本文件保留 v0.2.38 时点的核验记录。v0.2.39 的 [可选扩展与接入面板补充报告](sub2api-extension-contract-audit-2026-11-07.md) 已补齐实际调用者、完整生产源码搜索、API Key 分页和连接/密钥异步保护，并关闭 cost-loss/pricing 畸形 200 假数据问题。confirm/refund/reverse 仅为未使用导出，不能当作本页 native 财务操作；独立扩展 producer 未取得的边界仍明确保留。
+
 ## 范围与固定版本
 
 - 本项目审计基线：`9holy/usage-ledger@d21bb208672587d77f100e39dd8f33435040da83`（v0.2.37）。

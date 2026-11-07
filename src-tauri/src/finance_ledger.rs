@@ -252,7 +252,7 @@ const SELECT_EVENT: &str =
  coverage_start_ms,coverage_end_ms,note,created_at_ms,updated_at_ms,voided_at_ms,
  purchase_channel,plan_label,batch_id,batch_total,related_event_id FROM finance_events";
 fn row_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<FinanceEvent> {
-    Ok(FinanceEvent {
+    let event = FinanceEvent {
         entry: FinanceEventInput {
             id: row.get(0)?,
             source: row.get(1)?,
@@ -274,7 +274,25 @@ fn row_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<FinanceEvent> {
         created_at_ms: row.get(11)?,
         updated_at_ms: row.get(12)?,
         voided_at_ms: row.get(13)?,
-    })
+    };
+    // Every read entry point (including batch and related-event reads) must
+    // preserve the same value contract as writes. SQLite's older schema does
+    // not constrain batch metadata or reject positive infinity.
+    let valid = validate(&event.entry).and_then(|()| {
+        if !valid_time(event.created_at_ms)
+            || !valid_time(event.updated_at_ms)
+            || event.voided_at_ms.is_some_and(|time| !valid_time(time))
+        {
+            return Err("Invalid stored finance timestamp".into());
+        }
+        Ok(())
+    });
+    valid.map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    ))?;
+    Ok(event)
 }
 fn find(conn: &Connection, id: &str) -> Result<Option<FinanceEvent>, String> {
     conn.query_row(&format!("{SELECT_EVENT} WHERE id=?1"), [id], row_event)
@@ -378,9 +396,10 @@ fn validate_batches(all: &[FinanceEvent]) -> Result<(), String> {
     }
     for group in groups.values() {
         let first = group[0];
+        let total = first.batch_total.ok_or("Invalid purchase batch metadata")?;
         let sum: f64 = group.iter().map(|e| e.amount).sum();
         if !sum.is_finite()
-            || (sum - first.batch_total.unwrap()).abs() > tolerance(sum)
+            || (sum - total).abs() > tolerance(sum)
             || group.iter().any(|e| {
                 e.batch_total != first.batch_total
                     || e.currency != first.currency
@@ -657,11 +676,12 @@ pub fn get_batch(
         .into_iter()
         .filter(|e| e.voided_at_ms.is_none() && e.entry.batch_id.as_deref() == Some(batch_id))
         .collect();
+    validate_batches(&events)?;
     let first = &events.first().ok_or("Active batch not found")?.entry;
     Ok(FinanceBatch {
         scope,
         batch_id: batch_id.into(),
-        total_amount: first.batch_total.unwrap(),
+        total_amount: first.batch_total.ok_or("Invalid purchase batch metadata")?,
         currency: first.currency.clone(),
         occurred_at_ms: first.occurred_at_ms,
         purchase_channel: first.purchase_channel.clone(),
@@ -821,6 +841,7 @@ pub fn query(conn: &Connection, q: FinanceQuery) -> Result<FinanceSnapshot, Stri
         },
     )?;
     let active = relations(&all)?;
+    validate_batches(&all)?;
     let groups = grouped_children(&all, &active);
     let identities: BTreeMap<_, _> = all.iter().map(|e| (e.entry.id.as_str(), e)).collect();
     let mut channels = BTreeSet::new();
@@ -1158,6 +1179,42 @@ mod tests {
     }
     fn near(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-7, "{a} != {b}");
+    }
+    #[test]
+    fn completion_audit_batch_read_reports_missing_total_without_panicking() {
+        let mut c = db();
+        let saved = save(&mut c, purchase()).unwrap();
+        let batch_id = event(99, "purchase", 1., 0).id;
+        c.execute("UPDATE finance_events SET batch_id=?1,batch_total=NULL WHERE id=?2", params![batch_id, saved.entry.id]).unwrap();
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| get_batch(&c, scope(), &batch_id)));
+        assert!(read.is_ok(), "invalid persisted batch metadata must be a returned error, not a task panic");
+        assert!(read.unwrap().is_err());
+        assert_eq!(c.query_row("SELECT count(*) FROM finance_events WHERE batch_total IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+    #[test]
+    fn completion_audit_batch_and_summary_reads_reject_inconsistent_paid_total() {
+        let mut c = db();
+        let saved = save(&mut c, purchase()).unwrap();
+        let batch_id = event(99, "purchase", 1., 0).id;
+        c.execute("UPDATE finance_events SET batch_id=?1,batch_total=120 WHERE id=?2", params![batch_id, saved.entry.id]).unwrap();
+        assert!(get_batch(&c, scope(), &batch_id).is_err(), "a batch with 100 allocated must not claim a 120 paid total");
+        assert!(query(&c, window(0, DAY)).is_err(), "financial totals cannot silently accept an inconsistent purchase batch");
+    }
+    #[test]
+    fn completion_audit_summary_checks_batch_integrity_before_reporting_amounts() {
+        let mut c = db();
+        let saved = save(&mut c, purchase()).unwrap();
+        let batch_id = event(99, "purchase", 1., 0).id;
+        c.execute("UPDATE finance_events SET batch_id=?1,batch_total=120 WHERE id=?2", params![batch_id, saved.entry.id]).unwrap();
+        assert!(query(&c, window(0, DAY)).is_err(), "the summary must not silently ignore a mismatched paid batch total");
+    }
+    #[test]
+    fn completion_audit_batch_read_rejects_nonfinite_persisted_amount() {
+        let mut c = db();
+        let saved = save(&mut c, purchase()).unwrap();
+        let batch_id = event(99, "purchase", 1., 0).id;
+        c.execute("UPDATE finance_events SET batch_id=?1,batch_total=100,amount=?2 WHERE id=?3", params![batch_id, f64::INFINITY, saved.entry.id]).unwrap();
+        assert!(get_batch(&c, scope(), &batch_id).is_err(), "read APIs must reject a stored infinity instead of serializing it as null");
     }
     #[test]
     fn data_channel_audit_currency_sum_overflow_is_an_error_not_json_null() {

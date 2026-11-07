@@ -187,11 +187,16 @@ pub(super) fn save_authenticated(
         if window["limit_window_seconds"].as_i64() != Some(604800) {
             continue;
         }
-        let reset = window["reset_at"]
+        let Some(reset) = window["reset_at"]
             .as_i64()
             .and_then(|v| v.checked_mul(1000))
             .filter(|v| *v > now)
-            .ok_or("Official weekly quota has no valid reset time")?;
+        else {
+            // A response can cross the reset boundary in transit. Retain its
+            // expired window and independent credits/status, without creating
+            // a current weekly account correlation from that expired window.
+            continue;
+        };
         tx.execute("INSERT INTO monitor_codex_quota_accounts(home,reset_ms,plan,account_key,observed_ms)
             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(home,reset_ms,plan,account_key) DO UPDATE SET observed_ms=excluded.observed_ms",
             params![home.to_string_lossy(),reset,plan,format!("account:{account}"),now]).map_err(|e| e.to_string())?;

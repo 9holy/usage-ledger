@@ -51,15 +51,15 @@
       <section v-if="showFixedProfileEditor" class="cost-inspector__summary">
         <div>
           <span>{{ isMetered ? t('costComponents.accruedFixedAdditionalCost') : t('costComponents.accruedPurchaseCostConfiguredEstimate') }}</span>
-          <strong>{{ formatMoney(currentAccrued, form.currency, 4) }}</strong>
+          <strong>{{ isValid ? formatMoney(currentAccrued, form.currency, 4) : t('costComponents.noData') }}</strong>
         </div>
         <div>
           <span>{{ isMetered ? t('costComponents.hourlyFixedAdditionalCost') : t('costComponents.hourlyCostConfiguredEstimate') }}</span>
-          <strong>{{ formatMoney(currentHourly, form.currency, 5) }}</strong>
+          <strong>{{ isValid ? formatMoney(currentHourly, form.currency, 5) : t('costComponents.noData') }}</strong>
         </div>
         <div>
           <span> {{ t('costComponents.elapsedCostPeriod') }} </span>
-          <strong>{{ currentElapsed.toFixed(1) }} h</strong>
+          <strong>{{ isValid ? `${currentElapsed.toFixed(1)} h` : t('costComponents.noData') }}</strong>
         </div>
       </section>
 
@@ -172,7 +172,7 @@ const emit = defineEmits<{
 }>()
 
 const form = reactive<{
-  amount: number
+  amount: number | ''
   currency: CostCurrency
   billing_cycle: BillingCycle
   started_at: string
@@ -293,7 +293,7 @@ const configurationSourceLabel = computed(() => {
 })
 const joinedAtLocal = computed(() => props.account ? toLocalInput(props.account.created_at) : '')
 const draftProfile = computed<CostProfile>(() => ({
-  amount: Number(form.amount) || 0,
+  amount: typeof form.amount === 'number' ? form.amount : Number.NaN,
   currency: form.currency,
   billing_cycle: form.billing_cycle,
   started_at: props.account ? maxStartTime(toIso(form.started_at, props.account.created_at), props.account.created_at) : new Date().toISOString(),
@@ -303,7 +303,8 @@ const draftProfile = computed<CostProfile>(() => ({
 const currentAccrued = computed(() => accruedCost(draftProfile.value, props.now))
 const currentHourly = computed(() => hourlyRate(draftProfile.value))
 const currentElapsed = computed(() => elapsedHours(draftProfile.value.started_at, props.now))
-const isValid = computed(() => Number.isFinite(Number(form.amount)) && Number(form.amount) >= 0 && Boolean(form.started_at))
+const isValid = computed(() => typeof form.amount === 'number' && Number.isFinite(form.amount) && form.amount >= 0
+  && Boolean(form.started_at.trim()) && Number.isFinite(new Date(form.started_at).getTime()))
 
 function maxStartTime(requested: string, joinedAt: string): string {
   return new Date(requested).getTime() < new Date(joinedAt).getTime() ? joinedAt : requested

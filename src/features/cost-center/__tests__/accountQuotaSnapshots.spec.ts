@@ -89,7 +89,7 @@ describe('already-read Cockpit snapshots to account rows', () => {
   it('does not create a 1970 reset date or borrow a fresh account timestamp when the source omits one', () => {
     const result = cockpitSnapshotsToAccountUsage([snapshot({ resetAtMs: null, updatedAtMs: null })], [account('account-a')], {}, NOW)[accountIdToCostId('account-a')]
     expect(quotaWindowState(result.seven_day, NOW, iso(NOW))).toMatchObject({ utilization: 20, resetState: 'unknown', updatedAt: null })
-    const history = cockpitQuotaToAccountUsage([{ email: 'same@example.test', updatedAt: NOW, models: { model: { modelId: 'model', points: [{ timestamp: NOW - 1000, remainingPercentage: 60, resetTime: 0, countdownSeconds: 0 }] } } }], [{ accountId: 'account-a', email: 'same@example.test', usage: {} as never }])
+    const history = cockpitQuotaToAccountUsage([{ email: 'same@example.test', updatedAt: NOW, models: { model: { modelId: 'model', points: [{ timestamp: NOW - 1000, remainingPercentage: 60, resetTime: 0, countdownSeconds: 0 }] } } }], [{ id: 'account-a', platform: 'antigravity', email: 'same@example.test' }])
     const model = history[accountIdToCostId('account-a')].antigravity_quota!.model as RecordedQuotaProgress & { reset_time: string }
     expect(model.reset_time).toBe('')
     expect(quotaWindowState(model, NOW)).toMatchObject({ utilization: 40, resetState: 'unknown', updatedAt: iso(NOW - 1000) })

@@ -5,6 +5,7 @@
 
 import { apiClient } from '../client'
 import { getCostServiceBaseURL } from '../url'
+import { assertCostLossStatesResponse } from './costExtensions'
 import type {
   Account,
   CreateAccountRequest,
@@ -185,6 +186,7 @@ export interface AccountCostLossEvent {
 
 export async function listCostLossStates(): Promise<AccountCostLossStatesResponse> {
   const { data } = await apiClient.get<AccountCostLossStatesResponse>('/admin/accounts/cost-loss-states', { baseURL: getCostServiceBaseURL(), _explicitBaseURL: true })
+  assertCostLossStatesResponse(data)
   return data
 }
 

@@ -56,6 +56,7 @@
           </select>
         </label>
         <p v-if="keyLoadState === 'unavailable'" class="cost-api-empty is-error" role="alert">{{ t('costComponents.apiKeysUnavailable', { reason: keyLoadError }) }}</p>
+        <p v-else-if="keyLoadState === 'partial'" class="cost-api-empty is-error" role="alert">{{ t('costComponents.apiKeysPartiallyLoaded', { count: keys.length, reason: keyLoadError }) }}</p>
         <p v-else-if="keyLoadState === 'empty'" class="cost-api-empty"> {{ t('costComponents.theApiKeyListLoadedSuccessfullyAnd') }} </p>
         <p v-else-if="keyLoadState === 'loading'" class="cost-api-empty"> {{ t('costComponents.loadingApiKeysConfigurationWillNotBe') }} </p>
         <p v-else-if="selectedKey" class="cost-api-hint"> {{ t('costComponents.currentKey') }} {{ selectedKey.name }} · {{ selectedKey.group?.platform || t('costComponents.noPlatformAssigned') }} · {{ selectedKey.status }}
@@ -124,11 +125,11 @@
 import { useI18n } from 'vue-i18n'
 const { t } = useI18n()
 
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { CheckCircle2, Copy, ExternalLink, KeyRound, LoaderCircle, RefreshCcw, ShieldCheck, Terminal, TriangleAlert, Wifi } from '@lucide/vue'
 import { authAPI, keysAPI } from '@/api'
-import { getActiveConnection } from '@/api/url'
+import { captureAuthConnection, getActiveConnection, isAuthConnectionCurrent } from '@/api/url'
 import { fetchGateway } from '@/api/fetch'
 import type { ApiKey } from '@/types'
 import type { OpsDashboardOverview } from '@/api/admin/ops'
@@ -145,7 +146,7 @@ const router = useRouter()
 const { copyToClipboard } = useClipboard()
 const keys = ref<ApiKey[]>([])
 const loadingKeys = ref(false)
-const keyLoadState = ref<'loading' | 'measured' | 'empty' | 'unavailable'>('loading')
+const keyLoadState = ref<'loading' | 'measured' | 'partial' | 'empty' | 'unavailable'>('loading')
 const keyLoadError = ref('')
 const selectedKeyId = ref('')
 const preset = ref<PresetId>('codex')
@@ -156,6 +157,12 @@ const lastProbeMs = ref<number | null>(null)
 const testMessage = ref('')
 const testOk = ref(false)
 const publicBaseUrl = ref('')
+const KEY_PAGE_SIZE = 100
+const MAX_KEY_PAGES = 100
+let keyLoadRevision = 0
+let keyLoadController: AbortController | null = null
+let probeRevision = 0
+let probeController: AbortController | null = null
 
 const presets = [
   { id: 'codex' as const, label: 'Codex CLI', icon: Terminal },
@@ -183,7 +190,7 @@ const isLocalGateway = computed(() => gatewayBase.value
 const gatewayClass = computed(() => (gatewayBase.value ? 'cost-api-status-card--lime' : ''))
 
 const activeKeys = computed(() => keys.value.filter((key) => key.status === 'active'))
-const selectedKey = computed(() => keys.value.find((key) => String(key.id) === selectedKeyId.value) || null)
+const selectedKey = computed(() => activeKeys.value.find((key) => String(key.id) === selectedKeyId.value) || null)
 const connectionLabel = computed(() => testing.value ? t('costComponents.testingm055') : testOk.value ? t('costComponents.connectionHealthy') : lastProbeMs.value !== null ? t('costComponents.connectionError') : t('costComponents.notTested'))
 const connectionClass = computed(() => testOk.value ? 'is-ok' : lastProbeMs.value !== null ? 'is-error' : '')
 const configTitle = computed(() => {
@@ -239,19 +246,65 @@ function formatLatency(value?: number | null): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`
 }
 
+async function readKeyPages(current: () => boolean, signal: AbortSignal) {
+  const items: ApiKey[] = []
+  const seen = new Set<number>()
+  let expectedTotal: number | null = null
+  let expectedPageSize: number | null = null
+  try {
+    for (let page = 1; page <= MAX_KEY_PAGES && current(); page++) {
+      const result = await keysAPI.list(page, KEY_PAGE_SIZE, { sort_by: 'created_at', sort_order: 'desc' }, { signal })
+      if (!current()) return { items: [], complete: false, error: '' }
+      if (!result || !Array.isArray(result.items) || !Number.isSafeInteger(result.total) || result.total < 0
+        || result.page !== page || !Number.isSafeInteger(result.page_size) || result.page_size <= 0
+        || result.items.length > result.page_size
+        || (result.pages != null && result.pages !== Math.ceil(result.total / result.page_size))
+        || result.items.some(key => !key || !Number.isSafeInteger(key.id) || key.id <= 0
+          || typeof key.key !== 'string' || !key.key.trim() || typeof key.status !== 'string')) {
+        throw new Error(t('costComponents.apiKeysInvalidPage'))
+      }
+      if ((expectedTotal != null && result.total !== expectedTotal)
+        || (expectedPageSize != null && result.page_size !== expectedPageSize)
+        || result.items.some(key => seen.has(key.id))) {
+        throw new Error(t('costComponents.apiKeysChangedDuringRead'))
+      }
+      expectedTotal = result.total
+      expectedPageSize = result.page_size
+      for (const key of result.items) {
+        if (seen.has(key.id)) throw new Error(t('costComponents.apiKeysChangedDuringRead'))
+        seen.add(key.id)
+        items.push(key)
+      }
+      if (items.length === expectedTotal) return { items, complete: true, error: '' }
+      if (items.length > expectedTotal || result.items.length < result.page_size) throw new Error(t('costComponents.apiKeysInvalidPage'))
+    }
+    throw new Error(t('costComponents.apiKeysReadLimit', { count: MAX_KEY_PAGES * KEY_PAGE_SIZE }))
+  } catch (error) {
+    return { items, complete: false, error: error instanceof Error ? error.message : t('costComponents.failedToLoadApiKeys') }
+  }
+}
+
 async function loadKeys() {
+  const context = captureAuthConnection()
+  const revision = ++keyLoadRevision
+  keyLoadController?.abort()
+  const controller = new AbortController()
+  keyLoadController = controller
+  const current = () => revision === keyLoadRevision && isAuthConnectionCurrent(context)
   loadingKeys.value = true
   keyLoadState.value = 'loading'
   keyLoadError.value = ''
   try {
     const [keyResult, settingsResult] = await Promise.allSettled([
-      keysAPI.list(1, 100, { sort_by: 'created_at', sort_order: 'desc' }),
+      readKeyPages(current, controller.signal),
       authAPI.getPublicSettings(),
     ])
+    if (!current()) return
     if (keyResult.status === 'fulfilled') {
-      keys.value = keyResult.value.items || []
-      keyLoadState.value = keys.value.length ? 'measured' : 'empty'
-      if (!selectedKeyId.value || !keys.value.some((key) => String(key.id) === selectedKeyId.value)) {
+      keys.value = keyResult.value.items
+      keyLoadState.value = keyResult.value.complete ? keys.value.length ? 'measured' : 'empty' : keys.value.length ? 'partial' : 'unavailable'
+      keyLoadError.value = keyResult.value.error
+      if (!selectedKey.value) {
         selectedKeyId.value = String(activeKeys.value[0]?.id || '')
       }
     } else {
@@ -260,48 +313,64 @@ async function loadKeys() {
       keyLoadState.value = 'unavailable'
       keyLoadError.value = keyResult.reason instanceof Error ? keyResult.reason.message : t('costComponents.failedToLoadApiKeys')
     }
-    if (settingsResult.status === 'fulfilled') publicBaseUrl.value = settingsResult.value.api_base_url || ''
+    if (settingsResult.status === 'fulfilled') publicBaseUrl.value = typeof settingsResult.value?.api_base_url === 'string' ? settingsResult.value.api_base_url : ''
   } finally {
-    loadingKeys.value = false
+    if (current()) { loadingKeys.value = false; keyLoadController = null }
   }
 }
 
 async function testConnection() {
-  if (!selectedKey.value) return
+  const selected = selectedKey.value
+  if (!selected) return
   // 远程模式无活跃连接时 gatewayBase 为空:不发 fetch(否则打到 Tauri 资源服务器),直接提示配置连接
   if (!gatewayBase.value) {
     testMessage.value = t('costComponents.noRemoteConnectionConfiguredSetASub')
     testOk.value = false
     return
   }
+  const context = captureAuthConnection()
+  const base = gatewayBase.value
+  const keyId = selected.id, keyValue = selected.key
+  resetDiagnostics()
+  const revision = ++probeRevision
+  const current = () => revision === probeRevision && isAuthConnectionCurrent(context)
+    && selectedKey.value?.id === keyId && selectedKey.value?.key === keyValue && gatewayBase.value === base
   testing.value = true
   testMessage.value = ''
   testOk.value = false
   const started = performance.now()
   const controller = new AbortController()
+  probeController = controller
   const timeout = window.setTimeout(() => controller.abort(), 8_000)
   try {
     const response = await fetchGateway('/models', {
-      headers: { Authorization: `Bearer ${selectedKey.value.key}` },
+      headers: { Authorization: `Bearer ${keyValue}` },
       signal: controller.signal,
-    }, gatewayBase.value)
-    lastProbeMs.value = Math.round(performance.now() - started)
+    }, base)
+    if (!current()) return
     const payload = await response.json().catch(() => null) as any
+    if (!current()) return
+    lastProbeMs.value = Math.round(performance.now() - started)
     if (!response.ok) {
       const detail = payload?.error?.message || payload?.message || `HTTP ${response.status}`
       throw new Error(detail)
     }
-    const entries = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : []
-    models.value = entries.map((item: any) => typeof item === 'string' ? item : item?.id || item?.model || item?.slug).filter(Boolean)
+    // Official /v1/models returns data[]. Retain the existing models[] compatibility
+    // shape only when every entry supplies an actual nonempty model identifier.
+    const entries = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : null
+    const ids: unknown[] | undefined = entries?.map((item: any) => typeof item === 'string' ? item : item?.id || item?.model || item?.slug)
+    if (!ids || ids.some(id => typeof id !== 'string' || !id.trim())) throw new Error(t('costComponents.modelCatalogueInvalid'))
+    models.value = [...new Set(ids as string[])]
     if (!selectedModel.value || !models.value.includes(selectedModel.value)) selectedModel.value = models.value[0] || ''
     testOk.value = true
     testMessage.value = t('costComponents.connectionHealthyMs', { p0: models.value.length ? t('costComponents.foundModels', { p0: models.value.length }) : t('costComponents.authenticationPassed'), p1: lastProbeMs.value })
   } catch (error: any) {
+    if (!current()) return
     lastProbeMs.value = Math.round(performance.now() - started)
     testMessage.value = error?.name === 'AbortError' ? t('costComponents.noResponseWithinSecondsCheckTheRemote') : error?.message || t('costComponents.connectionFailedCheckThatTheServiceIs')
   } finally {
     window.clearTimeout(timeout)
-    testing.value = false
+    if (current()) { testing.value = false; probeController = null }
   }
 }
 
@@ -314,15 +383,29 @@ function openKeyManagement() {
   router.push('/keys')
 }
 
-watch(selectedKeyId, () => {
+function resetDiagnostics() {
+  probeRevision++
+  probeController?.abort()
+  probeController = null
+  testing.value = false
   models.value = []
   selectedModel.value = ''
   testMessage.value = ''
   testOk.value = false
   lastProbeMs.value = null
-})
+}
+
+watch([selectedKeyId, () => selectedKey.value?.key, gatewayBase], resetDiagnostics, { flush: 'sync' })
+watch(() => captureAuthConnection().revision, () => {
+  keys.value = []
+  selectedKeyId.value = ''
+  publicBaseUrl.value = ''
+  resetDiagnostics()
+  void loadKeys()
+}, { flush: 'sync' })
 
 onMounted(loadKeys)
+onBeforeUnmount(() => { keyLoadRevision++; keyLoadController?.abort(); resetDiagnostics() })
 </script>
 
 <style scoped>

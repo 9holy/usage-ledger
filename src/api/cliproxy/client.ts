@@ -13,7 +13,18 @@
 
 import axios, { type AxiosInstance, type AxiosError, type InternalAxiosRequestConfig } from 'axios'
 import { getLocale } from '@/i18n'
-import { getActiveConnection, getCliproxyManagementBase, isDesktopRuntime } from '@/api/url'
+import { captureAuthConnection, getActiveConnection, getCliproxyManagementBase, isDesktopRuntime } from '@/api/url'
+
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    _cliproxyConnectionRevision?: number
+  }
+}
+
+function isObsoleteRequest(config?: { _cliproxyConnectionRevision?: number }): boolean {
+  return config?._cliproxyConnectionRevision != null
+    && config._cliproxyConnectionRevision !== captureAuthConnection().revision
+}
 
 export const cliproxyClient: AxiosInstance = axios.create({
   timeout: 30000,
@@ -25,6 +36,8 @@ export const cliproxyClient: AxiosInstance = axios.create({
 // 请求拦截器:每次刷新 baseURL(切换连接)+ 注入 Bearer secretKey + locale
 cliproxyClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
+    if (isObsoleteRequest(config)) throw new axios.CanceledError('CLIProxyAPI connection changed before the request was sent')
+    config._cliproxyConnectionRevision = captureAuthConnection().revision
     // baseURL 动态:从当前活跃连接拼 /v0/management(切换连接后立即生效)
     config.baseURL = getCliproxyManagementBase()
 
@@ -45,11 +58,17 @@ cliproxyClient.interceptors.request.use(
 
 // 响应拦截器:无信封解包,只做错误归一化 + 401 派发(不跳转,IP ban 考虑)
 cliproxyClient.interceptors.response.use(
-  (response) => response, // 裸数据直接透传,调用方自己取 response.data
+  (response) => {
+    if (isObsoleteRequest(response.config)) throw new axios.CanceledError('CLIProxyAPI connection changed while reading management data')
+    return response // Bare payload; callers also retain response metadata when needed.
+  },
   (error: AxiosError) => {
     // 请求取消保持原样
     if (error.code === 'ERR_CANCELED' || axios.isCancel(error)) {
       return Promise.reject(error)
+    }
+    if (isObsoleteRequest(error.config)) {
+      return Promise.reject(new axios.CanceledError('CLIProxyAPI connection changed while reading management data'))
     }
 
     if (error.response) {

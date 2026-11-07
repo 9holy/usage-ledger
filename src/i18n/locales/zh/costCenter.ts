@@ -615,6 +615,7 @@ export default {
     "authentication": "认证方式",
     "apiKeyForV1Authentication": "业务 API Key(/v1/* 验证用)",
     "version": "版本",
+    "cpaManagementReportedVersion": "当前管理响应 X-CPA-VERSION 报告的运行版本；未报告时保持未知",
     "cpaDoesNotExposeAVersionInterface": "CPA 未暴露版本接口",
     "authFiles": "认证文件数",
     "routingStrategy": "路由策略",

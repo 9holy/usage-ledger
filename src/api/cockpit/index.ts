@@ -18,6 +18,7 @@ import { quoteModelCatalogBatch, type ModelCatalogQuoteInput } from '@/api/model
 import { errMsg } from '@/stores/connection'
 import { isDesktopRuntime as detectDesktop } from '@/api/url'
 import i18n from '@/i18n'
+import { validateLocalCostProfiles } from './costProfiles'
 
 /** Opaque identity of the actual native data root; a failed read never means default local. */
 export interface CockpitSourceIdentity { sourceInstanceId: string }
@@ -580,10 +581,9 @@ export async function getCockpitRequestLogSummary(
   }
 }
 
-/** 列 cache/quota_history 下所有账号配额历史文件并批量读。
- *  quota_history 文件名是 sha256 哈希(非 [a-z_0-9]),无法走 read_cockpit_file → 走 read_cockpit_dir。
- *  每文件 = 一账号(email 维度),含按模型的配额消耗时序 points[]。
- *  非桌面端/目录缺失返空数组。 */
+/** Read legacy Google quota observations; no current producer is assumed.
+ * Non-desktop runtime or a genuinely absent directory returns an empty array.
+ * Read/parse/schema failures reach the view's source-error handler. */
 export async function getCockpitQuotaHistories(): Promise<CockpitQuotaHistoryFile[]> {
   if (!detectDesktop()) {
     console.warn(`[cockpit] ${NOT_DESKTOP_MSG}`)
@@ -596,19 +596,26 @@ export async function getCockpitQuotaHistories(): Promise<CockpitQuotaHistoryFil
     })
     const results: CockpitQuotaHistoryFile[] = []
     for (const entry of entries) {
+      let parsed: unknown
       try {
-        const parsed = JSON.parse(entry.content) as CockpitQuotaHistoryFile
-        if (parsed && parsed.email && parsed.models) {
-          results.push(parsed)
-        }
+        parsed = JSON.parse(entry.content)
       } catch {
-        // 单文件解析失败跳过(可能 .tmp 残留已过白名单)
+        throw new Error(`Invalid Cockpit quota history JSON: ${entry.name}`)
       }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`Invalid Cockpit quota history record: ${entry.name}`)
+      }
+      const record = parsed as Record<string, unknown>
+      if (typeof record.email !== 'string' || !record.email.trim() || !record.models ||
+          typeof record.models !== 'object' || Array.isArray(record.models)) {
+        throw new Error(`Invalid Cockpit quota history fields: ${entry.name}`)
+      }
+      results.push(record as unknown as CockpitQuotaHistoryFile)
     }
     return results
   } catch (e) {
-    console.warn('[cockpit] 读配额历史目录失败:', errMsg(e, '目录不存在'))
-    return []
+    console.warn('[cockpit] 读配额历史目录失败:', errMsg(e, '读取失败'))
+    throw e
   }
 }
 
@@ -774,13 +781,15 @@ export async function readCostProfiles(): Promise<CostProfileMap> {
   if (!detectDesktop()) return {}
   const raw = await invoke<string>('read_cost_profiles')
   const parsed: unknown = JSON.parse(raw)
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid local cost profile file: expected an object')
+  validateLocalCostProfiles(parsed)
   return parsed as CostProfileMap
 }
 
 /** 全量写本地成本档案 map(Rust 侧落盘到 %APPDATA%/2api-console/cockpit_cost_profiles.json)。 */
 export async function writeCostProfiles(map: CostProfileMap): Promise<void> {
   if (!detectDesktop()) throw new Error('Local cost profiles can only be saved in the desktop app')
+  // Validate before JSON.stringify: NaN/Infinity would otherwise become null on disk.
+  validateLocalCostProfiles(map)
   await invoke('write_cost_profiles', { json: JSON.stringify(map, null, 2) })
 }
 
@@ -801,30 +810,47 @@ export interface CockpitUsageLedger {
 /** 台账条目上限:超出裁 updatedAt 最旧条目,防文件无限膨胀 */
 export const COCKPIT_LEDGER_CAP = 2000
 
+const ledgerIntegerFields = new Set([
+  'requestCount', 'successCount', 'failureCount', 'clientCanceledCount',
+  'upstreamResponseFailedCount', 'streamIncompleteCount', 'totalLatencyMs',
+  'textRequestCount', 'imageRequestCount', 'imageGenerationRequestCount',
+  'imageEditRequestCount', 'imageGenerationCapabilityFailureCount', 'inputTokens',
+  'outputTokens', 'totalTokens', 'cachedTokens', 'reasoningTokens', 'updatedAt',
+])
+
+function validateUsageLedger(parsed: unknown): asserts parsed is CockpitUsageLedger {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray((parsed as CockpitUsageLedger).accounts)) {
+    throw new Error('Invalid Cockpit usage ledger: expected an accounts array')
+  }
+  const emails = new Set<string>()
+  for (const entry of (parsed as CockpitUsageLedger).accounts) {
+    if (!entry || typeof entry.email !== 'string' || !entry.email.trim()
+      || !Number.isSafeInteger(entry.updatedAt) || entry.updatedAt < 0 || entry.updatedAt > 8_640_000_000_000_000
+      || !entry.usage || typeof entry.usage !== 'object' || Array.isArray(entry.usage)
+      || Object.entries(entry.usage).some(([key, value]) => typeof value !== 'number' || !Number.isFinite(value) || value < 0
+        || (ledgerIntegerFields.has(key) && !Number.isSafeInteger(value)))) {
+      throw new Error('Invalid Cockpit usage ledger: malformed account history')
+    }
+    if (emails.has(entry.email)) throw new Error('Invalid Cockpit usage ledger: ambiguous email history')
+    emails.add(entry.email)
+  }
+}
+
 /** Missing file is null; unreadable or malformed history must never be treated as a new ledger. */
 export async function readCostLedger(): Promise<CockpitUsageLedger | null> {
   if (!detectDesktop()) throw new Error('Cockpit usage ledger is available only in the desktop app')
   const raw = await invoke<string>('read_cost_ledger')
   const parsed: unknown = JSON.parse(raw)
   if (parsed == null) return null
-  if (typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray((parsed as CockpitUsageLedger).accounts)) {
-    throw new Error('Invalid Cockpit usage ledger: expected an accounts array')
-  }
-  for (const entry of (parsed as CockpitUsageLedger).accounts) {
-    if (!entry || typeof entry.email !== 'string' || !entry.email.trim()
-      || typeof entry.updatedAt !== 'number' || !Number.isFinite(entry.updatedAt) || entry.updatedAt < 0
-      || !entry.usage || typeof entry.usage !== 'object' || Array.isArray(entry.usage)
-      || Object.values(entry.usage).some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
-      throw new Error('Invalid Cockpit usage ledger: malformed account history')
-    }
-  }
-  return parsed as CockpitUsageLedger
+  validateUsageLedger(parsed)
+  return parsed
 }
 
 /** Native code checks the expected root before writing the per-instance usage ledger. */
 export async function writeCostLedger(entries: CockpitLedgerEntry[], expectedSourceInstanceId?: string): Promise<void> {
   if (!detectDesktop()) throw new Error('Cockpit usage ledger can only be saved in the desktop app')
   const payload: CockpitUsageLedger = { accounts: entries.slice(0, COCKPIT_LEDGER_CAP) }
+  validateUsageLedger(payload)
   await invoke('write_cost_ledger', { json: JSON.stringify(payload, null, 2), expectedSourceInstanceId })
 }
 

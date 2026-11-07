@@ -4,6 +4,7 @@
  */
 
 import { apiClient } from '../client'
+import { assertPricingCatalogStatus } from './costExtensions'
 import type { BillingMode, ChannelStatus, BillingModelSource } from '@/constants/channel'
 
 export type { BillingMode } from '@/constants/channel'
@@ -192,11 +193,13 @@ export async function syncPricingModels(platform: string): Promise<SyncPricingMo
 
 export async function getPricingStatus(): Promise<PricingCatalogStatus> {
   const { data } = await apiClient.get<PricingCatalogStatus>('/admin/channels/pricing/status')
+  assertPricingCatalogStatus(data)
   return data
 }
 
 export async function refreshPricing(): Promise<PricingCatalogStatus> {
   const { data } = await apiClient.post<PricingCatalogStatus>('/admin/channels/pricing/refresh')
+  assertPricingCatalogStatus(data)
   return data
 }
 

@@ -3673,7 +3673,7 @@ mod catalog_tests {
             adjust(&tx, &record, &cost, 1).unwrap();
         }
         tx.execute_batch("INSERT INTO monitor_files VALUES('fixture','codex',42,'signature','{}');
-            INSERT INTO monitor_quotas VALUES(1,'codex','fixture','limit','week',10080,1000,'{}');
+            INSERT INTO monitor_quotas(id,tool,account_key,limit_id,slot,window_minutes,observed_ms,data) VALUES(1,'codex','fixture','limit','week',10080,1000,'{}');
             INSERT INTO monitor_account_cycles(id,tool,account_key,slot,window_minutes,start_ms,end_ms,reset_ms,observed_ms,used_percent,exhausted_ms) VALUES(1,'codex','fixture','week',10080,1000,2000,2000,1500,64,NULL);
             INSERT INTO monitor_state VALUES('pricing_version','old-model-rules');").unwrap();
         tx.commit().unwrap();

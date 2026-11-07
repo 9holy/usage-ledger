@@ -107,7 +107,7 @@ fn data_channel_audit_selected_root_change_does_not_reassign_default_history() {
     let legacy = fixture.root.join(".antigravity_cockpit");
     std::fs::create_dir_all(&modern).unwrap();
     let modern_identity = crate::cockpit_data_path::source_instance_id().unwrap();
-    let payload = "{\"accounts\":[{\"email\":\"modern@example.invalid\"}]}";
+    let payload = "{\"accounts\":[{\"email\":\"modern@example.invalid\",\"updatedAt\":1,\"usage\":{}}]}";
     crate::write_cost_ledger(payload.into(), Some(modern_identity.clone())).unwrap();
     std::fs::create_dir_all(&legacy).unwrap();
     assert_ne!(crate::cockpit_data_path::source_instance_id().unwrap(), modern_identity,
@@ -153,7 +153,7 @@ fn data_channel_audit_custom_sources_do_not_share_json_usage_history() {
     let _appdata = crate::EnvGuard::set("APPDATA", fixture.root.join("app-data"));
     let a = fixture.root.join("source-a");
     let b = fixture.root.join("source-b");
-    let payload = r#"{"accounts":[{"email":"same@example.invalid","usage":{"totalTokens":123}}]}"#;
+    let payload = r#"{"accounts":[{"email":"same@example.invalid","updatedAt":1,"usage":{"totalTokens":123}}]}"#;
     {
         let _source = crate::EnvGuard::set("COCKPIT_TOOLS_DATA_DIR", &a);
         crate::write_cost_ledger(payload.to_string(), None).unwrap();

@@ -115,6 +115,39 @@ describe('CostEventsPanel', () => {
     expect(getFinanceLedger).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'cliproxy', instanceId: 'remote-2' }))
   })
 
+  it('does not show old-window financial facts under a new window while its read fails', async () => {
+    vi.mocked(getFinanceLedger).mockResolvedValueOnce(facts())
+    const wrapper = panel(); await flushPromises()
+    expect(wrapper.text()).toContain('invoice')
+    let rejectRead!: (error: Error) => void
+    vi.mocked(getFinanceLedger).mockImplementationOnce(() => new Promise((_, reject) => { rejectRead = reject }))
+    await wrapper.setProps({ startMs: 1792166400000, endMs: 1792252800000 })
+    expect(wrapper.text()).not.toContain('invoice')
+    expect(wrapper.find('[aria-label="编辑财务记录"]').exists()).toBe(false)
+    rejectRead(new Error('new window unavailable')); await flushPromises()
+    expect(wrapper.text()).toContain('new window unavailable')
+    expect(wrapper.find('.finance-summary-row').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('invoice')
+    expect(wrapper.text()).not.toContain('还没有已录入的有效财务记录')
+    wrapper.unmount()
+  })
+
+  it('does not reuse all-account totals when an account-filter query fails and recovers on retry', async () => {
+    vi.mocked(getFinanceLedger).mockResolvedValueOnce(facts())
+    const wrapper = panel(); await flushPromises()
+    vi.mocked(getFinanceLedger).mockRejectedValueOnce(new Error('account scope unavailable'))
+    await wrapper.get('[aria-label="筛选账号"]').setValue('a'); await flushPromises()
+    expect(getFinanceLedger).toHaveBeenLastCalledWith(expect.objectContaining({ accountId: 'a' }))
+    expect(wrapper.text()).toContain('account scope unavailable')
+    expect(wrapper.find('.finance-summary-row').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('invoice')
+    vi.mocked(getFinanceLedger).mockResolvedValueOnce(empty())
+    await wrapper.get('[aria-label="刷新财务记录"]').trigger('click'); await flushPromises()
+    expect(wrapper.text()).not.toContain('account scope unavailable')
+    expect(wrapper.text()).toContain('还没有已录入的有效财务记录')
+    wrapper.unmount()
+  })
+
   it('queries all history and pages without changing the operating window, and edits a full batch', async () => {
     vi.mocked(getFinanceLedger).mockResolvedValue({ ...facts(), totalEvents: 201, purchaseChannels: ['seller'], planLabels: ['plan'], events: [{ ...event, batchId: 'batch' }] })
     vi.mocked(getFinanceBatch).mockResolvedValue({ scope: { source: 'cockpit', instanceId: 'local' }, batchId: 'batch', totalAmount: 100, currency: 'CNY', occurredAtMs: event.occurredAtMs, events: [event] })

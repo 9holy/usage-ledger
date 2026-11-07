@@ -28,7 +28,7 @@ vi.mock('@/api/financeLedger', () => ({ saveFinanceBatch: vi.fn() }))
 
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.list.mockResolvedValue({ items: [{ id: 1, name: 'fixture key', key: 'fixture-not-a-credential', status: 'active' }] })
+  mocks.list.mockResolvedValue({ items: [{ id: 1, name: 'fixture key', key: 'fixture-not-a-credential', status: 'active' }], total: 1, page: 1, page_size: 100, pages: 1 })
   mocks.settings.mockResolvedValue({ api_base_url: '' })
   vi.stubGlobal('fetch', mocks.fetch)
 })

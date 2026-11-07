@@ -123,7 +123,7 @@ export async function getQuotaChannels(): Promise<QuotaChannelSummary[]> {
     return await invoke<QuotaChannelSummary[]>('quota_list_channels')
   } catch (e) {
     console.warn('[quota] 列渠道失败:', errMsg(e, '未知错误'))
-    return []
+    throw e
   }
 }
 
@@ -134,7 +134,7 @@ export async function getQuotaSnapshots(channel: string): Promise<QuotaSnapshot[
     return await invoke<QuotaSnapshot[]>('quota_snapshots', { channel })
   } catch (e) {
     console.warn(`[quota] 读 ${channel} 配额失败:`, errMsg(e, '未知错误'))
-    return []
+    throw e
   }
 }
 
@@ -149,7 +149,7 @@ export async function refreshQuotaSnapshots(channel: string): Promise<QuotaRefre
     return await invoke<QuotaRefreshResult>('quota_refresh', { channel })
   } catch (e) {
     console.warn(`[quota] 刷新 ${channel} 配额失败:`, errMsg(e, '未知错误'))
-    return null
+    throw e
   }
 }
 
@@ -160,7 +160,7 @@ export async function getQuotaHistory(email = ''): Promise<QuotaHistorySeries[]>
     return await invoke<QuotaHistorySeries[]>('quota_history', { email })
   } catch (e) {
     console.warn('[quota] 读配额历史失败:', errMsg(e, '未知错误'))
-    return []
+    throw e
   }
 }
 

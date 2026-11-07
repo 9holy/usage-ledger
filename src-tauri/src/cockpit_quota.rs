@@ -33,6 +33,9 @@ use serde::Serialize;
 #[path = "cockpit_quota_contract_tests.rs"]
 mod contract_tests;
 
+#[path = "cockpit_quota_providers.rs"]
+mod providers;
+
 // ────────────────────────────── 渠道常量 ──────────────────────────────
 
 pub const CH_CODEX: &str = "codex";
@@ -82,9 +85,9 @@ pub const ALL_CHANNELS: &[&str] = &[
 
 // ────────────────────────────── 路径与缓存常量 ──────────────────────────────
 
-/// 配额历史（按模型的时间序列，就是 cockpit 界面上百分比进度条的来源）。
+/// 历史兼容采样目录；固定当前上游没有此目录的生产写入器。不是当前官方用量接口。
 pub const SUBDIR_QUOTA_HISTORY: &str = "cache/quota_history";
-/// antigravity 桌面端配额缓存（TTL 60s）。★ D-5：这一条原本不在白名单里。
+/// antigravity 桌面缓存；当前 quota.rs::write_api_cache 写 v2，保留 v1 历史兼容。
 pub const SUBDIR_QUOTA_DESKTOP: &str = "cache/quota_api_v1_desktop/authorized";
 /// antigravity 插件端配额缓存。
 pub const SUBDIR_QUOTA_PLUGIN: &str = "cache/quota_api_v1_plugin/authorized";
@@ -97,7 +100,7 @@ pub const ALLOWED_QUOTA_SUBDIRS: &[&str] = &[
     SUBDIR_QUOTA_PLUGIN,
 ];
 
-/// antigravity 桌面缓存的 TTL（对齐 cockpit 自己的 60 秒）。
+/// 桌面缓存 TTL，与 quota.rs 的当前 v2 缓存相同；不会更新数据自身观测时间。
 pub const TTL_DESKTOP_CACHE_MS: i64 = 60_000;
 /// 账号快照 / 配额历史的 TTL。
 pub const TTL_SNAPSHOT_MS: i64 = 300_000;
@@ -258,14 +261,9 @@ pub fn raw_fields_of(channel: &str) -> &'static [&'static str] {
 /// 2. `github-copilot`（平台 ID）→ 目录 **`github_copilot_accounts`**（连字符换成下划线）
 ///    —— `crates/cockpit-core/src/modules/github_copilot_account.rs:11`，
 ///    `src-tauri/src/modules/github_copilot_account.rs:12` 同。
-/// 3. `trae_cn` / `trae_solo` / `trae_solo_cn` —— cockpit 把 **4 个 Trae 平台存在同一个
-///    `trae_accounts` 目录**（`src-tauri/src/modules/trae_account_platform_storage.rs:22`），
-///    平台标识在**账号内部**字段里（`resolve_account_platform_kind`），而账号详情是加密的
-///    ⇒ **我们无法按平台拆分**。所以这 3 个变体**刻意保持指向各自的（不存在的）目录** ——
-///    结果是它们不占位（`has_accounts=false`，前端整行过滤掉），而不是谎报"0 账号"。
-///    它们的数据**没有丢**：都在 `trae` 这一行里（`trae_accounts` 是全平台合计）。
-///    **不要"顺手修好"**：把这 3 个指到 `trae_accounts` 会让同一批账号在 4 行里重复出现，
-///    比不显示更糟。有 `trae_variants_deliberately_point_at_their_own_missing_dirs` 钉死。
+/// 3. Trae 四个平台共用 `trae_accounts`；当前明文索引的
+///    `query_identity` v1/platform 明确记录所属平台（`models/trae.rs::summary`、
+///    `trae_account_identity.rs::query_identity`）。必须按该身份分区，不能重复计数。
 ///
 /// 其余渠道机械拼 `{channel}_accounts` 与 cockpit 的 `ACCOUNTS_DIR` 常量**逐一核对一致**
 /// （codex / cursor / kiro / grok / windsurf / codebuddy / codebuddy_cn / workbuddy / qoder /
@@ -284,7 +282,8 @@ pub fn accounts_dir_name(channel: &str) -> String {
         CH_CLAUDE => "claude_accounts".to_string(),
         // 平台 ID `github-copilot` ≠ 目录 `github_copilot_accounts`（见上方依据 2）。
         CH_GITHUB_COPILOT => "github_copilot_accounts".to_string(),
-        // 默认：`{channel}_accounts`。trae 3 个变体刻意走这条（见上方依据 3）。
+        CH_TRAE | CH_TRAE_CN | CH_TRAE_SOLO | CH_TRAE_SOLO_CN => "trae_accounts".to_string(),
+        // 其余渠道的独立账号池。
         _ => format!("{channel}_accounts"),
     }
 }
@@ -454,6 +453,7 @@ struct IndexAccount {
     email: String,
     display_name: String,
     plan: Option<String>,
+    trae_platform: Option<String>,
 }
 
 fn load_index_accounts(root: &Path, channel: &str) -> Result<Option<HashMap<String, IndexAccount>>, String> {
@@ -482,6 +482,7 @@ fn load_index_accounts(root: &Path, channel: &str) -> Result<Option<HashMap<Stri
             email: first_str(entry, &["email", "accountEmail", "emailAddress"]),
             display_name: first_str(entry, &["display_name", "displayName", "name"]),
             plan: plan_of(entry),
+            trae_platform: if providers::is_trae(channel) { providers::indexed_trae_platform(entry)? } else { None },
         };
         if out.insert(id.to_string(), account).is_some() {
             return Err(format!("账号索引 {} 包含重复账号 ID", path.display()));
@@ -549,7 +550,12 @@ impl ChannelAccounts {
     /// files remain read-only and may be encrypted; only observed fields are used.
     pub fn load(root: &Path, channel: &str) -> Result<Self, String> {
         let dir = root.join(accounts_dir_name(channel));
-        let index = load_index_accounts(root, channel)?;
+        let mut index = load_index_accounts(root, channel)?;
+        if providers::is_trae(channel) {
+            if let Some(index) = &mut index {
+                index.retain(|_, entry| entry.trae_platform.as_deref().is_none_or(|platform| platform == channel));
+            }
+        }
         let mut accounts = Vec::new();
         if !dir.exists() {
             if index.as_ref().is_some_and(|entries| !entries.is_empty()) {
@@ -587,6 +593,16 @@ impl ChannelAccounts {
                 return Err(format!("账号详情 ID 与文件名不一致: {}", path.display()));
             }
             let metadata = index.as_ref().and_then(|entries| entries.get(&id));
+            if providers::is_trae(channel) {
+                let indexed = metadata.and_then(|entry| entry.trae_platform.as_deref());
+                let explicit = providers::explicit_trae_platform(&json)?;
+                if indexed.zip(explicit.as_deref()).is_some_and(|(indexed, explicit)| indexed != explicit) {
+                    return Err(format!("Trae 账号索引与详情的平台身份不一致: {}", path.display()));
+                }
+                let platform = indexed.or(explicit.as_deref()).ok_or_else(||
+                    format!("Trae 账号缺少可核实的平台身份，无法按四个平台分组: {}", path.display()))?;
+                if platform != channel { continue; }
+            }
             let detail_email = first_str(&json, &["email", "accountEmail", "emailAddress"]);
             if metadata.is_some_and(|entry| !entry.email.is_empty() && !detail_email.is_empty()
                 && entry.email != detail_email) {
@@ -1141,17 +1157,19 @@ fn native_pool(id: &str, field: &str, percent: f64, reset_at_ms: Option<i64>) ->
 /// Prefer the producer's normalized fields to guessing units from arbitrary raw
 /// endpoint payloads. Absolute balances remain quota denominators, never costs.
 fn provider_native_entries(channel: &str, json: &serde_json::Value) -> Option<Vec<RawEntry>> {
+    if let Some(entries) = providers::entries(channel, json) { return Some(entries); }
     if uses_desktop_cache(channel) {
         if let Some(models) = json.get("quota").and_then(|quota| quota.get("models")).and_then(|models| models.as_array()) {
             return Some(models.iter().filter_map(|model| {
                 let id = first_str(model, &["name"]);
                 if id.is_empty() { return None; }
+                let window = providers::google_summary_window(&id);
                 Some(RawEntry {
-                    scope: "model", model_id: id, display_name: first_str(model, &["display_name"]),
+                    scope: if window.is_some() { "pool" } else { "model" }, model_id: id, display_name: first_str(model, &["display_name"]),
                     field: "percentage".into(), raw_percent: model.get("percentage")?.as_f64()?,
                     reset_at_ms: model.get("reset_time").and_then(|value| value.as_str())
                         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()).map(|value| value.timestamp_millis()),
-                    window_kind: QuotaWindowKind::Unknown,
+                    window_kind: window.unwrap_or(QuotaWindowKind::Unknown),
                 })
             }).collect());
         }
@@ -1329,7 +1347,8 @@ fn snapshot_observed_at(channel: &str, json: &serde_json::Value) -> Option<i64> 
         }
     }
     if json.get("usage_updated_at").is_some_and(|value| !value.is_null()) {
-        if matches!(channel, CH_CODEX | CH_GITHUB_COPILOT | CH_WINDSURF | CH_QODER | CH_KIRO | CH_CURSOR) {
+        if matches!(channel, CH_CODEX | CH_GITHUB_COPILOT | CH_WINDSURF | CH_QODER | CH_KIRO | CH_CURSOR
+            | CH_TRAE | CH_TRAE_CN | CH_TRAE_SOLO | CH_TRAE_SOLO_CN | CH_CODEBUDDY | CH_CODEBUDDY_CN | CH_WORKBUDDY | CH_ZED) {
             return unix_seconds_ms(&json["usage_updated_at"]);
         }
         if matches!(channel, CH_GROK | CH_ZCODE | CH_CLAUDE) {
@@ -1337,6 +1356,22 @@ fn snapshot_observed_at(channel: &str, json: &serde_json::Value) -> Option<i64> 
         }
     }
     first_ms(json, &["updatedAt", "updated_at", "updatedAtMs"])
+}
+
+/// Summary window age is independent from the successful model-list query.
+fn snapshot_entry_observed_at(channel: &str, json: &serde_json::Value, entry: &RawEntry, fallback: Option<i64>) -> (Option<i64>, bool) {
+    if !uses_desktop_cache(channel) || entry.scope != "pool" || providers::google_summary_window(&entry.model_id).is_none() {
+        return (fallback, false);
+    }
+    let Some(quota) = json.get("quota") else { return (fallback, false); };
+    let stale = quota["quota_summary_stale"].as_bool() == Some(true);
+    let recorded = quota.get("quota_summary_updated_at").and_then(unix_seconds_ms);
+    (if stale { recorded } else { recorded.or(fallback) }, stale)
+}
+
+fn mark_retained_google_summary(row: &mut QuotaSnapshot) {
+    row.stale = true;
+    row.source_error = Some("Google quota summary refresh failed; retained window observation is not current".into());
 }
 
 /// 从账号 JSON 里按渠道字段表抽所有条目。
@@ -1454,6 +1489,8 @@ pub struct LiveApiProvider {
 /// 所以当账号文件被加密、账号侧 email 读不到时（见 [`SnapshotProvider::fetch`] 的路径 ④），
 /// 要用它当账号标识 —— 否则前端拿到一批 `account_id` 为空的行，无法归因也无法稳定排序。
 struct DesktopEntry {
+    /// v2 cache project scope; `Some(Null)` is an explicit no-project scope.
+    project_id: Option<serde_json::Value>,
     /// 文件名去 `.json`。cockpit 当前实现 = `sha256(email)`。
     id: String,
     email: String,
@@ -1465,6 +1502,16 @@ struct DesktopEntry {
 fn parse_desktop_file(file: &DirFile) -> Result<DesktopEntry, String> {
     let json: serde_json::Value = serde_json::from_str(&file.content)
         .map_err(|error| format!("解析额度缓存 {} 失败: {error}", file.name))?;
+    if json.get("version").is_some_and(|version| !matches!(version.as_u64(), Some(1 | 2))) {
+        return Err(format!("额度缓存 {} 的 version 不受支持", file.name));
+    }
+    if json.get("source").is_some_and(|source| source.as_str() != Some("authorized")) {
+        return Err(format!("额度缓存 {} 的 source 与 authorized 目录不一致", file.name));
+    }
+    let project_id = json.get("projectId").or_else(|| json.get("project_id")).cloned();
+    if project_id.as_ref().is_some_and(|value| !value.is_null() && !value.is_string()) {
+        return Err(format!("额度缓存 {} 的 projectId 类型无效", file.name));
+    }
     let email = first_str(&json, &["email"]);
     let payload = json.get("payload").unwrap_or(&json);
     if email.is_empty() || !payload.is_object() {
@@ -1473,6 +1520,7 @@ fn parse_desktop_file(file: &DirFile) -> Result<DesktopEntry, String> {
     let entries = entries_from_container(payload, QuotaWindowKind::Unknown);
     let id = file.name.trim_end_matches(".json").to_string();
     Ok(DesktopEntry {
+        project_id,
         id: if id.is_empty() { email.clone() } else { id },
         email,
         updated_at_ms: first_ms(&json, &["updatedAt", "updated_at", "updatedAtMs"]),
@@ -1540,18 +1588,42 @@ impl QuotaProvider for SnapshotProvider {
             if let Some(idx) = hit {
                 consumed[idx] = true;
                 let d = &desktop[idx];
-                let updated_at = d.updated_at_ms;
-                for entry in &d.entries {
-                    out.push(self.build(
-                        ch,
-                        acct,
-                        entry,
-                        updated_at,
-                        SUBDIR_QUOTA_DESKTOP,
-                        TTL_DESKTOP_CACHE_MS,
-                    )?);
+                // Upstream quota_cache::apply_cached_quota only replaces an
+                // account snapshot when the cache is strictly newer. Current v2
+                // cache writes live in quota.rs::write_api_cache (the separate
+                // quota_cache.rs writer is only a no-op compatibility hook).
+                let native_entries = extract_entries(&ch.channel, &acct.json);
+                let native_time = snapshot_observed_at(&ch.channel, &acct.json);
+                let project_mismatch = d.project_id.as_ref().zip(acct.json.pointer("/quota/project_id"))
+                    .is_some_and(|(cached, current)| cached != current);
+                let prefer_native = !native_entries.is_empty() && match (d.updated_at_ms, native_time) {
+                    (Some(cache), Some(native)) => native >= cache,
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                };
+                if !project_mismatch && !prefer_native {
+                    for entry in &d.entries {
+                        out.push(self.build(ch, acct, entry, d.updated_at_ms,
+                            SUBDIR_QUOTA_DESKTOP, TTL_DESKTOP_CACHE_MS)?);
+                    }
+                    // A failed retrieveUserQuotaSummary can coexist with fresh
+                    // model cache data. Upstream explicitly retains the previous
+                    // account's windows; retain their own time and stale flag.
+                    if acct.json.pointer("/quota/quota_summary_stale").and_then(|value| value.as_bool()) == Some(true) {
+                        for entry in &native_entries {
+                            if providers::google_summary_window(&entry.model_id).is_some()
+                                && !d.entries.iter().any(|cached| cached.scope == entry.scope && cached.model_id == entry.model_id) {
+                                let (observed, stale) = snapshot_entry_observed_at(&ch.channel, &acct.json, entry, native_time);
+                                let mut row = self.build(ch, acct, entry, observed, "AccountSnapshot", TTL_SNAPSHOT_MS)?;
+                                if stale { mark_retained_google_summary(&mut row); }
+                                out.push(row);
+                            }
+                        }
+                    }
+                    continue;
                 }
-                continue;
+                // The old cache was matched and consumed; do not emit it again
+                // below as a second synthetic account.
             }
 
             // ③ 退到账号快照字段
@@ -1586,7 +1658,9 @@ impl QuotaProvider for SnapshotProvider {
             let retained_error = !first_str(&acct.json, &["quota_query_last_error"]).is_empty();
             let updated_at = if refresh_error { None } else { snapshot_observed_at(&ch.channel, &acct.json) };
             for entry in entries {
-                let mut row = self.build(ch, acct, &entry, updated_at, "AccountSnapshot", TTL_SNAPSHOT_MS)?;
+                let (entry_observed, summary_stale) = snapshot_entry_observed_at(&ch.channel, &acct.json, &entry, updated_at);
+                let mut row = self.build(ch, acct, &entry, entry_observed, "AccountSnapshot", TTL_SNAPSHOT_MS)?;
+                if summary_stale { mark_retained_google_summary(&mut row); }
                 if refresh_error || retained_error {
                     row.source_error = Some(format!("{} quota refresh failed; retained snapshot is not current", ch.channel));
                     row.stale = true;
@@ -2348,7 +2422,7 @@ mod tests {
             &root
                 .join(SUBDIR_QUOTA_DESKTOP)
                 .join("1d76b62173c8ac67590fc988a265b13613528a9b5b8c7bd246d8a444d331b154.json"),
-            r#"{"version":1,"source":"desktop","email":"demo@example.invalid",
+            r#"{"version":1,"source":"authorized","customSource":"desktop","email":"demo@example.invalid",
                 "updatedAt":1700000000000,
                 "payload":{"quota_summary":{"groups":[
                   {"displayName":"Gemini Models","buckets":[
@@ -2743,7 +2817,7 @@ mod tests {
         );
         write_json(
             &root.join(SUBDIR_QUOTA_DESKTOP).join(format!("{}.json", hex64(3))),
-            r#"{"version":1,"source":"desktop","email":"g@example.com","updatedAt":1000,
+            r#"{"version":1,"source":"authorized","customSource":"desktop","email":"g@example.com","updatedAt":1000,
                 "payload":{"models":{
                   "claude-4-5":{"displayName":"Claude","quotaInfo":{"remainingFraction":0.8,"resetTime":7777}},
                   "g3-pro":{"displayName":"Gemini 3 Pro","quotaInfo":{"remainingFraction":0.25,"resetTime":6666}}
@@ -3098,11 +3172,10 @@ mod tests {
             (CH_QODER, "qoder_accounts", "cockpit-core/.../qoder_account.rs:11"),
             (CH_ZCODE, "zcode_accounts", "src-tauri/.../zcode_account.rs:17"),
             (CH_TRAE, "trae_accounts", "src-tauri/.../trae_account_platform_storage.rs:22"),
-            // ★ 不一致 3:cockpit 四平台共用 `trae_accounts`，但平台标识在**加密详情**里
-            //   ⇒ 无法拆分。这 3 个变体**刻意**指向各自的（不存在的）目录：不占位 ≠ 谎报 0。
-            (CH_TRAE_CN, "trae_cn_accounts", "默认规则:刻意不占位，见 trae_variants_* 用例"),
-            (CH_TRAE_SOLO, "trae_solo_accounts", "默认规则:刻意不占位，见 trae_variants_* 用例"),
-            (CH_TRAE_SOLO_CN, "trae_solo_cn_accounts", "默认规则:刻意不占位，见 trae_variants_* 用例"),
+            // 当前索引 v1 query_identity.platform 可以在不解密详情下分区。
+            (CH_TRAE_CN, "trae_accounts", "models/trae.rs::summary / trae_account_identity.rs::query_identity"),
+            (CH_TRAE_SOLO, "trae_accounts", "models/trae.rs::summary / trae_account_identity.rs::query_identity"),
+            (CH_TRAE_SOLO_CN, "trae_accounts", "models/trae.rs::summary / trae_account_identity.rs::query_identity"),
             (CH_WORKBUDDY, "workbuddy_accounts", "cockpit-core/.../workbuddy_account.rs:15"),
         ];
 
@@ -3151,32 +3224,12 @@ mod tests {
         assert_eq!(CH_GITHUB_COPILOT, "github-copilot");
     }
 
-    /// ★ trae 三个变体**必须继续**指向各自的（不存在的）目录。
-    ///
-    /// 理由（防后人"顺手修好"）：cockpit 把 4 个 Trae 平台（trae / trae_solo / trae_cn /
-    /// trae_solo_cn）的账号**存在同一个 `trae_accounts` 目录**
-    /// （`src-tauri/src/modules/trae_account_platform_storage.rs:22`），
-    /// 平台标识在账号**内部**字段里（`resolve_account_platform_kind`），
-    /// 而账号详情是**加密**的 ⇒ 我们**无法按平台拆分**。
-    ///
-    /// 所以这 3 行不占位（`has_accounts=false` → 前端整行过滤），**数据没丢**：
-    /// 全平台合计都在 `trae` 那一行里。若把它们指到 `trae_accounts`，
-    /// 同一批账号会在 4 行里重复出现 —— 比不显示更糟。谁改了这里，本用例就挂。
+    /// Shared physical storage is partitioned by the producer's plaintext platform
+    /// projection. Supplemental fixtures verify that each account appears once.
     #[test]
-    fn trae_variants_deliberately_point_at_their_own_missing_dirs() {
-        assert_eq!(accounts_dir_name(CH_TRAE), "trae_accounts");
-        assert_eq!(accounts_dir_name(CH_TRAE_CN), "trae_cn_accounts");
-        assert_eq!(accounts_dir_name(CH_TRAE_SOLO), "trae_solo_accounts");
-        assert_eq!(accounts_dir_name(CH_TRAE_SOLO_CN), "trae_solo_cn_accounts");
-
-        // 三个变体一律不得与 trae 共用目录（重复计数红线）。
-        for ch in [CH_TRAE_CN, CH_TRAE_SOLO, CH_TRAE_SOLO_CN] {
-            assert_ne!(
-                accounts_dir_name(ch),
-                accounts_dir_name(CH_TRAE),
-                "{ch} 不得与 trae 共用账号目录:cockpit 四平台共用 trae_accounts，\
-                 但平台标识在加密详情里 ⇒ 无法拆分，指过去会让同一批账号在 4 行里重复出现"
-            );
+    fn trae_variants_share_official_storage_and_require_platform_partition() {
+        for channel in [CH_TRAE, CH_TRAE_CN, CH_TRAE_SOLO, CH_TRAE_SOLO_CN] {
+            assert_eq!(accounts_dir_name(channel), "trae_accounts");
         }
     }
 
@@ -3589,3 +3642,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cockpit_quota_supplemental_tests.rs"]
+mod supplemental_tests;

@@ -42,6 +42,12 @@ export interface CliproxyConfig {
   [key: string]: unknown
 }
 
+export interface CliproxyConfigSnapshot {
+  config: CliproxyConfig
+  /** Reported by this response's server, not an authenticated build identity or the latest release. */
+  reportedVersion: string | null
+}
+
 export interface UsageQueueRecord {
   timestamp: number
   latency_ms: number
@@ -104,6 +110,7 @@ export interface ApiKeysResponse {
 export interface ApiKeyUsageBucket {
   success: number
   failed: number
+  /** Producer labels are local HH:mm-HH:mm ranges, not dated timestamps. */
   recent_requests: Array<{ time: string; success: number; failed: number }>
 }
 
@@ -299,8 +306,15 @@ export async function getLatestVersion(): Promise<CliproxyVersion> {
 }
 
 export async function getConfig(): Promise<CliproxyConfig> {
-  const { data } = await cliproxyClient.get<CliproxyConfig>('/config')
-  return data
+  return (await getConfigSnapshot()).config
+}
+
+/** GetConfig returns the config body; management middleware reports the running build in headers. */
+export async function getConfigSnapshot(): Promise<CliproxyConfigSnapshot> {
+  const { data, headers } = await cliproxyClient.get<unknown>('/config')
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid CLIProxyAPI config response')
+  const version = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'x-cpa-version')?.[1]
+  return { config: data as CliproxyConfig, reportedVersion: typeof version === 'string' && version.trim() ? version.trim() : null }
 }
 
 export async function getConfigYaml(): Promise<string> {
@@ -383,6 +397,12 @@ export async function deleteApiKey(params: { value?: string; index?: number }): 
 
 export async function getApiKeyUsage(): Promise<Record<string, Record<string, ApiKeyUsageBucket>>> {
   const { data } = await cliproxyClient.get<Record<string, Record<string, ApiKeyUsageBucket>>>('/api-key-usage')
+  const record = (value: unknown): value is Record<string, unknown> => value != null && typeof value === 'object' && !Array.isArray(value)
+  const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+  if (!record(data) || Object.values(data).some(keys => !record(keys) || Object.values(keys).some(bucket =>
+    !record(bucket) || !count(bucket.success) || !count(bucket.failed) || !Array.isArray(bucket.recent_requests)
+    || bucket.recent_requests.some(recent => !record(recent) || typeof recent.time !== 'string' || !recent.time.trim() || !count(recent.success) || !count(recent.failed)),
+  ))) throw new Error('Invalid CLIProxyAPI api-key-usage response')
   return data
 }
 
@@ -418,11 +438,16 @@ async function getScalar<T>(endpoint: string, key: string): Promise<T> {
   return data[key]
 }
 
-export async function getDebug(): Promise<boolean> { return getScalar<boolean>('debug', 'debug') }
+export async function getDebug(): Promise<boolean> {
+  const value = await getScalar<unknown>('debug', 'debug')
+  if (typeof value !== 'boolean') throw new Error('Invalid CLIProxyAPI debug response')
+  return value
+}
 export async function getWsAuth(): Promise<boolean> { return getScalar<boolean>('ws-auth', 'ws-auth') }
 export async function getRoutingStrategy(): Promise<string> {
   const { data } = await cliproxyClient.get<{ strategy: string }>('/routing/strategy')
-  return data.strategy
+  if (typeof data?.strategy !== 'string' || !data.strategy.trim()) throw new Error('Invalid CLIProxyAPI routing/strategy response')
+  return data.strategy.trim()
 }
 export async function getProxyUrl(): Promise<string> { return getScalar<string>('proxy-url', 'proxy-url') }
 export async function getForceModelPrefix(): Promise<boolean> { return getScalar<boolean>('force-model-prefix', 'force-model-prefix') }

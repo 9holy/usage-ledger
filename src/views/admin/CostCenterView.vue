@@ -636,10 +636,12 @@
                   <td><strong>{{ formatCompactDate(row.account.created_at) }}</strong><small>{{ row.account.extra?.cliproxy_identity_source === 'usage_only' ? t('costCenter.text.firstUsageRecord') : row.lossState?.active ? t('costCenter.text.finalizedAt', { value0: formatCompactDate(row.lossState.occurred_at) }) : t('costCenter.text.hBilled', { value0: row.elapsedHours.toFixed(1) }) }}</small></td>
                   <td>
                     <template v-if="row.financial.hasRecorded"><strong :class="procurementStrongClass(row.financial.rateEstimated || row.financial.partial ? 'estimated' : 'measured')">{{ row.hourlyCost == null ? t('costCenter.text.allocationIncomplete') : formatRate(row.hourlyCost, 'CNY') }}</strong><small>{{ t('costCenter.text.procurementLedgerAccrual') }}{{ row.financial.rateEstimated ? t('costCenter.text.estimateForUncoveredPeriods') : '' }}{{ row.financial.partial ? t('costCenter.text.someRecordsNeedInformation') : '' }}</small></template>
+                    <template v-else-if="!row.profileAvailable"><strong class="cost-unknown-value">{{ t('costCenter.text.noData') }}</strong><small>{{ t('costCenter.integration.costSettingsUnconfirmed') }}</small></template>
                     <template v-else><strong :class="procurementStrongClass(row.procurementRateBasis)">{{ row.isHistorical ? '—' : assetLedgerState === 'unavailable' ? t('costCenter.text.noData') : row.billingMode === 'metered' && row.profile.source !== 'custom' ? (meteredHourlyCny(row) != null ? formatRate(meteredHourlyCny(row), 'CNY') : t('costCenter.text.byTokens')) : formatRate(row.hourlyCost, 'CNY') }}<em v-if="row.procurementRateBasis === 'estimated'" class="cost-derived-tag">{{ t('costCenter.text.inferred') }}</em></strong><small>{{ row.isHistorical ? row.account.extra?.cliproxy_identity_source === 'usage_only' ? t('costCenter.text.noMatchingCurrentManagedAccountNoPurchasesEntered') : t('costCenter.text.removedFromCurrentPoolNoProcurementProfile') : assetLedgerState === 'unavailable' ? sourceStates.accounts.reason : row.billingMode === 'metered' ? t('costCenter.text.windowMeteredRateAverageFixedExpensesSeparate') : t('costCenter.text.costSettings', { value0: row.profile.source === 'custom' ? t('costCenter.text.userDefined') : t('costCenter.text.planPriceEstimate') }) }}</small></template>
                   </td>
                   <td>
                     <template v-if="row.financial.hasRecorded"><strong :class="procurementStrongClass(row.financial.lifetimeEstimated || row.financial.partial ? 'estimated' : 'measured')">{{ formatCny(row.accrued, 3) }}</strong><small>{{ t('costCenter.text.cumulativeAccrualLossesExpenseCredits') }}{{ row.financial.lifetimeEstimated ? t('costCenter.text.includesUncoveredPeriodEstimates') : '' }}{{ row.financial.partial ? t('costCenter.text.attributionPending') : '' }}</small></template>
+                    <template v-else-if="!row.profileAvailable"><strong class="cost-unknown-value">{{ t('costCenter.text.noData') }}</strong><small>{{ t('costCenter.integration.costSettingsUnconfirmed') }}</small></template>
                     <template v-else><strong :class="procurementStrongClass(row.procurementAccruedBasis)">{{ row.isHistorical ? '—' : assetLedgerState === 'unavailable' ? t('costCenter.text.noData') : row.billingMode === 'metered' && row.profile.source !== 'custom' ? (cockpitAllTimeCostUsd(row.account.id) != null ? formatUsd(cockpitAllTimeCostUsd(row.account.id)!, 3) : t('costCenter.text.cumulativeUsage')) : formatCny(row.accrued, 3) }}<em v-if="row.procurementAccruedBasis === 'estimated'" class="cost-derived-tag">{{ t('costCenter.text.inferred') }}</em></strong><small>{{ row.isHistorical ? row.account.extra?.cliproxy_identity_source === 'usage_only' ? t('costCenter.text.usageRecordsRetainedNotProofOfCurrentManagement') : t('costCenter.text.historicalUsageRetainedExcludedFromCurrentPoolProcurement') : assetLedgerState === 'unavailable' ? sourceStates.accounts.reason : row.lossState?.active ? t('costCenter.text.finalWriteOffBanLoss', { value0: formatCny(row.impairmentCny, 3) }) : row.billingMode === 'metered' ? cockpitCumulativePartial(row.account.id) ? t('costCenter.text.knownPortionIncludesUnpricedUsageNotAComplete') : t('costCenter.text.apiUsageCostTopUpsAreNotTreated') : t('costCenter.text.costSettings', { value0: row.profile.billing_cycle }) }}</small></template>
                   </td>
                   <td><strong>{{ usageStatsFor(row)?.cost == null ? rowUsageMissingLabel(row) : formatUsd(usageStatsFor(row)?.cost, 4) }}</strong><small>{{ t('costCenter.text.standard2') }} {{ formatUsd(usageStatsFor(row)?.standard_cost, 4) }}{{ rowUsageSuffix(row) }}</small></td>
@@ -905,7 +907,7 @@
                  「来自本项目自有知识/配置,不是从数据源读出来的实测值」。
                  不用 partial:它的文案是「部分可用」,会让人以为某数据源只交付了一部分。 -->
             <MetricCell :label="t('costCenter.text.authentication')" value="X-API-Key / Bearer" :note="t('costCenter.text.apiKeyForV1Authentication')" state="estimated" />
-            <MetricCell :label="t('costCenter.text.version')" :value="cliproxyOverview?.version || '—'" :note="t('costCenter.text.cpaDoesNotExposeAVersionInterface')" :state="cliproxyOverview?.version ? 'measured' : 'unavailable'" />
+            <MetricCell :label="t('costCenter.text.version')" :value="cliproxyOverview?.version || '—'" :note="t('costCenter.text.cpaManagementReportedVersion')" :state="cliproxyOverview?.version ? 'measured' : 'unavailable'" />
             <MetricCell :label="t('costCenter.text.authFiles')" :value="formatInteger(cliproxyOverview?.authFileCount)" note="auth-files" :state="truthfulState(cliproxyOverview?.authFileCount)" />
             <MetricCell :label="t('costCenter.text.routingStrategy')" :value="cliproxyOverview?.routingStrategy || '—'" note="routing-strategy" :state="cliproxyOverview?.routingStrategy ? 'measured' : 'unavailable'" />
             <MetricCell :label="t('costCenter.text.debugMode')" :value="cliproxyOverview?.debug === true ? t('costCenter.text.on') : cliproxyOverview?.debug === false ? t('costCenter.text.close') : '—'" note="debug" :state="cliproxyOverview?.debug == null ? 'unavailable' : 'measured'" />
@@ -1594,8 +1596,9 @@ import { summarizeOperatingCosts, type OperatingAccount, type OperatingSummary }
 import { recordedAccountCosts, sumCompleteCosts } from '@/features/cost-center/recordedCosts'
 import type { CockpitPlatformAccountInput } from '@/features/cost-center/cockpitAdapter'
 import { assertCockpitSourceIdentity } from '@/api/cockpit/sourceIdentity'
-import { applyCockpitUsageLedger, cockpitOpsSummaryToTrend, cockpitOpsAccountsToRequestCounts, clipOpsBucketsToWindow, statsAccountCostId, cockpitSnapshotsToAccountUsage } from '@/features/cost-center/cockpitAdapter'
-import { getAuthFiles, getRoutingStrategy, getDebug, getConfig, getApiKeyUsage, type AuthFile, type ApiKeyUsageBucket } from '@/api/cliproxy/management'
+import { applyCockpitUsageLedger, CockpitLedgerIdentityError, cockpitOpsSummaryToTrend, cockpitOpsAccountsToRequestCounts, clipOpsBucketsToWindow, statsAccountCostId, cockpitSnapshotsToAccountUsage } from '@/features/cost-center/cockpitAdapter'
+import { getAuthFiles, getRoutingStrategy, getDebug, getConfigSnapshot, getApiKeyUsage, type AuthFile, type ApiKeyUsageBucket } from '@/api/cliproxy/management'
+import { captureAuthConnection, isAuthConnectionCurrent } from '@/api/url'
 import { cliproxyAuthFilesToAccounts } from '@/features/cost-center/cliproxyManagementAdapter'
 import { getCliproxyUsageSnapshot, getCliproxyModelPrices, type CliproxyUsageSnapshot, type LitellmPricing } from '@/api/cliproxy/cpaData'
 import { getCockpitSourceIdentity, getCockpitStats, getCockpitCodexAccounts, getCockpitGeminiAccounts, getCockpitAntigravityAccounts, getCockpitLocalAccess, getCockpitPlatformAccounts, getCockpitModelProviders, getCockpitApiLog, getCockpitQuotaHistories, getCockpitApiKeyNames, getCockpitAccountGroups, getCockpitCodexAccountGroups, readCostLedger, writeCostLedger, type CockpitStats, type CockpitCodexAccount, type CockpitGeminiAccount, type CockpitAntigravityAccount, type CockpitLocalAccess, type CockpitPlatformAccount, type CockpitModelProvider, type CockpitQuotaHistoryFile, type CockpitModelUsage, type CockpitOpsRouteAgg, type CockpitRequestLogSummary, type CockpitApiKeyStat, type CockpitUsageStats } from '@/api/cockpit'
@@ -2667,6 +2670,10 @@ const latestCostLossByAccount = computed(() => {
   return states
 })
 
+function localProfileState(accountId: string) {
+  return connectionType.value === 'sub2api' ? 'available' : data.localCostProfileState(accountId)
+}
+const localProfileReadError = computed(() => connectionType.value === 'sub2api' ? '' : data.localCostProfilesError.value)
 const financialCosts = computed(() => {
   const records = new Map<string, NonNullable<FinanceSnapshot['byAccount']>>()
   for (const record of financeLoadedKey.value === financeQueryKey.value ? financeSnapshot.value?.byAccount ?? [] : []) {
@@ -2683,14 +2690,30 @@ const financialCosts = computed(() => {
     const profile = account ? resolveFallbackCostProfile(account, cockpitCostMultiplier.value, exchangeRate.value.rate) : loss?.cost_profile ?? null
     const includeProfile = !account || account.extra?.cockpit_historical !== true
       && (resolveAccountBillingMode(account) === 'subscription' || profile?.source === 'custom')
-    return [id, recordedAccountCosts({
-      profile: includeProfile ? profile : null,
+    const profileUnavailable = localProfileState(id) === 'unavailable' && id !== UNATTRIBUTED_USAGE_ACCOUNT_ID
+    const costs = recordedAccountCosts({
+      profile: includeProfile && !profileUnavailable ? profile : null,
       loss,
       records: records.get(id) ?? [],
       startMs: financeWindow.value.start.getTime(),
       endMs: financeWindow.value.end.getTime(),
       cnyPerUsd: exchangeRate.value.rate,
-    })] as const
+    })
+    // A missing/unreadable profile is not evidence of zero overhead. Keep recorded
+    // subtotals, but do not complete an expense total from a default profile.
+    if (profileUnavailable) {
+      costs.windowExpenseCny = null
+      costs.lifetimeExpenseCny = null
+      costs.hourlyCny = null
+      costs.partial = true
+      costs.unknownExpenseCount += 1
+      costs.unknownHourlyCount += 1
+      for (const summary of [costs.windowExpenseSummary, costs.lifetimeExpenseSummary, costs.hourlySummary]) {
+        summary.total = null
+        summary.unknownCount += 1
+      }
+    }
+    return [id, costs] as const
   }))
 })
 const financialRows = computed(() => [...financialCosts.value.values()])
@@ -2759,7 +2782,7 @@ function scaleSummary(value: AmountSummary, factor: number | null): AmountSummar
 }
 function operatingRate(value: AmountSummary): AmountSummary { return scaleSummary(value, operatingHours.value ? 1 / operatingHours.value : null) }
 const operatingState = computed<DataAvailability>(() => !operatingUsageReady.value ? 'partial'
-  : operatingSummary.value.expenseCny.unknownCount || financeError.value ? 'partial' : 'estimated')
+  : operatingSummary.value.expenseCny.unknownCount || financeError.value ? 'partial' : localProfileReadError.value ? 'stale' : 'estimated')
 const operatingBasis = computed(() => t('costCenter.text.subscriptionsAccrueFromProcurementMeteredUsageUsesResolved', { value0: rangeLabel.value, value1: cockpitCostMultiplier.value, value2: unassignedOperatingCount.value ? t('costCenter.text.historicalAccountsLackTypeChannelAttribution', { value0: unassignedOperatingCount.value }) : '', value3: unattributedWindowRequests.value ? t('costCenter.text.requestsHaveNoAccountAssociationRateValuesShown', { value0: unattributedWindowRequests.value }) : '', value4: financeError.value ? t('costCenter.text.label', { value0: financeError.value }) : '' }))
 const financialBasis = computed(() => {
   const entered = financialRows.value.filter(row => row.hasRecorded).length
@@ -2768,10 +2791,10 @@ const financialBasis = computed(() => {
   return [financePending.value ? t('costCenter.text.checkingEnteredPurchasesCostSettingsAreAProvisional') : entered ? t('costCenter.text.accountsAccrueFromEnteredPurchasesAndAdjustments', { value0: entered }) : t('costCenter.text.noPurchasesEnteredEstimatedFromCostSettings'),
     estimate ? t('costCenter.text.uncoveredPeriodsUsePlanPrices', { value0: cockpitCostMultiplier.value }) : '',
     partial ? t('costCenter.text.someRecordsLackAttributionOrDatesKnownAmounts') : '',
-    financeError.value, t('costCenter.text.foreignCurrenciesConvertedAtThePageExchangeRate')].filter(Boolean).join(t('costCenter.text.label2'))
+    financeError.value, localProfileReadError.value, t('costCenter.text.foreignCurrenciesConvertedAtThePageExchangeRate')].filter(Boolean).join(t('costCenter.text.label2'))
 })
 const financialState = computed<DataAvailability>(() => financialRows.value.some(row => row.partial) || financeError.value ? 'partial'
-  : financialRows.value.some(row => row.estimated) ? 'estimated' : assetLedgerState.value)
+  : localProfileReadError.value ? 'stale' : financialRows.value.some(row => row.estimated) ? 'estimated' : assetLedgerState.value)
 
 const accountLedgers = computed(() => accounts.value.map((account) => {
   // 倍率兜底（用户口径）：未手动设置成本档案(source='default')→ 官方价 × 倍率；
@@ -2792,6 +2815,7 @@ const accountLedgers = computed(() => accounts.value.map((account) => {
     isHistorical: account.extra?.cockpit_historical === true || account.extra?.cliproxy_identity_source === 'usage_only',
     billingMode: resolveAccountBillingMode(account),
     profile,
+    profileAvailable: localProfileState(String(account.id)) !== 'unavailable',
     usage,
     plan: inferPlan(account),
     lossState,
@@ -3100,7 +3124,7 @@ const windowImpairmentCny = computed<number | null>(() => hasMeasuredData(source
   ? financialRows.value.reduce((sum, row) => sum + row.windowLossCny, 0) : null)
 const windowEconomicCostCny = computed(() => operatingSummary.value.expenseCny.total)
 const procurementHourlyCny = computed(() => operatingSummary.value.fixedHourlyCny.total)
-const currentMonthActiveOneTimeProcurementCny = computed(() => accountLedgers.value.filter((row) => !row.isHistorical).reduce((sum, row) => {
+const currentMonthActiveOneTimeProcurementCny = computed(() => accountLedgers.value.some(row => !row.profileAvailable) ? null : accountLedgers.value.filter((row) => !row.isHistorical).reduce((sum, row) => {
   if (row.profile.billing_cycle !== 'one_time' || !isStartedInLocalMonth(row.profile.started_at, now.value)) return sum
   return sum + convertCurrency(row.profile.amount, row.profile.currency, 'CNY', exchangeRate.value.rate)
 }, 0))
@@ -3111,7 +3135,8 @@ const archivedMonthlyOneTimeCount = computed(() => archivedMonthlyOneTimeStates.
 const archivedMonthlyOneTimeProcurementCny = computed(() => archivedMonthlyOneTimeStates.value.reduce((sum, state) => (
   sum + convertCurrency(state.cost_profile.amount, state.cost_profile.currency, 'CNY', exchangeRate.value.rate)
 ), 0))
-const currentMonthOneTimeProcurementCny = computed(() => currentMonthActiveOneTimeProcurementCny.value + archivedMonthlyOneTimeProcurementCny.value)
+const currentMonthOneTimeProcurementCny = computed(() => currentMonthActiveOneTimeProcurementCny.value == null ? null
+  : currentMonthActiveOneTimeProcurementCny.value + archivedMonthlyOneTimeProcurementCny.value)
 const factualMonthOneTimeProcurementCny = computed(() => accountEconomics.value?.actual.month_one_time_procurement_cny)
 const monthlyDeletedOneTimeCount = computed(() => accountEconomics.value?.actual.month_deleted_one_time_purchase_count ?? archivedMonthlyOneTimeCount.value)
 /**
@@ -3144,11 +3169,12 @@ const monthlyProcurementNote = computed(() => {
   return t('costCenter.text.currentRecurringRate730hThisMonthSPurchases', { value0: deletedPart, value1: recurringPart })
 })
 const monthlyProcurementForecastCny = computed<number | null>(() => procurementHourlyCny.value == null
+  || (factualMonthOneTimeProcurementCny.value == null && currentMonthOneTimeProcurementCny.value == null)
   ? null
   : procurementHourlyCny.value * 730
     // sub2api 用后端事实值；cockpit/cliproxy 该字段为 null ⇒ 落到本地实测的本月一次性采购
     // （此前 costEngine 硬编码 0 会短路这个 `??`，把本地真实值整段丢弃 ⇒ 少算）
-    + (factualMonthOneTimeProcurementCny.value ?? currentMonthOneTimeProcurementCny.value)
+    + (factualMonthOneTimeProcurementCny.value ?? currentMonthOneTimeProcurementCny.value!)
     // 经常性那半缺失时按 0 计入（= 不计入），缺口已由 monthlyProcurementNote 显式披露
     + (monthlyDeletedRecurringProcurementCny.value ?? 0))
 const defaultCostProfileCount = computed(() => accountLedgers.value.filter(row => !row.isHistorical && isDefaultSubscriptionCostProfile(row.account) && (row.financial.estimated || row.financial.rateEstimated)).length)
@@ -3966,21 +3992,23 @@ async function reload(background = false) {
       if (connection && reading) unified.setSub2apiData(connection, reading)
       summaryWindow = data.sub2apiRequestWindow.value ?? summaryWindow
     } else if (connectionType.value === 'cliproxy') {
+      const cpaConnection = captureAuthConnection()
+      const cpaConnectionCurrent = () => connectionType.value === 'cliproxy' && isAuthConnectionCurrent(cpaConnection)
       // cliproxy 复用 sub2api 同套深色模板:CPA 插件 usage_events + model_prices 适配进 store
       // 混合数据源:management API(账号实体/配置/版本) + CPA events(成本/时序/配额),按 auth_index 关联。
       // 账号 = /auth-files 真实实体(email/provider/status),替代 CPA auth_index 聚合。
       // 成本/时序/配额 = CPA events × model_prices(唯一成本源)。
       // 单次并行请求所有 management API + CPA 数据(消除 overview/reload 重复请求)
-      // 不调 getLatestVersion(查 GitHub 限流返 502),version 从 config 或留空
+      // Running version is the same /config response's X-CPA-VERSION header; latest-version is a release lookup.
       // /auth-files 读取失败必须与「确实一个认证文件都没有」区分开:前者置 null(显示「无数据」+
       // unavailable),后者是合法的 0(仍挂 measured)。原实现把失败 catch 成空数组,
       // 于是 authFiles.length === 0 被当成实测零 —— 红线禁止的假零。
       let authFilesFailed = false
-      cliproxyAuthFileFailure.value = null
+      let authFileFailure: { detail: string } | null = null
       let cpaReadError: { detail: string } | null = null
-      const [authFiles, config, keyUsage, usageSnapshot, prices, dbg, strategy] = await Promise.all([
-        getAuthFiles().catch((failure) => { authFilesFailed = true; cliproxyAuthFileFailure.value = { detail: errMsg(failure, '') }; return [] as AuthFile[] }),
-        getConfig().catch(() => null),
+      const [authFiles, configSnapshot, keyUsage, usageSnapshot, prices, dbg, strategy] = await Promise.all([
+        getAuthFiles().catch((failure) => { authFilesFailed = true; authFileFailure = { detail: errMsg(failure, '') }; return [] as AuthFile[] }),
+        getConfigSnapshot().catch(() => null),
         getApiKeyUsage().catch(() => ({} as Record<string, Record<string, ApiKeyUsageBucket>>)),
         getCliproxyUsageSnapshot().catch((failure): CliproxyUsageSnapshot => {
           cpaReadError = { detail: errMsg(failure, '') }
@@ -3990,13 +4018,18 @@ async function reload(background = false) {
         getDebug().catch(() => null),
         getRoutingStrategy().catch(() => null),
       ])
+      if (!cpaConnectionCurrent()) { reloadQueued = true; continue }
+      const nextExchangeRate = await loadUsdCnyExchangeRate()
+      if (!cpaConnectionCurrent()) { reloadQueued = true; continue }
+      const config = configSnapshot && Object.keys(configSnapshot.config).length ? configSnapshot.config : null
+      cliproxyAuthFileFailure.value = authFileFailure
       const events = usageSnapshot.events
       const batchAnchor = new Date(usageSnapshot.readEndMs ?? Date.now())
       summaryWindow = usageWindowBounds(range.value, batchAnchor)
       summaryWindow.end = new Date(Math.min(batchAnchor.getTime(), summaryWindow.end.getTime()))
       // 构建 overview(供 API tab/version/authFileCount/routingStrategy/debug)
       cliproxyOverview.value = {
-        version: null,
+        version: configSnapshot?.reportedVersion ?? null,
         authFileCount: authFilesFailed ? null : authFiles.length,
         routingStrategy: strategy,
         // getScalar 在 CPA config 缺 debug key 时返 undefined,读取失败已归一为 null ——
@@ -4007,7 +4040,7 @@ async function reload(background = false) {
       unified.setCliproxyData(events, prices, usageSnapshot)
       // 汇率:cliproxy 分支不走通用 reload,需独立请求网络实时汇率(override>cache>网络>兜底6.8)
       // 更新 exchangeRate.value 后传入 loadFromCliproxy 算 economics,保证显示与计算口径一致
-      exchangeRate.value = await loadUsdCnyExchangeRate()
+      exchangeRate.value = nextExchangeRate
       // 两个窗口分开传:range=顶部主窗口(trend/ops/账号/采购),modelCostRange=模型区独立窗口
       // (models 表 + modelRoutes 路由明细表)。cliproxy 没有接口,这两张表由 store 本地按窗口过滤。
       data.loadFromCliproxy(authFiles, config, cliproxyOverview.value?.version ?? null, events, prices, keyUsage, range.value, modelCostRange.value, exchangeRate.value.rate, batchAnchor, usageSnapshot.available, authFilesFailed ? () => cliproxyAuthFileError.value : null, usageSnapshot)
@@ -4185,8 +4218,13 @@ async function reload(background = false) {
         if (ledgerReadable) {
           // Preserve raw same-batch metadata for Unified; ledger history only augments the account archive.
           cockpitStats.value = { ...cockpitStats.value, accounts: cockpitStats.value.accounts.map(account => ({ ...account })) }
-          const mergedLedger = applyCockpitUsageLedger(cockpitStats.value, savedLedger?.accounts ?? null)
-          await writeCostLedger(mergedLedger, sourceInstanceId)
+          try {
+            const mergedLedger = applyCockpitUsageLedger(cockpitStats.value, savedLedger?.accounts ?? null)
+            await writeCostLedger(mergedLedger, sourceInstanceId)
+          } catch (failure) {
+            if (!(failure instanceof CockpitLedgerIdentityError)) throw failure
+            ledgerReadFailure = failure.message
+          }
         }
         await data.loadFromCockpit(cockpitStats.value, cockpitLocalAccess.value, range.value, quotaHistories, apiLog, apiKeyInfoMap, new Map(cockpitCodexAccounts.value.map((a) => [a.id, a])), platformInputs, multiDayOps, multiDayAccountRequests, multiDayRoutes, requestLog, todayRequestLog, cockpitGroupNameMap.value, cockpitWindowTtft, costQueryWindow, sourceInstanceId)
         if (modelWindowDetached.value && modelCostRange.value !== range.value) await reloadModelWindow()

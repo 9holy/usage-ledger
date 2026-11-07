@@ -4,6 +4,10 @@ use serde_json::Value;
 use std::{collections::BTreeMap, io::{BufRead, BufReader, Read, Seek, SeekFrom}};
 use std::path::Path;
 
+#[cfg(test)]
+#[path = "official_quota_contract_tests.rs"]
+mod official_quota_contract_tests;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaCredits {
@@ -15,6 +19,48 @@ pub struct QuotaCredits {
     pub balance: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSpendLimit {
+    pub source: Option<String>,
+    pub limit: Option<String>,
+    pub used: Option<String>,
+    pub remaining: Option<String>,
+    pub used_percent: Option<f64>,
+    pub remaining_percent: Option<f64>,
+    pub reset_after_seconds: Option<i64>,
+    pub resets_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSpendControl {
+    pub reached: Option<bool>,
+    pub individual_limit: Option<QuotaSpendLimit>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaProviderStatus {
+    pub allowed: Option<bool>,
+    pub limit_reached: Option<bool>,
+    pub rate_limit_reached_type: Option<String>,
+    pub spend_control: Option<QuotaSpendControl>,
+}
+
+impl QuotaProviderStatus {
+    fn has_evidence(&self) -> bool {
+        self.allowed.is_some() || self.limit_reached.is_some()
+            || self.rate_limit_reached_type.is_some() || self.spend_control.is_some()
+    }
+
+    fn blocked(&self) -> bool {
+        self.allowed == Some(false) || self.limit_reached == Some(true)
+            || self.spend_control.as_ref().is_some_and(|control| control.reached == Some(true))
+            || self.rate_limit_reached_type.as_deref().is_some_and(|kind| kind != "unknown")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QuotaObservation {
     tool: String,
@@ -24,6 +70,10 @@ pub struct QuotaObservation {
     limit_id: String,
     slot: String,
     window_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reset_after_seconds: Option<i64>,
     plan: Option<String>,
     model_id: Option<String>,
     pool_label: Option<String>,
@@ -32,6 +82,8 @@ pub struct QuotaObservation {
     used_percent: Option<f64>,
     #[serde(default)]
     credits: Option<QuotaCredits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_status: Option<QuotaProviderStatus>,
     source: String,
     #[serde(default)]
     billing_account_verified: Option<bool>,
@@ -52,6 +104,10 @@ pub struct QuotaSnapshot {
     pub limit_id: String,
     pub slot: String,
     pub window_minutes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_after_seconds: Option<i64>,
     pub plan: Option<String>,
     pub model_id: Option<String>,
     pub pool_label: Option<String>,
@@ -60,6 +116,8 @@ pub struct QuotaSnapshot {
     pub used_percent: Option<f64>,
     pub remaining_percent: Option<f64>,
     pub credits: Option<QuotaCredits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_status: Option<QuotaProviderStatus>,
     pub source: String,
     pub stale: bool,
     pub expired: bool,
@@ -121,8 +179,8 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS monitor_quotas (
            id INTEGER PRIMARY KEY, tool TEXT NOT NULL, account_key TEXT NOT NULL,
            limit_id TEXT NOT NULL, slot TEXT NOT NULL, window_minutes INTEGER NOT NULL,
-           observed_ms INTEGER, data TEXT NOT NULL,
-           UNIQUE(tool,account_key,limit_id,slot,window_minutes));
+           window_seconds INTEGER NOT NULL DEFAULT -1, observed_ms INTEGER, data TEXT NOT NULL,
+           UNIQUE(tool,account_key,limit_id,slot,window_minutes,window_seconds));
          CREATE TABLE IF NOT EXISTS monitor_quota_samples (
            quota_id INTEGER NOT NULL, bucket_ms INTEGER NOT NULL, observed_ms INTEGER NOT NULL,
            used_percent REAL NOT NULL, reset_ms INTEGER NOT NULL, plan TEXT, segment_reason TEXT,
@@ -130,6 +188,30 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
          CREATE INDEX IF NOT EXISTS monitor_quota_samples_time ON monitor_quota_samples(observed_ms);",
     )
     .map_err(|e| e.to_string())?;
+    let exact_seconds: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('monitor_quotas') WHERE name='window_seconds')",
+        [], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !exact_seconds {
+        // Rebuild only the quota identity constraint. Preserve IDs, sample
+        // references and the original JSON byte-for-byte, including errors and
+        // future fields. The old HTTP reader accepted only exact whole minutes.
+        conn.execute_batch("CREATE TABLE monitor_quotas_exact_windows (
+            id INTEGER PRIMARY KEY, tool TEXT NOT NULL, account_key TEXT NOT NULL,
+            limit_id TEXT NOT NULL, slot TEXT NOT NULL, window_minutes INTEGER NOT NULL,
+            window_seconds INTEGER NOT NULL DEFAULT -1, observed_ms INTEGER, data TEXT NOT NULL,
+            UNIQUE(tool,account_key,limit_id,slot,window_minutes,window_seconds));
+            INSERT INTO monitor_quotas_exact_windows
+                (id,tool,account_key,limit_id,slot,window_minutes,window_seconds,observed_ms,data)
+            SELECT id,tool,account_key,limit_id,slot,window_minutes,
+                CASE WHEN json_type(data,'$.window_seconds')='integer' THEN json_extract(data,'$.window_seconds')
+                  WHEN json_extract(data,'$.source')='codex_official_usage'
+                    AND window_minutes BETWEEN 1 AND 153722867280912930 THEN window_minutes*60
+                  ELSE -1 END,observed_ms,data FROM monitor_quotas;
+            DROP TABLE monitor_quotas;
+            ALTER TABLE monitor_quotas_exact_windows RENAME TO monitor_quotas;")
+            .map_err(|error| error.to_string())?;
+    }
     // Earlier releases attributed local quota observations to a conversation
     // creator (or a matching reset timestamp). Preserve these rows for diagnosis,
     // but never let them masquerade as authenticated account snapshots.
@@ -193,6 +275,30 @@ fn percent(value: Option<f64>) -> Option<f64> {
     value.filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
 }
 
+fn reached_type(value: &str) -> String {
+    match value {
+        "rate_limit_reached" | "workspace_owner_credits_depleted" | "workspace_member_credits_depleted"
+        | "workspace_owner_usage_limit_reached" | "workspace_member_usage_limit_reached" => value.into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn local_provider_status(limits: &Value) -> Option<QuotaProviderStatus> {
+    let individual_limit = limits.get("individual_limit").filter(|value| value.is_object()).map(|value| QuotaSpendLimit {
+        source: text(value, "source"), limit: text(value, "limit"), used: text(value, "used"), remaining: text(value, "remaining"),
+        used_percent: percent(value["used_percent"].as_f64()), remaining_percent: percent(value["remaining_percent"].as_f64()),
+        reset_after_seconds: value["reset_after_seconds"].as_i64(),
+        resets_at_ms: value["resets_at"].as_i64().filter(|value| *value > 0).and_then(|value| value.checked_mul(1000)),
+    });
+    let reached = limits["spend_control_reached"].as_bool();
+    let status = QuotaProviderStatus {
+        allowed: limits["allowed"].as_bool(), limit_reached: limits["limit_reached"].as_bool(),
+        rate_limit_reached_type: limits["rate_limit_reached_type"].as_str().map(reached_type),
+        spend_control: (reached.is_some() || individual_limit.is_some()).then_some(QuotaSpendControl { reached, individual_limit }),
+    };
+    status.has_evidence().then_some(status)
+}
+
 pub fn codex_observations(
     payload: &Value,
     _creator_account_id: Option<&str>,
@@ -211,11 +317,17 @@ pub fn codex_observations(
         (credits.has_credits.is_some() || credits.unlimited.is_some() || credits.balance.is_some())
             .then_some(credits)
     });
-    ["primary", "secondary"]
-        .into_iter()
-        .filter_map(|slot| {
-            let window = limits.get(slot).filter(|v| v.is_object())?;
-            Some(QuotaObservation {
+    let provider_status = local_provider_status(limits);
+    let mut windows: Vec<_> = ["primary", "secondary"].into_iter()
+        .filter_map(|slot| limits.get(slot).filter(|value| value.is_object()).map(|window| (slot, Some(window))))
+        .collect();
+    if windows.is_empty() && (credits.is_some() || provider_status.is_some()) {
+        windows.push(("summary", None));
+    }
+    windows.into_iter().map(|(slot, window)| {
+            let absent = Value::Null;
+            let window = window.unwrap_or(&absent);
+            QuotaObservation {
                 tool: "codex".into(),
                 // A session may survive a sign-in change. Its creator cannot
                 // identify the account behind later rate-limit observations.
@@ -225,8 +337,10 @@ pub fn codex_observations(
                 limit_id: text(limits, "limit_id").unwrap_or_else(|| "codex".into()),
                 slot: slot.into(),
                 window_minutes: window["window_minutes"].as_i64().filter(|v| *v > 0),
+                window_seconds: window["window_seconds"].as_i64(),
+                reset_after_seconds: window["reset_after_seconds"].as_i64(),
                 plan: text(limits, "plan_type"),
-                model_id: None,
+                model_id: text(limits, "normal_model_slug"),
                 pool_label: text(limits, "limit_name"),
                 observed_at_ms: observed_ms.filter(|v| *v > 0),
                 resets_at_ms: window["resets_at"]
@@ -235,13 +349,165 @@ pub fn codex_observations(
                     .and_then(|v| v.checked_mul(1000)),
                 used_percent: percent(window["used_percent"].as_f64()),
                 credits: credits.clone(),
+                provider_status: provider_status.clone(),
                 source: "codex_local_log".into(),
                 billing_account_verified: None,
                 source_error: None,
                 stale_after_ms: 300_000,
-            })
+            }
         })
         .collect()
+}
+
+// Fixed HTTP contract: codex-backend-openapi-models at efdacaf46ff54660a239189a6d62434c5db33d2c.
+// Optional scalar fields retain older partial responses as unknown; a known
+// field with the wrong type is not a successful sparse refresh.
+#[derive(Deserialize)]
+struct OfficialUsagePayload {
+    plan_type: String,
+    rate_limit: Option<OfficialRateLimit>,
+    credits: Option<OfficialCredits>,
+    spend_control: Option<OfficialSpendControl>,
+    additional_rate_limits: Option<Vec<OfficialAdditionalLimit>>,
+    rate_limit_reached_type: Option<OfficialReachedType>,
+}
+
+#[derive(Deserialize)]
+struct OfficialRateLimit {
+    allowed: Option<bool>,
+    limit_reached: Option<bool>,
+    primary_window: Option<OfficialWindow>,
+    secondary_window: Option<OfficialWindow>,
+}
+
+#[derive(Deserialize)]
+struct OfficialWindow {
+    used_percent: Option<f64>,
+    limit_window_seconds: Option<i32>,
+    reset_after_seconds: Option<i32>,
+    reset_at: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct OfficialAdditionalLimit {
+    metered_feature: String,
+    limit_name: String,
+    rate_limit: Option<OfficialRateLimit>,
+}
+
+#[derive(Deserialize)]
+struct OfficialCredits {
+    has_credits: Option<bool>,
+    unlimited: Option<bool>,
+    balance: Option<String>,
+    // Opaque estimates have no request/token or money-unit contract. The
+    // official backend client also excludes them from its CreditsSnapshot.
+    #[serde(rename = "approx_local_messages")]
+    _approx_local_messages: Option<Vec<Value>>,
+    #[serde(rename = "approx_cloud_messages")]
+    _approx_cloud_messages: Option<Vec<Value>>,
+}
+
+#[derive(Deserialize)]
+struct OfficialSpendControl {
+    reached: Option<bool>,
+    individual_limit: Option<OfficialSpendLimit>,
+}
+
+#[derive(Deserialize)]
+struct OfficialSpendLimit {
+    source: Option<String>,
+    limit: Option<String>,
+    used: Option<String>,
+    remaining: Option<String>,
+    used_percent: Option<f64>,
+    remaining_percent: Option<f64>,
+    reset_after_seconds: Option<i32>,
+    reset_at: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct OfficialReachedType {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+fn official_provider_status(pool: Option<&OfficialRateLimit>, spend: Option<&OfficialSpendControl>, reached: Option<&OfficialReachedType>) -> Option<QuotaProviderStatus> {
+    let status = QuotaProviderStatus {
+        allowed: pool.and_then(|pool| pool.allowed),
+        limit_reached: pool.and_then(|pool| pool.limit_reached),
+        rate_limit_reached_type: reached.map(|value| reached_type(&value.kind)),
+        spend_control: spend.map(|value| QuotaSpendControl {
+            reached: value.reached,
+            individual_limit: value.individual_limit.as_ref().map(|value| QuotaSpendLimit {
+                source: value.source.clone(), limit: value.limit.clone(), used: value.used.clone(), remaining: value.remaining.clone(),
+                used_percent: percent(value.used_percent), remaining_percent: percent(value.remaining_percent),
+                reset_after_seconds: value.reset_after_seconds.map(i64::from),
+                resets_at_ms: value.reset_at.filter(|value| *value > 0).map(|value| i64::from(value) * 1000),
+            }),
+        }),
+    };
+    status.has_evidence().then_some(status)
+}
+
+fn official_pool_observations(
+    account: &str, plan: &str, limit_id: &str, label: Option<&str>, pool: Option<&OfficialRateLimit>,
+    credits: Option<QuotaCredits>, provider_status: Option<QuotaProviderStatus>, now: i64,
+) -> Vec<QuotaObservation> {
+    let mut windows: Vec<_> = [("primary", pool.and_then(|pool| pool.primary_window.as_ref())),
+        ("secondary", pool.and_then(|pool| pool.secondary_window.as_ref()))]
+        .into_iter().filter_map(|(slot, window)| window.map(|window| (slot, Some(window)))).collect();
+    if windows.is_empty() && (credits.is_some() || provider_status.is_some() || label.is_some()) {
+        windows.push(("summary", None));
+    }
+    windows.into_iter().map(|(slot, window)| {
+        let seconds = window.and_then(|window| window.limit_window_seconds).map(i64::from);
+        QuotaObservation {
+            tool: "codex".into(), account_key: format!("account:{account}"), account_label: None,
+            attribution: "account".into(), limit_id: limit_id.into(), slot: slot.into(),
+            // The official client rounds positive seconds up for display. Keep
+            // exact seconds separately for identity and financial eligibility.
+            window_minutes: seconds.filter(|seconds| *seconds > 0).map(|seconds| (seconds + 59) / 60),
+            window_seconds: seconds,
+            reset_after_seconds: window.and_then(|window| window.reset_after_seconds).map(i64::from),
+            plan: Some(plan.into()), model_id: None, pool_label: label.filter(|label| !label.trim().is_empty()).map(str::to_owned),
+            observed_at_ms: Some(now),
+            resets_at_ms: window.and_then(|window| window.reset_at).filter(|value| *value > 0).map(|value| i64::from(value) * 1000),
+            used_percent: percent(window.and_then(|window| window.used_percent)),
+            credits: credits.clone(), provider_status: provider_status.clone(),
+            source: "codex_official_usage".into(), billing_account_verified: Some(true), source_error: None, stale_after_ms: 300_000,
+        }
+    }).collect()
+}
+
+fn official_observations(payload: &Value, account: &str, now: i64) -> Result<Vec<QuotaObservation>, String> {
+    let payload: OfficialUsagePayload = serde_json::from_value(payload.clone())
+        .map_err(|_| "Invalid official quota response structure".to_string())?;
+    if payload.plan_type.trim().is_empty() { return Err("Official quota has no plan".into()); }
+    let mut identities = std::collections::BTreeSet::from(["codex".to_string()]);
+    for pool in payload.additional_rate_limits.iter().flatten() {
+        if pool.metered_feature.trim().is_empty() || !identities.insert(pool.metered_feature.clone()) {
+            return Err("Official quota pool identity is missing or duplicated".into());
+        }
+    }
+    let credits = payload.credits.map(|value| QuotaCredits {
+        has_credits: value.has_credits, unlimited: value.unlimited,
+        balance: value.balance.filter(|value| !value.trim().is_empty()),
+    }).filter(|value| value.has_credits.is_some() || value.unlimited.is_some() || value.balance.is_some());
+    let status = official_provider_status(payload.rate_limit.as_ref(), payload.spend_control.as_ref(), payload.rate_limit_reached_type.as_ref());
+    let mut observations = official_pool_observations(account, &payload.plan_type, "codex", None, payload.rate_limit.as_ref(), credits, status, now);
+    for pool in payload.additional_rate_limits.into_iter().flatten() {
+        let status = official_provider_status(pool.rate_limit.as_ref(), None, None);
+        observations.extend(official_pool_observations(account, &payload.plan_type, &pool.metered_feature,
+            Some(&pool.limit_name), pool.rate_limit.as_ref(), None, status, now));
+    }
+    Ok(observations)
+}
+
+fn identity_window_seconds(observation: &QuotaObservation) -> i64 {
+    observation.window_seconds.or_else(|| (observation.source == "codex_official_usage")
+        .then(|| observation.window_minutes.and_then(|minutes| minutes.checked_mul(60))).flatten())
+        .unwrap_or(-1)
 }
 
 const OFFICIAL_CODEX_CHECK_PREFIX: &str = "official_codex_quota_check:";
@@ -300,33 +566,23 @@ pub(super) fn save_authenticated_codex(conn: &Connection, account: &str, payload
     if last_check.is_some_and(|check| check.observed_at_ms > now) || latest_observation.is_some_and(|time| time > now) {
         return Ok(());
     }
-    let mut limits = serde_json::json!({"limit_id":"codex","plan_type":payload["plan_type"],"credits":payload["credits"]});
-    for (slot, key) in [("primary","primary_window"),("secondary","secondary_window")] {
-        let window = &payload["rate_limit"][key];
-        if let Some(seconds) = window["limit_window_seconds"].as_i64().filter(|s| *s > 0 && s % 60 == 0) {
-            limits[slot] = serde_json::json!({"window_minutes":seconds/60,"resets_at":window["reset_at"],"used_percent":window["used_percent"]});
-        }
-    }
-    let observations = codex_observations(&serde_json::json!({"rate_limits":limits}),Some(account),"",Some(now));
-    let current_windows: Vec<_> = observations.iter().map(|observation| (observation.slot.clone(), observation.window_minutes.unwrap_or(-1))).collect();
-    for mut observation in observations {
-        observation.account_key = account_key.clone();
-        observation.attribution = "account".into();
-        observation.source = "codex_official_usage".into();
-        observation.billing_account_verified = Some(true);
+    let observations = official_observations(payload, account, now)?;
+    let current_windows: Vec<_> = observations.iter().map(|observation| (observation.limit_id.clone(), observation.slot.clone(),
+        observation.window_minutes.unwrap_or(-1), identity_window_seconds(observation))).collect();
+    for observation in observations {
         save(conn,&observation)?;
     }
     // This endpoint returns a snapshot, not a sparse update. Missing/null slots
     // and changed durations retire the prior windows without deleting history
     // or changing the time/percentage of any earlier observation.
     let mut statement = conn.prepare(
-        "SELECT id,slot,window_minutes FROM monitor_quotas WHERE tool='codex' AND account_key=?1
+        "SELECT id,limit_id,slot,window_minutes,window_seconds FROM monitor_quotas WHERE tool='codex' AND account_key=?1
           AND json_extract(data,'$.source')='codex_official_usage' AND COALESCE(observed_ms,0)<=?2",
     ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map(params![account_key, now], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))
+    let rows = statement.query_map(params![account_key, now], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?)))
         .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-    for (id, slot, minutes) in rows {
-        if !current_windows.contains(&(slot, minutes)) {
+    for (id, limit_id, slot, minutes, seconds) in rows {
+        if !current_windows.contains(&(limit_id, slot, minutes, seconds)) {
             conn.execute("UPDATE monitor_quotas SET data=json_set(data,'$.source_error','Official quota window not reported by the latest successful check') WHERE id=?1", [id])
                 .map_err(|error| error.to_string())?;
         }
@@ -355,9 +611,9 @@ pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), Str
         Some(rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?)
     } else { None };
     let id: Option<i64> = conn.query_row(
-        "INSERT INTO monitor_quotas(tool,account_key,limit_id,slot,window_minutes,observed_ms,data)
-         VALUES(?1,?2,?3,?4,?5,?6,?7)
-         ON CONFLICT(tool,account_key,limit_id,slot,window_minutes) DO UPDATE SET
+        "INSERT INTO monitor_quotas(tool,account_key,limit_id,slot,window_minutes,window_seconds,observed_ms,data)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT(tool,account_key,limit_id,slot,window_minutes,window_seconds) DO UPDATE SET
            observed_ms=excluded.observed_ms,data=excluded.data
          WHERE COALESCE(excluded.observed_ms,0)>COALESCE(monitor_quotas.observed_ms,0)
          RETURNING id",
@@ -367,6 +623,7 @@ pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), Str
             observation.limit_id,
             observation.slot,
             observation.window_minutes.unwrap_or(-1),
+            identity_window_seconds(observation),
             observation.observed_at_ms,
             serde_json::to_string(observation).map_err(|e| e.to_string())?
         ],
@@ -378,6 +635,7 @@ pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), Str
             && (observation.billing_account_verified == Some(true)
                 || (observation.tool != "codex" && observation.source == "cockpit_snapshot"))
             && observation.source_error.is_none()
+            && observation.window_seconds.is_none_or(|seconds| seconds == 604800)
             && super::accounts::is_account_weekly_pool(
                 &observation.tool,
                 &observation.limit_id,
@@ -401,7 +659,7 @@ pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), Str
         conn.execute(
             "UPDATE monitor_quotas SET data=json_set(data,'$.credits',json(?1))
              WHERE tool=?2 AND account_key=?3 AND limit_id=?4 AND slot=?5
-               AND window_minutes=?6 AND observed_ms=?7
+               AND window_minutes=?6 AND window_seconds=?7 AND observed_ms=?8
                AND (json_type(data,'$.credits') IS NULL OR json_type(data,'$.credits')='null')",
             params![
                 serde_json::to_string(credits).map_err(|e| e.to_string())?,
@@ -410,6 +668,7 @@ pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), Str
                 observation.limit_id,
                 observation.slot,
                 observation.window_minutes.unwrap_or(-1),
+                identity_window_seconds(observation),
                 observation.observed_at_ms,
             ],
         )
@@ -419,11 +678,11 @@ pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), Str
         // A failed source probe can retain exactly the previous quota timestamp.
         // Refresh only its error evidence, never the recorded percentage or time.
         conn.execute("UPDATE monitor_quotas SET data=json_set(data,'$.source_error',json(?1))
-            WHERE tool=?2 AND account_key=?3 AND limit_id=?4 AND slot=?5 AND window_minutes=?6
-              AND observed_ms IS ?7 AND json_extract(data,'$.source')='cockpit_snapshot'",
+            WHERE tool=?2 AND account_key=?3 AND limit_id=?4 AND slot=?5 AND window_minutes=?6 AND window_seconds=?7
+              AND observed_ms IS ?8 AND json_extract(data,'$.source')='cockpit_snapshot'",
             params![serde_json::to_string(&observation.source_error).map_err(|error| error.to_string())?,
                 observation.tool, observation.account_key, observation.limit_id, observation.slot,
-                observation.window_minutes.unwrap_or(-1), observation.observed_at_ms])
+                observation.window_minutes.unwrap_or(-1), identity_window_seconds(observation), observation.observed_at_ms])
             .map_err(|error| error.to_string())?;
     }
     if let Some(transaction) = transaction { transaction.commit().map_err(|e| e.to_string())?; }
@@ -519,6 +778,8 @@ fn depletion(
         Some("source_error")
     } else if stale {
         Some("stale")
+    } else if observation.provider_status.as_ref().is_some_and(QuotaProviderStatus::blocked) {
+        Some("provider_limit")
     } else if observation.used_percent.is_none() {
         Some("quota_unknown")
     } else if observation.resets_at_ms.is_none() {
@@ -622,6 +883,8 @@ fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str, instance: 
         limit_id,
         slot: row.scope.clone(),
         window_minutes,
+        window_seconds: None,
+        reset_after_seconds: None,
         plan: row.plan,
         model_id: (row.scope == "model").then_some(row.model_id),
         pool_label: (!row.display_name.is_empty()).then_some(row.display_name),
@@ -629,6 +892,7 @@ fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str, instance: 
         resets_at_ms: row.reset_at_ms,
         used_percent: percent(row.used_fraction.map(|v| v * 100.0)),
         credits: None,
+        provider_status: None,
         source: "cockpit_snapshot".into(),
         billing_account_verified: None,
         source_error: row.source_error.or(row.unavailable_reason),
@@ -769,7 +1033,7 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id,data
-        FROM monitor_quotas ORDER BY tool,account_key,limit_id,slot,window_minutes",
+        FROM monitor_quotas ORDER BY tool,account_key,limit_id,slot,window_minutes,window_seconds",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -781,6 +1045,7 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
         })
         .map_err(|e| e.to_string())?;
     let mut quotas = Vec::new();
+    let mut official_current_evidence = false;
     for row in rows {
         let (id, data) = row.map_err(|e| e.to_string())?;
         let observation: QuotaObservation =
@@ -814,6 +1079,15 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
                 .and_then(|s| s.error.clone())
         });
         let stale = stale || source_error.is_some();
+        if observation.source == "codex_official_usage" && source_error.is_none()
+            && observation.observed_at_ms.is_some_and(|time| now_ms.saturating_sub(time) <= observation.stale_after_ms)
+            && (!expired || observation.credits.is_some()
+                || observation.provider_status.as_ref().is_some_and(QuotaProviderStatus::has_evidence))
+        {
+            // Quota resets expire the window, not separately reported account
+            // credits/status from the same successful, recent response.
+            official_current_evidence = true;
+        }
         let depletion = depletion(conn, id, &observation, stale, source_error.is_some())?;
         let (report_key, default_label) = report_identities
             .get(observation.tool.as_str())
@@ -846,6 +1120,8 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
             limit_id: observation.limit_id,
             slot: observation.slot,
             window_minutes: observation.window_minutes,
+            window_seconds: observation.window_seconds,
+            reset_after_seconds: observation.reset_after_seconds,
             plan: observation.plan,
             model_id: observation.model_id,
             pool_label: observation.pool_label,
@@ -854,6 +1130,7 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
             used_percent: observation.used_percent,
             remaining_percent: observation.used_percent.map(|used| 100.0 - used),
             credits: observation.credits,
+            provider_status: observation.provider_status,
             source: observation.source,
             stale,
             expired,
@@ -863,12 +1140,11 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
     }
     if !official_checks.is_empty() {
         let failed = official_checks.values().filter(|check| check.error.is_some()).count();
-        let current = quotas.iter().any(|quota| quota.source == "codex_official_usage" && !quota.stale);
         sources.push(QuotaSourceStatus {
             tool: "codex".into(), source: "codex_official_usage".into(),
             source_instance: None,
             status: if failed == official_checks.len() { "error" } else if failed > 0 { "partial" }
-                else if current { "available" } else { "not_reported" }.into(),
+                else if official_current_evidence { "available" } else { "not_reported" }.into(),
             error: (failed > 0).then(|| format!("Official quota refresh failed for {failed} account(s); previous readings remain historical")),
             coverage: None, scope_note: None,
         });

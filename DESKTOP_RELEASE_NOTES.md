@@ -1,5 +1,17 @@
 # Usage Ledger Desktop Release Notes
 
+## 0.2.39 — Data channel completion / 接口、日志与账目补充核验
+
+Current version: **0.2.39**. See the [bilingual release notes](docs/release/0.2.39.md) and [completion audit](docs/data-channel-completion-2026-11-07.md).
+
+This patch completes the follow-up producer and consumer review: platform quota formats, exact official windows and extra pools, connection-safe reads, validated purchase profiles, account-safe retained history, and finance snapshot/batch integrity. It retains the existing local costing formulas. Windows x64 and native Mac arm64/x64 packages publish only after every required build and verification succeeds; exact provenance is recorded in `BUILD-INFO.json`.
+
+当前版本为 **0.2.39**。本轮补齐各平台实际生产字段、官方精确窗口/额外额度池、连接切换、采购档案、同邮箱历史及财务读取校验；保留原有成本公式。完整矩阵与修复前后证据见[补充核验报告](docs/data-channel-completion-2026-11-07.md)。主工作流通过全部必要检查后发布三平台安装包，手动覆盖升级并保留原数据。
+
+The sections below are historical release records. Their test counts and scope describe those versions.
+
+以下章节为历史版本记录，其中测试数量和核验范围属于当时版本。
+
 ## 0.2.38 — Source data contracts / 来源数据通道核验
 
 Current version: **0.2.38**. See the [bilingual release notes](docs/release/0.2.38.md), [source audit](docs/data-channel-audit-2026-11-07.md), [English README](README.md), and [Chinese README](README.zh-CN.md).

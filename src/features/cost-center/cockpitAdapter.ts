@@ -1759,12 +1759,10 @@ export function cockpitTotalsToOpsOverview(
 // 前两轮误标 unavailable 的 4 维度 cockpit 都有数据源,实读确认可转换。
 // ──────────────────────────────────────────────────────────────────────────
 
-/** cockpit quota_history 点 → sub2api UsageProgress(配额窗口)。
- *  remainingPercentage 100→0 表示剩余比例,utilization = 100 - remaining。 */
+/** Historical compatibility percentages are recorded observations, never live state. */
 function cockpitQuotaPointToUsageProgress(point: CockpitQuotaPoint): RecordedQuotaProgress {
-  const remaining = Math.max(0, Math.min(100, point.remainingPercentage))
   return {
-    utilization: 100 - remaining,
+    utilization: 100 - point.remainingPercentage,
     resets_at: quotaTimestamp(point.resetTime),
     remaining_seconds: point.countdownSeconds ?? 0,
     window_stats: null,
@@ -1775,51 +1773,49 @@ function cockpitQuotaPointToUsageProgress(point: CockpitQuotaPoint): RecordedQuo
   }
 }
 
-/** cockpit quota_history 文件们 → Record<accountId, AccountUsageInfo>(配额窗口)。
- *  quota_history 文件只有 email 无 accountId,需用 stats.accounts 找 email→accountId 映射。
- *  每模型的最近一个 point → antigravity_quota Record(modelId, {utilization, reset_time})。
- *  ponytail: 只填 antigravity_quota + updated_at + source,其余平台窗口留 null(cockpit 是 codex/antigravity 系)。 */
+/**
+ * Compatibility history has email/model keys but no current provider account ID.
+ * Only an explicit Google pool identity can bind it. Codex gateway stats, display
+ * names, and last-write-wins email maps cannot prove that ownership. The pinned
+ * current producer does not write quota_history; these records remain passive.
+ */
 export function cockpitQuotaToAccountUsage(
   files: CockpitQuotaHistoryFile[],
-  statsAccounts: CockpitStatsAccount[],
+  accounts: Array<CockpitPlatformAccountInput | CockpitStatsAccount>,
   sourceInstanceId = 'local',
 ): Record<string, AccountUsageInfo> {
-  // email → accountId 映射(stats.accounts 有 email + accountId)
-  const emailToAccountId = new Map<string, string>()
-  for (const acc of statsAccounts) {
-    if (acc.email) emailToAccountId.set(acc.email, acc.accountId)
+  const byEmail = new Map<string, CockpitPlatformAccountInput[]>()
+  for (const account of accounts) {
+    if (!('platform' in account) || !['antigravity', 'gemini'].includes(account.platform)
+      || !account.id?.trim() || !account.email?.trim()) continue
+    const matches = byEmail.get(account.email) ?? []
+    matches.push(account)
+    byEmail.set(account.email, matches)
   }
+  const fileCounts = new Map<string, number>()
+  for (const file of files) fileCounts.set(file.email, (fileCounts.get(file.email) ?? 0) + 1)
   const result: Record<string, AccountUsageInfo> = {}
   for (const file of files) {
-    // D7:email 未命中真实账号时**跳过该文件** —— file.email 不是 accountId,
-    // 拿它当 accountId 会派生出一个幽灵 key:
-    //  · 它不代表任何真实账号(冒充实测);
-    //  · 让 Object.keys(result).length > 0,把配额状态从 empty 抬成 measured
-    //    (本机 cache/quota_history 的 8 个文件 updatedAt 全为 2026-03-24,约 6 个月前,
-    //     模型是 claude-4-5/g3-pro/g3-flash 的 antigravity 系,与当前 codex 池不同源)。
-    const accountId = emailToAccountId.get(file.email)
-    if (!accountId?.trim()) continue
-    const id = accountIdToCostId(accountId, sourceInstanceId)
+    const matches = byEmail.get(file.email)
+    if (matches?.length !== 1 || fileCounts.get(file.email) !== 1) continue
+    const id = accountIdToCostId(matches[0].id, sourceInstanceId)
     const antigravityQuota: NonNullable<AccountUsageInfo['antigravity_quota']> = {}
-    let latestUpdatedMs = file.updatedAt
+    let latestUpdatedMs = 0
     for (const [modelId, history] of Object.entries(file.models)) {
-      const points = history.points
-      if (!points || points.length === 0) continue
-      // 取最近一个非 reset 的消耗点(remaining 最低 = 用得最多),或最后一点
-      const lastPoint = points[points.length - 1]
-      if (!Number.isFinite(lastPoint.remainingPercentage)) continue
-      const progress = cockpitQuotaPointToUsageProgress(lastPoint)
-      antigravityQuota[modelId] = {
-        ...progress,
-        utilization: progress.utilization,
-        reset_time: progress.resets_at ?? '',
-      }
-      if (lastPoint.timestamp > latestUpdatedMs) latestUpdatedMs = lastPoint.timestamp
+      if (!Array.isArray(history.points)) continue
+      const point = history.points.filter(point => Number.isFinite(point.remainingPercentage)
+        && point.remainingPercentage >= 0 && point.remainingPercentage <= 100
+        && quotaTimestamp(point.timestamp) != null)
+        .reduce<CockpitQuotaPoint | null>((latest, point) => latest == null || point.timestamp > latest.timestamp ? point : latest, null)
+      if (!point) continue
+      const progress = cockpitQuotaPointToUsageProgress(point)
+      antigravityQuota[modelId] = { ...progress, reset_time: progress.resets_at ?? '' }
+      latestUpdatedMs = Math.max(latestUpdatedMs, point.timestamp)
     }
     if (Object.keys(antigravityQuota).length === 0) continue
     result[id] = {
       source: 'passive',
-      updated_at: latestUpdatedMs ? new Date(latestUpdatedMs).toISOString() : null,
+      updated_at: quotaTimestamp(latestUpdatedMs),
       five_hour: null,
       seven_day: null,
       seven_day_sonnet: null,
@@ -2980,6 +2976,24 @@ export function cockpitPlatformAccountsToAccounts(
 
 /** 台账/当前都是只增累计器,逐字段取历史最大:
  *  cockpit 清零回退 → 取台账值(防丢);正常增长 → 取当前值(防台账重复累加)。 */
+export class CockpitLedgerIdentityError extends Error {
+  constructor() {
+    super('Ambiguous email identity in Cockpit usage history; current account facts are retained without merging or rewriting history')
+    this.name = 'CockpitLedgerIdentityError'
+  }
+}
+
+function assertLedgerEmailIdentity(stats: CockpitStats, ledger: CockpitLedgerEntry[] | null | undefined): void {
+  for (const rows of [stats.accounts, ledger ?? []]) {
+    const seen = new Set<string>()
+    for (const row of rows) {
+      if (!row.email) continue
+      if (seen.has(row.email)) throw new CockpitLedgerIdentityError()
+      seen.add(row.email)
+    }
+  }
+}
+
 function ledgerMaxUsage<T extends CockpitUsageStats>(current: T, stored: CockpitUsageStats): T {
   const merged: T = { ...current }
   const target = merged as Record<string, unknown>
@@ -2995,6 +3009,7 @@ function ledgerMaxUsage<T extends CockpitUsageStats>(current: T, stored: Cockpit
 /** stats.accounts(含孤儿——被移出池的正是要保住的) → 台账快照条目。
  *  无 email 的账号跳过(email 是重建前后的稳定键,没有它无法关联)。 */
 export function snapshotCockpitLedger(stats: CockpitStats): CockpitLedgerEntry[] {
+  assertLedgerEmailIdentity(stats, null)
   const now = stats.updatedAt ?? Date.now()
   const entries: CockpitLedgerEntry[] = []
   for (const acc of stats.accounts) {
@@ -3019,6 +3034,9 @@ export function applyCockpitUsageLedger(
   stats: CockpitStats,
   ledger: CockpitLedgerEntry[] | null | undefined,
 ): CockpitLedgerEntry[] {
+  // Upstream aggregates by account_id; an email alone cannot distinguish two accounts.
+  // Reject before mutating any current row or building a replacement history file.
+  assertLedgerEmailIdentity(stats, ledger)
   const stored = new Map<string, CockpitLedgerEntry>()
   for (const e of ledger ?? []) {
     if (e?.email) stored.set(e.email, e)

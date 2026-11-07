@@ -6,6 +6,8 @@ mod cockpit_quota;
 mod cliproxy_usage_db;
 mod desktop_shell;
 mod finance_ledger;
+#[cfg(test)]
+mod usage_history_contract_tests;
 mod model_catalog;
 mod ledger_db;
 mod ledger_ingest;
@@ -106,11 +108,42 @@ fn read_cost_ledger() -> Result<String, String> {
 }
 
 /// 写 cockpit 用量台账 JSON(全量覆盖;前端先做 2000 上限裁剪再传入)。
+fn validate_cost_ledger(json: &str) -> Result<(), String> {
+    let parsed: serde_json::Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let accounts = parsed.get("accounts").and_then(serde_json::Value::as_array)
+        .ok_or("Cost ledger must contain an accounts array")?;
+    let integer_fields = ["requestCount", "successCount", "failureCount", "clientCanceledCount",
+        "upstreamResponseFailedCount", "streamIncompleteCount", "totalLatencyMs", "textRequestCount",
+        "imageRequestCount", "imageGenerationRequestCount", "imageEditRequestCount",
+        "imageGenerationCapabilityFailureCount", "inputTokens", "outputTokens", "totalTokens",
+        "cachedTokens", "reasoningTokens", "updatedAt"];
+    let mut emails = std::collections::HashSet::new();
+    for account in accounts {
+        let email = account.get("email").and_then(serde_json::Value::as_str)
+            .filter(|email| !email.trim().is_empty()).ok_or("Invalid ledger account identity")?;
+        if !emails.insert(email) { return Err("Ambiguous ledger email history".into()); }
+        let observed = account.get("updatedAt").and_then(serde_json::Value::as_f64)
+            .ok_or("Invalid ledger observation time")?;
+        if !observed.is_finite() || !(0.0..=8_640_000_000_000_000.0).contains(&observed) || observed.fract() != 0.0 {
+            return Err("Invalid ledger observation time".into());
+        }
+        let usage = account.get("usage").and_then(serde_json::Value::as_object)
+            .ok_or("Invalid ledger usage object")?;
+        for (field, value) in usage {
+            let value = value.as_f64().ok_or("Invalid ledger usage value")?;
+            if !value.is_finite() || value < 0.0
+                || (integer_fields.contains(&field.as_str()) && (value.fract() != 0.0 || value > 9_007_199_254_740_991.0))
+            {
+                return Err("Invalid or imprecise ledger usage value".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn write_cost_ledger(json: String, expected_source_instance_id: Option<String>) -> Result<(), String> {
-    if !serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?.is_object() {
-        return Err("Cost ledger must be a JSON object".into());
-    }
+    validate_cost_ledger(&json)?;
     let identity = cockpit_data_path::source_instance_id()?;
     if expected_source_instance_id.as_ref().is_some_and(|expected| expected != &identity) {
         return Err("Cockpit source changed before saving usage history; reload the source".into());
@@ -1198,7 +1231,7 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         );
-        let payload = format!(r#"{{"accounts":[{{"email":"{marker}","requestCount":42}}]}}"#);
+        let payload = format!(r#"{{"accounts":[{{"email":"{marker}","updatedAt":1,"usage":{{"requestCount":42}}}}]}}"#);
         let write_result = write_cost_ledger(payload.clone(), None);
         let back = read_cost_ledger();
         std::fs::remove_dir_all(&tmp).ok();

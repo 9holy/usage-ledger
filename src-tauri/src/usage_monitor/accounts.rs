@@ -287,6 +287,7 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), String> {
                limit_id,
                json_extract(data,'$.resets_at_ms'),json_extract(data,'$.used_percent')
              FROM monitor_quotas q WHERE window_minutes=10080
+               AND (json_extract(data,'$.window_seconds') IS NULL OR json_extract(data,'$.window_seconds')=604800)
                AND json_extract(data,'$.attribution')='account'
                AND json_extract(data,'$.source_error') IS NULL
                AND (json_extract(data,'$.billing_account_verified')=1

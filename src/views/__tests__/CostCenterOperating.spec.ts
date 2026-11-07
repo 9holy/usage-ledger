@@ -276,13 +276,14 @@ describe('CostCenter operating integration', () => {
     expect(shared.data.sourceStates.value.rangeStats.status).toBe('unavailable')
   })
 
-  it('keeps Unified duplicate-email raw rows separate when an empty ledger merges the primary rows', async () => {
+  it('keeps duplicate-email raw rows separate and does not persist an ambiguous email ledger', async () => {
     const { state, stats } = await openCockpitModelFixture()
     stats.accounts = [
       { accountId: 'raw-A', email: 'same@example.invalid', usage: { ...stats.totals, estimatedCostUsd: 2 } },
       { accountId: 'raw-B', email: 'same@example.invalid', usage: { ...stats.totals, estimatedCostUsd: 1 } },
     ]
     vi.mocked(cockpitApi.readCostLedger).mockResolvedValue({ accounts: [] })
+    vi.mocked(cockpitApi.writeCostLedger).mockClear()
     state.activePanel = 'unified'; await flushPromises()
     const reads = vi.mocked(cockpitApi.getCockpitStats).mock.calls.length
     const unifiedReads = shared.unifiedLoad.mock.calls.length
@@ -291,10 +292,10 @@ describe('CostCenter operating integration', () => {
     expect(shared.unifiedLoad).toHaveBeenCalledTimes(unifiedReads + 1)
     expect(shared.unifiedLoad).toHaveBeenLastCalledWith('1h', expect.any(Object), expect.objectContaining({ stats }))
     expect(stats.accounts.map(row => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 1]])
-    expect(state.cockpitStats.accounts.map((row: cockpitApi.CockpitStats['accounts'][number]) => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 2]])
-    expect(cockpitApi.writeCostLedger).toHaveBeenLastCalledWith([
-      expect.objectContaining({ email: 'same@example.invalid', usage: expect.objectContaining({ estimatedCostUsd: 2 }) }),
-    ], 'local')
+    expect(state.cockpitStats.accounts.map((row: cockpitApi.CockpitStats['accounts'][number]) => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 1]])
+    expect(cockpitApi.writeCostLedger).not.toHaveBeenCalled()
+    expect(shared.data.error.value).toContain('保留原文件并跳过写回')
+    expect(shared.data.error.value).toMatch(/ambiguous/i)
   })
 
   it('updates current import and fullscreen failure prefixes without rerunning operations or translating raw details', async () => {

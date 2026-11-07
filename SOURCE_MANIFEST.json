@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.2.38",
+  "version": "0.2.39",
   "repository": "9holy/usage-ledger",
-  "freeze": "2026-11-07-source-contract-audit-v0.2.38",
-  "createdAt": "2026-11-07T11:02:26.977Z",
+  "freeze": "authorized-v0.2.39-contract-completion-2026-11-07",
+  "createdAt": "2026-11-07T12:51:56.882Z",
   "gitHistoryIncluded": false,
   "policy": {
-    "version": "0.2.38",
+    "version": "0.2.39",
     "repository": "9holy/usage-ledger",
     "directories": [
       "src",
@@ -79,6 +79,13 @@
       "docs/cockpit-data-contract-audit-2026-11-07.md",
       "docs/monitor-quota-contract-audit-2026-11-07.md",
       "docs/release/0.2.38.md",
+      "docs/release/0.2.39.md",
+      "docs/data-channel-completion-2026-11-07.md",
+      "docs/finance-data-contract-audit-2026-11-07.md",
+      "docs/cockpit-quota-production-contract-2026-11-07.md",
+      "docs/cliproxy-interface-coverage-2026-11-07.md",
+      "docs/sub2api-extension-contract-audit-2026-11-07.md",
+      "docs/monitor-usage-contract-completion-2026-11-07.md",
       "docs/PRIVACY.md",
       "docs/release/0.2.24.md",
       "docs/release/0.2.25.md",
@@ -210,8 +217,8 @@
     },
     {
       "path": "DESKTOP_RELEASE_NOTES.md",
-      "bytes": 11444,
-      "sha256": "6ddb4cfe02d85ba28152ff79e82221beb3d38462ba857b945ad2252e15b783df"
+      "bytes": 12764,
+      "sha256": "89ef97b90b2493153d8f1f70e6de9e1d30950d7a444cefeb03aa639c6c62960b"
     },
     {
       "path": "LICENSES/CC-BY-NC-SA-4.0.txt",
@@ -235,13 +242,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 21717,
-      "sha256": "0831b241efa2fc7f68c57252c989f9a0dcb8623516efe327aa6cb8119a23678f"
+      "bytes": 21791,
+      "sha256": "7f8ecaa96ec3b092c16fbee9e7247bdfe9e19ba24674868c999c8b7a6f5254dd"
     },
     {
       "path": "README.zh-CN.md",
-      "bytes": 19816,
-      "sha256": "b2bc8ef41043aecc62ebb83c98536647884902c832d8a5005f19dfcd5afee7d6"
+      "bytes": 19927,
+      "sha256": "89d652b54206174d1a675c0663fed6e2d68725ea43da6683a510cad6c5e38539"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -265,23 +272,43 @@
     },
     {
       "path": "docs/cliproxy-data-contract-audit-2026-11-07.md",
-      "bytes": 17055,
-      "sha256": "bce501317f00b4c9a17288f3a48277ebfaf71bee249db60be4cdba2abc326ead"
+      "bytes": 17383,
+      "sha256": "8ada704f542fcbf53a003bddf752a68e03ad602ba2f17bab0b82f7203aabc696"
+    },
+    {
+      "path": "docs/cliproxy-interface-coverage-2026-11-07.md",
+      "bytes": 18008,
+      "sha256": "09909895ba75a87100ad666c6a42e1699d0966af72f165c0d060407bec28f3a4"
     },
     {
       "path": "docs/cockpit-data-contract-audit-2026-11-07.md",
-      "bytes": 28525,
-      "sha256": "468ec38f60cf0fa28fe9f59dfbd3a99684a293a5d5bddca80e76ccf9a1dc0dc5"
+      "bytes": 28851,
+      "sha256": "58a6916202f5f0022a61bc480928080a8500e84043c63daaa1ef2926488d74a8"
+    },
+    {
+      "path": "docs/cockpit-quota-production-contract-2026-11-07.md",
+      "bytes": 30188,
+      "sha256": "726a2d1d552f7294e07e00bf0f11d3c77edabdb6ce701af0cf16770594863331"
     },
     {
       "path": "docs/data-channel-audit-2026-11-07.md",
-      "bytes": 14910,
-      "sha256": "f314bb462fee0f3dd4eb5b534b0e65ef8ad3ebc321bae9da37068c7ece903522"
+      "bytes": 15268,
+      "sha256": "986810b6ecd0467aa8c4b87dd3a5014d2ded1c05defda4a2dfc2d70b02fc1730"
+    },
+    {
+      "path": "docs/data-channel-completion-2026-11-07.md",
+      "bytes": 12734,
+      "sha256": "3542947459ccbb27b6a952b88d1f9886456a740798d24d56cd08050a5778359d"
     },
     {
       "path": "docs/demo/readme-fixtures.js",
       "bytes": 15566,
       "sha256": "b4990be5fefb7f9210e52da62921116c1da29e2726f88b16808de09e7f35d31d"
+    },
+    {
+      "path": "docs/finance-data-contract-audit-2026-11-07.md",
+      "bytes": 10857,
+      "sha256": "dcd974c4cadfbe4524b9decaa30307d8f6e5501f5f74973332672c7d8b41a0d0"
     },
     {
       "path": "docs/integrations/deepseek-harness.md",
@@ -309,9 +336,14 @@
       "sha256": "7d3c72723f33ed1cea3dc0a30b983467ba3900551c1d297cd3f2761c562de751"
     },
     {
+      "path": "docs/monitor-usage-contract-completion-2026-11-07.md",
+      "bytes": 20543,
+      "sha256": "0cc4f0844d9652f4ebc8c45afc581caea2a276a6f63149db230c439782116405"
+    },
+    {
       "path": "docs/platforms/macos.md",
       "bytes": 16817,
-      "sha256": "02ed167afc1fc63af01d1338aff6aa85587cd883ffbe826a637b89f6b9ca0282"
+      "sha256": "56dc4b49a617900ad66642b9456fa4f3845aad4e44016eef038fbdb1c24df133"
     },
     {
       "path": "docs/re-review-2026-11-07.md",
@@ -342,6 +374,11 @@
       "path": "docs/release/0.2.38.md",
       "bytes": 10404,
       "sha256": "b5635fd3cc64e54e93c8f7bb6a32e818326619f84271761d09b477f73bed76f0"
+    },
+    {
+      "path": "docs/release/0.2.39.md",
+      "bytes": 10676,
+      "sha256": "c795e10176e7f145106d9fc9f4e69a08be0e2e6b58876a517680840858171e10"
     },
     {
       "path": "docs/screenshots/README.md",
@@ -495,8 +532,13 @@
     },
     {
       "path": "docs/sub2api-data-contract-audit-2026-11-07.md",
-      "bytes": 21599,
-      "sha256": "ac2eda4de3c5d5f979d859e9b99806c7599228e54e84b2642452a850c9c56e1c"
+      "bytes": 22055,
+      "sha256": "3a12db7f1a01bf6bceac92babaf48abeea72ba5d9bcd1b057bbdeb0ee0401bb9"
+    },
+    {
+      "path": "docs/sub2api-extension-contract-audit-2026-11-07.md",
+      "bytes": 14868,
+      "sha256": "17cd12a57b8ea123ad0c24f4848d7860cf2896d31b9e7c523656a38be3db838c"
     },
     {
       "path": "index.html",
@@ -506,7 +548,7 @@
     {
       "path": "package.json",
       "bytes": 3584,
-      "sha256": "93626c629a0afa0e389ade3a3a745642db76b2c2a98f3e08e3670d5600caab1e"
+      "sha256": "7ddcea301724777a8f21bdc76cf42ccf2041fa28809e0fd54c333db417ad675a"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -610,8 +652,8 @@
     },
     {
       "path": "scripts/source-release-policy.json",
-      "bytes": 4945,
-      "sha256": "8efc352ea2c35af4bfc4eac411ff4587f8c1b13dc556a447ce47ee9e1a24304f"
+      "bytes": 5296,
+      "sha256": "c0b52462738d70b77449e7c103d1c47bc6b6046264750395b62e546ae49086af"
     },
     {
       "path": "scripts/test-deepseek-headless.py",
@@ -636,12 +678,12 @@
     {
       "path": "src-tauri/Cargo.lock",
       "bytes": 144314,
-      "sha256": "0ed70a97b632597b60ab98d28f23a709011c81d40de943863c144339e2c9a241"
+      "sha256": "b3b8f51e6f54eeb78a7f9715329ff2415f060659b641db33a07c04f6a15ead9c"
     },
     {
       "path": "src-tauri/Cargo.toml",
       "bytes": 2194,
-      "sha256": "7b8154ff74f8d8036f15b1613c983b68b6fbab6e87928962f533fc1ed96496ee"
+      "sha256": "77487495bf2e00c939fd6c8c43190121fdadd9f0117e19aef8ea24dfd390825c"
     },
     {
       "path": "src-tauri/Info.macos.plist",
@@ -651,7 +693,7 @@
     {
       "path": "src-tauri/README.md",
       "bytes": 8806,
-      "sha256": "c6224490727b6b5d1b56cc4872c92c9e68f9fd8baaa79c6d19922431027603c8"
+      "sha256": "d650842f00a1d75faf2d4bbb1dc995e12b4f427211ca5c2b316aadc70bf69f7e"
     },
     {
       "path": "src-tauri/build.rs",
@@ -945,13 +987,23 @@
     },
     {
       "path": "src-tauri/src/cockpit_quota.rs",
-      "bytes": 173904,
-      "sha256": "057638dfa35bc41a0bf952815e311350047e8c75046f05424190d5e1a6a104b0"
+      "bytes": 177570,
+      "sha256": "fbe95439ca8a1a0e44b4ee6ab96eb61e08b2f82283a65eff938caf72fb1ba1c1"
     },
     {
       "path": "src-tauri/src/cockpit_quota_contract_tests.rs",
       "bytes": 19607,
       "sha256": "c9f53ddacdd2b7437b50a4f3d086d88441e84d0d7a83cd522d573438412e8866"
+    },
+    {
+      "path": "src-tauri/src/cockpit_quota_providers.rs",
+      "bytes": 30516,
+      "sha256": "d5b91d824f918f07137518c0470a47a73dd32645ea641046ee806c9ae3af2aac"
+    },
+    {
+      "path": "src-tauri/src/cockpit_quota_supplemental_tests.rs",
+      "bytes": 28691,
+      "sha256": "cdf43bb3f0de309b606e22c6264503a4959127ecdf0ffc93310537ce4b3abccd"
     },
     {
       "path": "src-tauri/src/desktop_shell.rs",
@@ -960,8 +1012,8 @@
     },
     {
       "path": "src-tauri/src/finance_ledger.rs",
-      "bytes": 52746,
-      "sha256": "cea0acfa5bac8e942c48859e9c40f55c0340e19b900fa7117361d59b637bf640"
+      "bytes": 56084,
+      "sha256": "a8dcc3d8dad61559b4d092b0495f6599872aae4733446bc2bd91fdb8b26e4d5c"
     },
     {
       "path": "src-tauri/src/ledger_db.rs",
@@ -985,8 +1037,8 @@
     },
     {
       "path": "src-tauri/src/main.rs",
-      "bytes": 81670,
-      "sha256": "48010ba5bf198453527caf128c02cb02a07540e09bc775e7abac09574ad379f6"
+      "bytes": 83585,
+      "sha256": "cf568360eaedeec18f555f8e1ee16cb6987d3308b4b64b216232983bf64540d4"
     },
     {
       "path": "src-tauri/src/model_catalog.rs",
@@ -999,9 +1051,14 @@
       "sha256": "f2d1ebdd60e372d6972bb9947dfb7f27f4769db7ff00661439e1cfa477b1f302"
     },
     {
+      "path": "src-tauri/src/usage_history_contract_tests.rs",
+      "bytes": 2201,
+      "sha256": "a77bfeb9d3e484f92011f3477cd9eb4c1e7b40d7990a9d09ed80c61acd16e232"
+    },
+    {
       "path": "src-tauri/src/usage_monitor/accounts.rs",
-      "bytes": 152544,
-      "sha256": "382ef1e0b5f07d61679cc7ceb6d8d9b93fa31aa96c172e3258e0e01ae5eadd9e"
+      "bytes": 152659,
+      "sha256": "4a4e19f7330f8f7d89916aa5ad7ddfd6fa9db1a7e73be9a46d3f7a188ef4c7fa"
     },
     {
       "path": "src-tauri/src/usage_monitor/analysis.rs",
@@ -1030,8 +1087,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/codex_quota_accounts.rs",
-      "bytes": 28723,
-      "sha256": "5d5fff95abd30773031c3de5072d66d9acb8ffe9d9e8217fdbf8cc29513af54d"
+      "bytes": 28942,
+      "sha256": "e23f5f22685f8e7af6df9677495409c0b34b94a218ecc0910c87759116034469"
     },
     {
       "path": "src-tauri/src/usage_monitor/collector.rs",
@@ -1040,8 +1097,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/data_channel_contract_tests.rs",
-      "bytes": 18573,
-      "sha256": "c48ecef63c03ba8faf68f236b75718ea4c88743de5cfaf9345b1694692cf4b41"
+      "bytes": 18616,
+      "sha256": "81818f0767bc25e1722e96f4c2ddd32c0bcd5cf0261184fad80cfa29dd4aa77b"
     },
     {
       "path": "src-tauri/src/usage_monitor/deepseek.rs",
@@ -1069,6 +1126,11 @@
       "sha256": "ef0b1925941e39cd752a4a85c82d83bdac6a340300dd1b432a511b067f803a44"
     },
     {
+      "path": "src-tauri/src/usage_monitor/official_quota_contract_tests.rs",
+      "bytes": 16670,
+      "sha256": "bab5496f74d2ac00acc25cc05547e34f921b797dc163307cb23ea2833c6b0519"
+    },
+    {
       "path": "src-tauri/src/usage_monitor/parser.rs",
       "bytes": 82161,
       "sha256": "e383d7254b90d4badfbea26bc249ffc0f80841e3afa7fc22466f715d150a2b5b"
@@ -1080,8 +1142,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/quota.rs",
-      "bytes": 90435,
-      "sha256": "1881bf6bc28c11cc61a85ec557227e59e3e8ecb6f8a5dc2b03219b9c9b6f6d5b"
+      "bytes": 104286,
+      "sha256": "34f7be8931fdf0fe10f24f72689a45e99bfad7079164bd69bd7a7038b27ae61d"
     },
     {
       "path": "src-tauri/src/usage_monitor/request_accounts.rs",
@@ -1090,8 +1152,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/store.rs",
-      "bytes": 254985,
-      "sha256": "8cecf27aef799452c80b74fd8028f6297bd2ab20d4e4f29f73b1aa1988bca5fc"
+      "bytes": 255052,
+      "sha256": "ce725a65be7b9ed3dfc9fe4ef19eccd2c850ea5bec51087328cc1eb85cf4df46"
     },
     {
       "path": "src-tauri/src/usage_monitor/testdata/openai-api-prices-20261107.json",
@@ -1121,7 +1183,7 @@
     {
       "path": "src-tauri/tauri.conf.json",
       "bytes": 1544,
-      "sha256": "f2a9280364ef5e8208af71d67123e1b1f131ed6da63c9bb0ed1f4817700050bf"
+      "sha256": "62c4783ffae260d9fad11a71dd1bbadd7a9e1813c0d7e48792daa5822e45a03c"
     },
     {
       "path": "src-tauri/tauri.local.conf.json",
@@ -1192,6 +1254,11 @@
       "path": "src/api/__tests__/admin.channelMonitor.duplicate.spec.ts",
       "bytes": 3976,
       "sha256": "67b571beb833c4831ea2f9774dc28f6c40aea7cc158f52438e84a9c9f8781731"
+    },
+    {
+      "path": "src/api/__tests__/admin.costExtensions.spec.ts",
+      "bytes": 3245,
+      "sha256": "958d175d9afd018d949066955b33b90205e125b6599258e5f6abdb014658b2a7"
     },
     {
       "path": "src/api/__tests__/admin.grok.spec.ts",
@@ -1325,8 +1392,8 @@
     },
     {
       "path": "src/api/admin/accounts.ts",
-      "bytes": 39637,
-      "sha256": "a37447c1518c772c154d3688ed09e0d58ed586f114ad888aee9aab1716a993bb"
+      "bytes": 39738,
+      "sha256": "c741e0f143e60d02533b1e10e6dc5d0866ca6db9d5717d220294bb514b741abb"
     },
     {
       "path": "src/api/admin/affiliates.ts",
@@ -1370,13 +1437,18 @@
     },
     {
       "path": "src/api/admin/channels.ts",
-      "bytes": 5414,
-      "sha256": "04d333bca65cd8a12dcc95b0c5ae4bb7a4bc13705a87fcfc53fe17c42f738b6e"
+      "bytes": 5546,
+      "sha256": "0845a18baef3b0202d1c1693d7deceacd95e7f9fd2cc932d2a52c5312adc377d"
     },
     {
       "path": "src/api/admin/compliance.ts",
       "bytes": 1065,
       "sha256": "309f79a6f74471676ddb23c705c8da142e5071c5b39d7af87c2e530cca3906da"
+    },
+    {
+      "path": "src/api/admin/costExtensions.ts",
+      "bytes": 2466,
+      "sha256": "e3b704dd43991d4369820c9c9feb14d1968034b336df2e5b08fbc00e6a8dadc9"
     },
     {
       "path": "src/api/admin/dashboard.ts",
@@ -1529,6 +1601,11 @@
       "sha256": "f33e634265c351295ecba6a7c7be0d937be0d1222b5236ac3c76124f2606867f"
     },
     {
+      "path": "src/api/cliproxy/__tests__/clientScope.spec.ts",
+      "bytes": 3287,
+      "sha256": "2bc21e69e92c19aa59087ab67c33d98353f9eb4046c6b116b1ba9b4ef715fbe6"
+    },
+    {
       "path": "src/api/cliproxy/__tests__/cpaData.spec.ts",
       "bytes": 2202,
       "sha256": "afa3ec65480462b4da85a9c8b7d0e7e3e492008aaeae7813151c5a42f539c083"
@@ -1540,13 +1617,13 @@
     },
     {
       "path": "src/api/cliproxy/__tests__/managementContract.spec.ts",
-      "bytes": 1528,
-      "sha256": "f58e0d62904c44212feded96dedffbbfc963fe59c080ae9ad4d3ccc3067b4ccc"
+      "bytes": 4088,
+      "sha256": "4672ab92be90dff29bb81f5a9d3f664992edc66a76910abde04238529931f445"
     },
     {
       "path": "src/api/cliproxy/client.ts",
-      "bytes": 3470,
-      "sha256": "f775bff936f3bb9bf6d8b8999d76d385006b5fd413498a9d29472e2e00a5288b"
+      "bytes": 4355,
+      "sha256": "42dc0de9745b44184f085d38439a72f0e7271b377317be24e393051e4aa836bc"
     },
     {
       "path": "src/api/cliproxy/cpaData.ts",
@@ -1560,8 +1637,8 @@
     },
     {
       "path": "src/api/cliproxy/management.ts",
-      "bytes": 22707,
-      "sha256": "889b765b7f048008e2a5009b9c0e595fe5b72ecf9d38afebdb8bc1bf80a54a19"
+      "bytes": 24530,
+      "sha256": "a43b2213b0dffe24101454dc7077785c57a51f0749a4c952295d4b01084d7369"
     },
     {
       "path": "src/api/cliproxy/sourceIdentity.ts",
@@ -1575,8 +1652,8 @@
     },
     {
       "path": "src/api/cockpit/__tests__/costProfiles.spec.ts",
-      "bytes": 1863,
-      "sha256": "26b9c0a662b5e6c1f18347abd4146295598fc3fb4409ac4df9fc361506e0fb44"
+      "bytes": 3619,
+      "sha256": "a88962e42a9d58246a95d5f90f559c229510e272505ccdee4bc84db70143b1fa"
     },
     {
       "path": "src/api/cockpit/__tests__/facets.spec.ts",
@@ -1590,8 +1667,8 @@
     },
     {
       "path": "src/api/cockpit/__tests__/quota.spec.ts",
-      "bytes": 19679,
-      "sha256": "935a8c2e4a6ac884f7cdfb31e63a1df7fd0c55b7eebb45a5b1c4b36e4e4f92e3"
+      "bytes": 19688,
+      "sha256": "68255e5ddc42048bc06c8056dff9d64b36318a7b282a8dfd161bebd618d67620"
     },
     {
       "path": "src/api/cockpit/__tests__/quotaChannelMerge.spec.ts",
@@ -1599,9 +1676,19 @@
       "sha256": "9a87f7a0975b78dd7b25336bba900cf1e53a7b929eafe51838b28f72529d37cd"
     },
     {
+      "path": "src/api/cockpit/__tests__/quotaReadErrors.spec.ts",
+      "bytes": 5860,
+      "sha256": "42f0f718d832d8cc4c65242d29c81038ced1e2b19c15ef7c86a18af6f28ad4ba"
+    },
+    {
       "path": "src/api/cockpit/__tests__/sourceLedgerContract.spec.ts",
-      "bytes": 1271,
-      "sha256": "b4bbcbdbfebf93447419ef43487a191958dfa9e0bb8dda9e46709f3271f18d72"
+      "bytes": 2967,
+      "sha256": "f0faf314ebb29d2c9389237a6499c634a52c7b982ce482d3d8fa22a8fb02495c"
+    },
+    {
+      "path": "src/api/cockpit/costProfiles.ts",
+      "bytes": 1598,
+      "sha256": "b59eef8b876db49dc1aa418926db5faf96221b2ba8b62e91a99938bf5a35926f"
     },
     {
       "path": "src/api/cockpit/facets.ts",
@@ -1610,13 +1697,13 @@
     },
     {
       "path": "src/api/cockpit/index.ts",
-      "bytes": 35781,
-      "sha256": "6875ff1e3e948de579ad3f35e0bd35dc72aadd6d254829bc57a660c2ba8b527f"
+      "bytes": 37016,
+      "sha256": "235cd2c9b60f483eddd2a3ed4a379c0fc370416f493d240cded2ac6ee663b0ec"
     },
     {
       "path": "src/api/cockpit/quota.ts",
-      "bytes": 19403,
-      "sha256": "01b28a9ec1916db7584202d9c5683f5b7a76df95c4b4daf02f47290f3a90001f"
+      "bytes": 19393,
+      "sha256": "b81623bf8b07570acb2fdf3afd675a24355f9cf299dc4254e78addfddad05f48"
     },
     {
       "path": "src/api/cockpit/quotaChannelMerge.ts",
@@ -1735,8 +1822,8 @@
     },
     {
       "path": "src/api/usageMonitor.ts",
-      "bytes": 31804,
-      "sha256": "cf9f7811616505b601335b30d55630e75f029f0236867dc844b84aa13f9edd47"
+      "bytes": 32416,
+      "sha256": "63012b1abb95d33a1cab8de35430cbf6d1ebf0d38b4a7c78877d4146ef29cc75"
     },
     {
       "path": "src/api/user.ts",
@@ -3655,8 +3742,8 @@
     },
     {
       "path": "src/features/cost-center/__tests__/accountQuotaSnapshots.spec.ts",
-      "bytes": 8344,
-      "sha256": "e9f1b4ff7423d0a7727b2140e4c9cfc60f85f5985b47e0b068359cdc163d2311"
+      "bytes": 8342,
+      "sha256": "c0fa959d28dcd232cc3a54b1a4e51d174b1fa17b84ada69fac5f1ed35b3ba548"
     },
     {
       "path": "src/features/cost-center/__tests__/accountRowUsageBasis.spec.ts",
@@ -3725,8 +3812,8 @@
     },
     {
       "path": "src/features/cost-center/__tests__/cockpitAdapter.spec.ts",
-      "bytes": 76042,
-      "sha256": "5b23f5773714597c3c42d0c5e0bdc3193f7daa73759ec343401c602bbdaf75f5"
+      "bytes": 76675,
+      "sha256": "6f6ac7a06425cc7bcf939af303a4ca8d69726600a44782fe6ca6c21335612f5a"
     },
     {
       "path": "src/features/cost-center/__tests__/cockpitEconomicsSeriesNull.spec.ts",
@@ -3734,9 +3821,14 @@
       "sha256": "bf8827b1b2de61ad301d48ac5a92988fc8e75dc64e4634ff12070ad6dabf51e8"
     },
     {
+      "path": "src/features/cost-center/__tests__/cockpitHistoryContract.spec.ts",
+      "bytes": 4264,
+      "sha256": "3906b43cad15eac3a4c9ab70c1eaed4dfa4ab2c526b47de18d3792c101a70488"
+    },
+    {
       "path": "src/features/cost-center/__tests__/cockpitHonestyRegression.spec.ts",
-      "bytes": 8177,
-      "sha256": "6492d6e98f827939e0e4dfadb5664b4e78ab39cfcb44216ee556cd031a8ea291"
+      "bytes": 8181,
+      "sha256": "0484b3462d62f796c66f17defadbd381da8397fe7ab2b1182ede33e0b7a84838"
     },
     {
       "path": "src/features/cost-center/__tests__/cockpitServiceTier.spec.ts",
@@ -3790,8 +3882,8 @@
     },
     {
       "path": "src/features/cost-center/__tests__/costStoreIntegration.spec.ts",
-      "bytes": 18005,
-      "sha256": "3130f6ad4aaf1feec0635201c388a83f4b976e99e60e7fcabe79568acccc8818"
+      "bytes": 19223,
+      "sha256": "0788df4d36132c75042d33d85ddca9466f789caf853b4b92503bc4800dad722a"
     },
     {
       "path": "src/features/cost-center/__tests__/costUnknownOrAccumulation.spec.ts",
@@ -4010,8 +4102,8 @@
     },
     {
       "path": "src/features/cost-center/cockpitAdapter.ts",
-      "bytes": 164596,
-      "sha256": "f6ff9b89af53804fbe4ab0d874619df42e5719f8e3ab7927a4ea39ab7b2a28b5"
+      "bytes": 165140,
+      "sha256": "e8e263e3d921252339c342d381492070058638f747fa8bf5eb08493d49b607d5"
     },
     {
       "path": "src/features/cost-center/cockpitPriceBook.ts",
@@ -4030,13 +4122,13 @@
     },
     {
       "path": "src/features/cost-center/components/CostApiAccessPanel.vue",
-      "bytes": 25020,
-      "sha256": "7dc627772a7ef862e68a70f8dc3f39d60a8eb9abbf5810325172e3b80aeaaec3"
+      "bytes": 29425,
+      "sha256": "3e620130e8af8ce161cc71289cd7d56fe8112747d7009007af0d0cae43b37c19"
     },
     {
       "path": "src/features/cost-center/components/CostEventsPanel.vue",
-      "bytes": 24098,
-      "sha256": "092f72b13351ef9083cfa19c429b4a499fc2b9456c34a3ed286a45d81baf44c8"
+      "bytes": 24282,
+      "sha256": "bff99e8a74e2b5b67d5fea59a4dfe3809fc81ba5b045d4b8dfa30be7c5286d2e"
     },
     {
       "path": "src/features/cost-center/components/CostLineChart.vue",
@@ -4045,8 +4137,8 @@
     },
     {
       "path": "src/features/cost-center/components/CostProfileInspector.vue",
-      "bytes": 23148,
-      "sha256": "87b44fee1aa20a460b9a0f906d4460a9dd3fd86f73cd8e5d7613426aec7d8d19"
+      "bytes": 23393,
+      "sha256": "3c479a66573f3b48ed9f9476c9a20ffdbe2630d26b97172107d16b1352320a70"
     },
     {
       "path": "src/features/cost-center/components/DataGovernancePanel.vue",
@@ -4090,18 +4182,18 @@
     },
     {
       "path": "src/features/cost-center/components/__tests__/CostApiAccessPanel.spec.ts",
-      "bytes": 1793,
-      "sha256": "98061a3060da9f853695081c385fc74c2a1e78ddb4f0c705067b057be134b9c0"
+      "bytes": 6970,
+      "sha256": "b25d81d358b8317833113b4b7057216e2be0fe1ebbbc6e200d6404279f8bcf88"
     },
     {
       "path": "src/features/cost-center/components/__tests__/CostComponentsLocale.spec.ts",
-      "bytes": 6328,
-      "sha256": "7e3759270ee4317a8ebcb2e70c32293ac58b9d5a84b1602747d600f56b231361"
+      "bytes": 6373,
+      "sha256": "4799cbc16ad83f25ba9ac286a93042a5fa432e1a874984a071725cb4e0da6da1"
     },
     {
       "path": "src/features/cost-center/components/__tests__/CostEventsPanel.spec.ts",
-      "bytes": 11669,
-      "sha256": "4177b1487c54076467e443b00372f43493c68bd56373306f50a75d839ba5039d"
+      "bytes": 13714,
+      "sha256": "024c07857a93964e2f7783200265705b8752227bf87508d7a8bf2fc5d3dc4404"
     },
     {
       "path": "src/features/cost-center/components/__tests__/CostLineChart.spec.ts",
@@ -4110,8 +4202,8 @@
     },
     {
       "path": "src/features/cost-center/components/__tests__/CostProfileInspector.spec.ts",
-      "bytes": 6841,
-      "sha256": "cb7c93fdeacab90ea63a86d91e64588c71927ad1a9b8be4f80bc3c73c89627ce"
+      "bytes": 7495,
+      "sha256": "b7feb067de90dee9428d0218df27cdc857125556f247e8a4c4910ccd54cf21c4"
     },
     {
       "path": "src/features/cost-center/components/__tests__/DataGovernancePanel.spec.ts",
@@ -4310,13 +4402,13 @@
     },
     {
       "path": "src/features/cost-center/useChannelQuota.ts",
-      "bytes": 6036,
-      "sha256": "80bdc7562bdd2d5bdbd0da6ea7df4670e4652505908600f235ecfc021c303624"
+      "bytes": 6633,
+      "sha256": "7d1cbd3eb6df8abad5034646b1d96c2b80870fd48d4fe2c384b7a341fedff616"
     },
     {
       "path": "src/features/cost-center/useCostCenterData.ts",
-      "bytes": 164551,
-      "sha256": "8523fce8f3b797d587114f602d44b5c90460d64e7f36a630a61fa3d5a234da69"
+      "bytes": 164681,
+      "sha256": "c8414e094d25b2d496f5ea89d84af9d3533348219d7fd3219617ac9d577087ec"
     },
     {
       "path": "src/features/cost-center/useUnifiedCost.ts",
@@ -4845,18 +4937,18 @@
     },
     {
       "path": "src/i18n/locales/en/costCenter.ts",
-      "bytes": 74602,
-      "sha256": "e7265a87b59366c6e9f66eedda0086b1868affa66e709f74a3b226689b389124"
+      "bytes": 74741,
+      "sha256": "8b7703ee778eb093bc45a0f792055778a6a1a1432229f26210d3dd6d7f8fb805"
     },
     {
       "path": "src/i18n/locales/en/costComponents.ts",
-      "bytes": 26446,
-      "sha256": "58c717c3d1566a44a1af39ac9cf5d4922e83011b77bd12775d12b6bbf26907bf"
+      "bytes": 27036,
+      "sha256": "020758cd3539d2ba48413327d7a715fbda3d2520e5a025417e883246b2c1782d"
     },
     {
       "path": "src/i18n/locales/en/costData.ts",
-      "bytes": 38522,
-      "sha256": "3915bdb1e9bdb0669c4e6f81176bda07e3a210e7c99950f3c1a68429b198d6f1"
+      "bytes": 38645,
+      "sha256": "d675c78183d5281b6eb2ff90b72f6a57c955fd1b0692f9efc685c72ffaf4fd4d"
     },
     {
       "path": "src/i18n/locales/en/dashboard.ts",
@@ -4885,8 +4977,8 @@
     },
     {
       "path": "src/i18n/locales/en/usageMonitor.ts",
-      "bytes": 70731,
-      "sha256": "b93417cb8d418d864c60e00c3e6e54f4f54a16a215910d68be4fc4833e974e50"
+      "bytes": 72060,
+      "sha256": "8dbb1f1a2abb387947d209e9e7a857fac904ab6d9724b61a0636f0eb3951d58d"
     },
     {
       "path": "src/i18n/locales/zh/admin/accounts.ts",
@@ -4965,18 +5057,18 @@
     },
     {
       "path": "src/i18n/locales/zh/costCenter.ts",
-      "bytes": 69927,
-      "sha256": "1f075afbb022a0cc3a20e64cd7e25989a903d983d2dd467bbb252da7e90b82ad"
+      "bytes": 70048,
+      "sha256": "7b871030468f4181a6b808faf9231de5267f18f9768ef09712059d834a5d4eff"
     },
     {
       "path": "src/i18n/locales/zh/costComponents.ts",
-      "bytes": 25594,
-      "sha256": "b28e89f8101a4ab4caa87f1fad63f5c008864f0a0cf6ba42e09d6fc8fd47654e"
+      "bytes": 26127,
+      "sha256": "70cefb487f031ee369f01bbdc629cb21dc42e961b40635e8a217d96a2b04a721"
     },
     {
       "path": "src/i18n/locales/zh/costData.ts",
-      "bytes": 35702,
-      "sha256": "983b6efac5e625b0ff1148bd1102924f4ef4f22aec687ea90ddd4316f3036ef1"
+      "bytes": 35805,
+      "sha256": "618300d50edb7c03efeb710e78ff91fecedef23047dd3d3be6dd9cc299384921"
     },
     {
       "path": "src/i18n/locales/zh/dashboard.ts",
@@ -5005,8 +5097,8 @@
     },
     {
       "path": "src/i18n/locales/zh/usageMonitor.ts",
-      "bytes": 66195,
-      "sha256": "16d526097074e9f5b23d8bdabaa44cf38cd5a484b3d1dc14b403593672dd2c05"
+      "bytes": 67463,
+      "sha256": "e5d4f09f86227cb7be3ac18b958f6f7d40e1e1643809b3527d23822e0da18eb5"
     },
     {
       "path": "src/main.ts",
@@ -5535,8 +5627,8 @@
     },
     {
       "path": "src/views/UsageMonitorView.vue",
-      "bytes": 202915,
-      "sha256": "22bd9ce6b2fd08393f6b7870c125e61118fb7cdd6268bcb7b93324c82c5a0175"
+      "bytes": 209217,
+      "sha256": "f767612d3b49a5c53db79fe8911fef1d24f8a3ff02c8d24d759426da384c6cc8"
     },
     {
       "path": "src/views/__tests__/ConnectView.spec.ts",
@@ -5544,9 +5636,14 @@
       "sha256": "87dae40211223cf4cff15eb2d9861e2189b71a839ad56ef6a03a36eb486b2d72"
     },
     {
+      "path": "src/views/__tests__/CostCenterCliproxyContract.spec.ts",
+      "bytes": 9979,
+      "sha256": "4faa4b4cef7edb40c50b7e9248568591196b86d51cda58d27105b913f7ac532b"
+    },
+    {
       "path": "src/views/__tests__/CostCenterOperating.spec.ts",
-      "bytes": 67162,
-      "sha256": "4541541d1c76f19dd0b29a25b8fb36beb6f19cc6312f1d2fcec05c115b5ac530"
+      "bytes": 67205,
+      "sha256": "58da3d696e5637d3de6cdc75af20476b94a1016f0ea6d44dbb723946d32524fc"
     },
     {
       "path": "src/views/__tests__/HomeView.compact.spec.ts",
@@ -5560,8 +5657,8 @@
     },
     {
       "path": "src/views/__tests__/UsageMonitorView.spec.ts",
-      "bytes": 172634,
-      "sha256": "e90057aff620cbb0082be389a7841ea38fa23e14b4ed5f8f4a3828537416273e"
+      "bytes": 186993,
+      "sha256": "d23d39c3815b46cb1352e4bb731cc14318aa8b5f16d9f88bb9c96a47511f0ae0"
     },
     {
       "path": "src/views/admin/AccountsView.vue",
@@ -5595,8 +5692,8 @@
     },
     {
       "path": "src/views/admin/CostCenterView.vue",
-      "bytes": 421850,
-      "sha256": "f5465e32b4744103bc2739a52f313f119772cd30063851d3cec0af1aa5a42825"
+      "bytes": 424674,
+      "sha256": "00de079c7539e8bdf88274a01525632b61d21f8d13f560d5617d571aa2e3cb08"
     },
     {
       "path": "src/views/admin/DashboardView.vue",

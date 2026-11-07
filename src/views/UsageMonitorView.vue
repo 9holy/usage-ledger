@@ -281,7 +281,7 @@ const weeklyTotals = computed(() => tool.value ? weekly.value?.byTool.find(row =
 const weeklyQuotes = computed(() => monitorSingleQuotes(weeklyTotals.value))
 const weeklyScope = computed(() => tool.value ? weekly.value?.byTool.find(row => row.tool === tool.value) : weekly.value)
 const weeklyReference = computed(() => weeklyScope.value?.reference ?? [])
-const weeklyForecast = computed(() => exhaustedQuotas.value.length ? [] : weeklyScope.value?.forecast ?? [])
+const weeklyForecast = computed(() => exhaustedQuotas.value.length || restrictedMainQuotas.value.length ? [] : weeklyScope.value?.forecast ?? [])
 const visibleQuotas = computed(() => (quotas.value?.quotas ?? [])
   .filter(item => !tool.value || item.tool === tool.value)
   .sort((a, b) => Number(a.stale || a.expired) - Number(b.stale || b.expired)
@@ -293,7 +293,8 @@ const accountUsageByKey = computed(() => new Map((accountUsage.value?.accounts ?
 const currentForecastAccount = computed(() => accountUsage.value?.accounts.find(account =>
   account.accountKey === accountUsage.value?.currentAccountKey && (!tool.value || account.tool === tool.value)))
 function isAccountWeeklyQuota(quota: MonitorQuota): boolean {
-  return quota.windowMinutes === 10080 && ((quota.tool === 'codex' && quota.limitId === 'codex')
+  return quota.windowMinutes === 10080 && (quota.windowSeconds == null || quota.windowSeconds === 604800)
+    && ((quota.tool === 'codex' && quota.limitId === 'codex')
     || (quota.tool === 'claude' && quota.limitId === 'seven_day'))
 }
 const forecastQuota = computed(() => {
@@ -323,6 +324,7 @@ const liveAccountQuotaPrediction = computed(() => {
   if (!cycle?.current || cycle.resetAtMs <= Math.max(Date.now(), accountUsage.value?.collectedAtMs ?? 0)) { result.message = t('usageMonitor.text.currentWeeklyQuotaCycleNotYetConfirmed'); return result }
   const quota = forecastQuota.value
   if (quota && quota.billingAccountVerified !== true) { result.message = t('usageMonitor.text.billingAccountUnconfirmed'); return result }
+  if (restrictedMainQuotas.value.some(item => item.accountKey === account.accountKey && item.tool === account.tool)) { result.message = t('usageMonitor.text.officialQuotaRestricted'); return result }
   if (!quota || quotaIsHistorical(quota)) { result.message = t('usageMonitor.text.weeklyQuotaAwaitingUpdate'); return result }
   const used = cycle.usedPercent
   if (used == null || used <= 0) { result.message = t('usageMonitor.text.waitingForUsageRecordsInThisCycle'); return result }
@@ -462,7 +464,7 @@ function restoreQuotaAccount(key: string) {
 const accountUsageQuotaIds = computed(() => {
   const chosen = new Map<string, MonitorQuota>()
   for (const quota of visibleQuotas.value) {
-    if (quota.attribution !== 'account') continue
+    if (quota.attribution !== 'account' || quota.tool === 'codex' && quota.limitId !== 'codex') continue
     if (displayAccountKeys.value.has(quota.accountKey) && !displayQuotaIds.value.has(quota.id)) continue
     const previous = chosen.get(quota.accountKey)
     if (!previous || (isAccountWeeklyQuota(quota) && !isAccountWeeklyQuota(previous))
@@ -470,16 +472,17 @@ const accountUsageQuotaIds = computed(() => {
   }
   return new Set([...chosen.values()].map(quota => quota.id))
 })
+const selectedAccountHasUsageCard = computed(() => visibleQuotas.value.some(quota => quota.accountKey === selectedQuotaAccountKey.value && accountUsageQuotaIds.value.has(quota.id)))
 const creditAccounts = computed(() => {
   const latest = new Map<string, MonitorQuota>()
-  for (const row of visibleQuotas.value.filter(item => item.tool === 'codex' && item.attribution === 'account')) {
+  for (const row of visibleQuotas.value.filter(item => item.tool === 'codex' && item.limitId === 'codex' && item.attribution === 'account')) {
     const previous = latest.get(row.accountKey)
     if (!previous || (row.observedAtMs ?? 0) > (previous.observedAtMs ?? 0) || (row.observedAtMs === previous.observedAtMs && !previous.credits && row.credits)) latest.set(row.accountKey, row)
   }
   return [...latest.values()]
 })
 function creditState(item: MonitorQuota): string {
-  if (quotaIsHistorical(item)) return t('usageMonitor.text.statusAwaitingUpdate')
+  if (creditIsHistorical(item)) return t('usageMonitor.text.statusAwaitingUpdate')
   if (item.credits?.unlimited === true) return t('usageMonitor.text.toolReportsUnlimitedCredits')
   if (item.credits?.hasCredits === true) return t('usageMonitor.text.creditsAvailable')
   return item.credits?.hasCredits === false ? t('usageMonitor.text.noAvailableCredits') : t('usageMonitor.text.creditStatusNotReported')
@@ -498,24 +501,61 @@ function hasReportedCredits(item: MonitorQuota): boolean {
   if (credits.balance == null) return credits.hasCredits === true
   return credits.balance.trim() !== '' && Number.isFinite(Number(credits.balance)) && Number(credits.balance) > 0
 }
-const hasExtraCredits = computed(() => exhaustedQuotas.value.some(item => creditAccounts.value.some(account => account.accountKey === item.accountKey && !quotaIsHistorical(account) && hasReportedCredits(account))))
+function hasCreditObservation(item: MonitorQuota): boolean {
+  return !!item.credits && (item.credits.hasCredits != null || item.credits.unlimited != null || item.credits.balance != null)
+}
+function creditIsHistorical(item: MonitorQuota): boolean {
+  // Credits are an account observation, independent from a quota window's reset.
+  return !!quotaError.value || item.attribution !== 'account' || !!item.sourceError || item.observedAtMs == null
+    || (quotas.value?.collectedAtMs ?? Date.now()) - item.observedAtMs > 300000 || item.stale && !item.expired
+}
+function quotaProviderBlocked(item: MonitorQuota): boolean {
+  const status = item.providerStatus
+  return status?.allowed === false || status?.limitReached === true || status?.spendControl?.reached === true
+    || !!status?.rateLimitReachedType && status.rateLimitReachedType !== 'unknown'
+}
+function quotaProviderStatus(item: MonitorQuota): string {
+  if (quotaProviderBlocked(item)) return t('usageMonitor.text.officialQuotaRestricted')
+  if (item.providerStatus?.rateLimitReachedType === 'unknown') return t('usageMonitor.text.officialQuotaUnknownRestriction')
+  if (item.providerStatus?.allowed === true) return t('usageMonitor.text.officialQuotaAllowed')
+  return item.providerStatus?.limitReached === false ? t('usageMonitor.text.officialQuotaNotReached') : t('usageMonitor.text.officialQuotaAccessUnknown')
+}
+function quotaProviderReason(item: MonitorQuota): string {
+  const names: Record<string, string> = {
+    rate_limit_reached: 'officialQuotaReasonWindow', workspace_owner_credits_depleted: 'officialQuotaReasonOwnerCredits',
+    workspace_member_credits_depleted: 'officialQuotaReasonMemberCredits', workspace_owner_usage_limit_reached: 'officialQuotaReasonOwnerLimit',
+    workspace_member_usage_limit_reached: 'officialQuotaReasonMemberLimit',
+  }
+  const kind = item.providerStatus?.rateLimitReachedType
+  return kind && names[kind] ? t(`usageMonitor.text.${names[kind]}`) : ''
+}
+function spendControlState(reached: boolean | null): string {
+  return reached === true ? t('usageMonitor.text.officialSpendReached') : reached === false ? t('usageMonitor.text.officialSpendNotReached') : t('usageMonitor.text.unknown')
+}
+// Account status has its own observation age, even when a numeric window expired.
+// Additional pools cannot suspend the main account's continued-usage forecasts.
+const restrictedMainQuotas = computed(() => visibleQuotas.value.filter(item => item.tool === 'codex' && item.limitId === 'codex'
+  && !creditIsHistorical(item) && quotaProviderBlocked(item)))
+const hasExtraCredits = computed(() => exhaustedQuotas.value.some(item => creditAccounts.value.some(account => account.accountKey === item.accountKey
+  && !creditIsHistorical(account) && !quotaProviderBlocked(account) && hasReportedCredits(account))))
 const creditGroups = computed(() => [
-  { id: 'current', label: t('usageMonitor.text.accountCredits'), items: creditAccounts.value.filter(account => hasReportedCredits(account) && account.accountKey === selectedQuotaAccountKey.value && (!quotaIsHistorical(account) || displayAccountKeys.value.has(account.accountKey))) },
-  { id: 'history', label: t('usageMonitor.text.historicalCreditsNotTheCurrentAvailableBalance'), items: creditAccounts.value.filter(account => hasReportedCredits(account) && account.accountKey === selectedQuotaAccountKey.value && quotaIsHistorical(account) && !displayAccountKeys.value.has(account.accountKey)) },
+  { id: 'current', label: t('usageMonitor.text.accountCredits'), items: creditAccounts.value.filter(account => hasCreditObservation(account) && account.accountKey === selectedQuotaAccountKey.value && (!creditIsHistorical(account) || displayAccountKeys.value.has(account.accountKey))) },
+  { id: 'history', label: t('usageMonitor.text.historicalCreditsNotTheCurrentAvailableBalance'), items: creditAccounts.value.filter(account => hasCreditObservation(account) && account.accountKey === selectedQuotaAccountKey.value && creditIsHistorical(account) && !displayAccountKeys.value.has(account.accountKey)) },
 ].filter(group => group.items.length))
 const quotaSources = computed(() => (quotas.value?.sources ?? []).filter(item => !tool.value || item.tool === tool.value))
 const quotaSourceWarnings = computed(() => quotaSources.value.filter(source => source.error || source.status !== 'available' || source.coverage?.scopesUnreported).length)
 const exhaustedQuotas = computed(() => {
   const blockers: MonitorQuota[] = []
   for (const source of tools.value.filter(item => item.id && (!tool.value || item.id === tool.value))) {
-    const rows = visibleQuotas.value.filter(item => item.tool === source.id && item.attribution === 'account')
+    const rows = visibleQuotas.value.filter(item => item.tool === source.id && item.attribution === 'account'
+      && (item.tool !== 'codex' || item.limitId === 'codex'))
       .slice().sort((a, b) => (b.observedAtMs ?? 0) - (a.observedAtMs ?? 0))
     const accounts = new Set(currentQuotas.value.filter(item => item.tool === source.id).map(item => item.accountKey))
     if (!accounts.size && rows[0]) accounts.add(rows[0].accountKey)
     // An expired snapshot is not evidence that an exhausted allowance was replenished.
     blockers.push(...rows.filter(item => accounts.has(item.accountKey) && item.remainingPercent === 0
       && !rows.some(next => next.accountKey === item.accountKey && next.limitId === item.limitId
-        && next.windowMinutes === item.windowMinutes && !quotaIsHistorical(next)
+        && next.windowMinutes === item.windowMinutes && next.windowSeconds === item.windowSeconds && !quotaIsHistorical(next)
         && (next.observedAtMs ?? 0) > (item.observedAtMs ?? 0)
         && next.resetsAtMs != null && item.resetsAtMs != null && next.resetsAtMs > item.resetsAtMs
         && next.observedAtMs! >= item.resetsAtMs)))
@@ -527,7 +567,7 @@ const quotaGroups = computed(() => [
   { id: 'history', label: t('usageMonitor.text.historyUnidentifiedAccounts'), items: visibleQuotas.value.filter(item => !displayQuotaIds.value.has(item.id)
     && (item.attribution !== 'account' || item.accountKey === selectedQuotaAccountKey.value)) },
 ].filter(group => group.items.length))
-function quotaIsHistorical(item: MonitorQuota): boolean { return item.stale || item.expired || !!item.sourceError || item.attribution !== 'account' }
+function quotaIsHistorical(item: MonitorQuota): boolean { return !!quotaError.value || item.stale || item.expired || !!item.sourceError || item.attribution !== 'account' }
 function sessionName(session: { project: string | null; id: string }): string { return session.project?.split(/[\\/]/).filter(Boolean).at(-1) || session.id.slice(0, 12) }
 function summaryMoney(amount: number | null, currency: string, forecast = false): string {
   if (currency === 'UNKNOWN') return t('usageMonitor.text.insufficientPricingEvidence')
@@ -575,7 +615,9 @@ async function previewPrice() {
 function quotaForecast(item: MonitorQuota): string {
   if (item.billingAccountVerified === false) return t('usageMonitor.text.quotaAccountUnconfirmed')
   if (quotaIsHistorical(item)) return item.expired || item.resetsAtMs != null && item.resetsAtMs <= (quotas.value?.collectedAtMs ?? Date.now()) ? t('usageMonitor.text.resetTimeReachedWaitingForNewRecords') : t('usageMonitor.text.quotaAwaitingUpdate')
+  if (quotaProviderBlocked(item)) return t('usageMonitor.text.officialQuotaRestricted')
   if (item.remainingPercent === 0 && !quotaIsHistorical(item)) {
+    if (item.tool === 'codex' && item.limitId !== 'codex') return t('usageMonitor.text.officialExtraPoolExhausted')
     const account = creditAccounts.value.find(row => row.accountKey === item.accountKey)
     return account ? t('usageMonitor.text.planQuotaExhausted', { value0: creditState(account) }) : t('usageMonitor.text.planQuotaExhaustedExtraUsageStatusNotReported')
   }
@@ -633,10 +675,14 @@ function excludedComponent(component: string): string {
 }
 
 function quotaWindow(item: MonitorQuota): string {
-  if (item.poolLabel && !['Five Hour Limit', 'Weekly Limit'].includes(item.poolLabel)) return /^chat_\d+$/.test(item.poolLabel) ? t('usageMonitor.text.modelQuota', { value0: item.poolLabel }) : item.poolLabel
+  const label = item.poolLabel && !['Five Hour Limit', 'Weekly Limit'].includes(item.poolLabel)
+    ? /^chat_\d+$/.test(item.poolLabel) ? t('usageMonitor.text.modelQuota', { value0: item.poolLabel }) : item.poolLabel : null
   const minutes = item.windowMinutes
-  if (minutes == null) return item.limitId || t('usageMonitor.text.periodNotReported')
-  return minutes % 1440 === 0 ? t('usageMonitor.text.dayQuota', { value0: minutes / 1440 }) : minutes % 60 === 0 ? t('usageMonitor.text.hourQuota', { value0: minutes / 60 }) : t('usageMonitor.text.minuteQuota', { value0: minutes })
+  const seconds = item.windowSeconds
+  const period = seconds != null && seconds > 0 && seconds % 60 !== 0 ? t('usageMonitor.text.officialQuotaExactSeconds', { value: seconds })
+    : minutes == null ? null : minutes % 1440 === 0 ? t('usageMonitor.text.dayQuota', { value0: minutes / 1440 })
+      : minutes % 60 === 0 ? t('usageMonitor.text.hourQuota', { value0: minutes / 60 }) : t('usageMonitor.text.minuteQuota', { value0: minutes })
+  return label && period ? `${label} · ${period}` : label || period || (item.slot === 'summary' && item.limitId === 'codex' ? t('usageMonitor.text.officialQuotaSummary') : item.limitId || t('usageMonitor.text.periodNotReported'))
 }
 function quotaValue(item: MonitorQuota): string {
   return item.remainingPercent == null ? t('usageMonitor.text.notReported') : usagePercentLabel(item.remainingPercent)
@@ -960,7 +1006,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
                 <summary>{{ t('usageMonitor.text.pricingEstimationEvidence') }}</summary>
                 <p v-if="accountQuotaPrediction.context && accountQuotaPrediction.cycle" class="page-note">{{ accountQuotaPrediction.label }}{{ t('usageMonitor.text.label') }}{{ time(accountQuotaPrediction.cycle.startMs) }} {{ t('usageMonitor.text.to') }} {{ time(accountQuotaPrediction.cycle.resetAtMs) }}{{ t('usageMonitor.text.identifiedAmountThisCycleQuotaUsed') }} {{ accountQuotaPrediction.context.usedPercent.toFixed(1) }}{{ t(accountQuotaPrediction.partial ? 'usageMonitor.text.pricedPortionProjectionAssumingUnchangedMix' : 'usageMonitor.text.estimatedWeeklyQuotaTotalAssumingTheModelAndCache') }}<template v-if="accountQuotaPrediction.updatedAtMs">{{ t('usageMonitor.text.estimateUpdated') }} {{ time(accountQuotaPrediction.updatedAtMs) }}{{ t('usageMonitor.text.label2') }}</template></p>
                 <p class="page-note">{{ t('usageMonitor.text.belowGlobalCalendarWeekComparisonAtStandardPricesAnd') }}</p>
-                <div v-if="exhaustedQuotas.length" class="forecast-paused" role="status"><Clock3 :size="22" /><div><strong>{{ t('usageMonitor.text.recordedUsageContinuesAccumulatingRemainingUsageIsNotPredicted') }}</strong><p v-for="item in exhaustedQuotas" :key="item.id">{{ toolName(item.tool) }} · {{ quotaAccountLabel(item) }} · {{ quotaWindow(item) }}{{ t('usageMonitor.text.exhausted') }}<br />{{ item.resetsAtMs ? t('usageMonitor.text.planReset') + time(item.resetsAtMs) : t('usageMonitor.text.waitingForTheSourceToProvideResetTime') }}</p><small>{{ hasExtraCredits ? t('usageMonitor.text.extraCreditsAreAvailableButTheirRemainingDurationCannot') : t('usageMonitor.text.availableCreditsHaveNotBeenConfirmed') }}{{ t('usageMonitor.text.actualUsageWillContinueToBeRecorded') }}</small></div></div>
+                <div v-if="exhaustedQuotas.length || restrictedMainQuotas.length" class="forecast-paused" role="status"><Clock3 :size="22" /><div><strong>{{ t('usageMonitor.text.recordedUsageContinuesAccumulatingRemainingUsageIsNotPredicted') }}</strong><p v-for="item in exhaustedQuotas" :key="item.id">{{ toolName(item.tool) }} · {{ quotaAccountLabel(item) }} · {{ quotaWindow(item) }}{{ t('usageMonitor.text.exhausted') }}<br />{{ item.resetsAtMs ? t('usageMonitor.text.planReset') + time(item.resetsAtMs) : t('usageMonitor.text.waitingForTheSourceToProvideResetTime') }}</p><p v-for="item in restrictedMainQuotas" :key="'restricted-' + item.id">{{ toolName(item.tool) }} · {{ quotaAccountLabel(item) }} · {{ quotaProviderStatus(item) }}<template v-if="quotaProviderReason(item)"> · {{ quotaProviderReason(item) }}</template></p><small>{{ hasExtraCredits ? t('usageMonitor.text.extraCreditsAreAvailableButTheirRemainingDurationCannot') : t('usageMonitor.text.availableCreditsHaveNotBeenConfirmed') }}{{ t('usageMonitor.text.actualUsageWillContinueToBeRecorded') }}</small></div></div>
                 <p v-for="quote in weeklyReference" :key="'uniform-' + quote.currency" class="page-note">{{ t('usageMonitor.text.comparisonNormalizedToStandardMode') }}{{ summaryMoney(quote.amount ?? quote.knownSubtotal, quote.currency) }}{{ t('usageMonitor.text.aComparisonUnderTheSameBillingAssumptionNotA') }}</p>
                 <p v-for="quote in weeklyReference" :key="quote.currency" class="page-note">{{ currencyName(quote.currency) }}{{ t('usageMonitor.text.priced') }} {{ number(quote.pricedRequests) }} / {{ number(weeklyTotals?.requestCount) }} {{ t('usageMonitor.text.requests2') }}{{ number(quote.unpricedRequests) }} {{ t('usageMonitor.text.missingPricingEvidence') }}{{ number(quote.requestedModelRequests) }} {{ t('usageMonitor.text.modelsHaveRequestSettingsOnlyCatalog') }} {{ quote.catalogRevision || t('usageMonitor.text.officialSupplementaryPrices') }} {{ t('usageMonitor.text.rules') }} {{ quote.ruleVersion }}{{ t('usageMonitor.text.label2') }}<template v-if="quote.excludedComponents?.length">{{ t('usageMonitor.text.excludes') }} {{ quote.excludedComponents.map(excludedComponent).join(t('usageMonitor.text.label3')) }}{{ t('usageMonitor.text.label2') }}</template></p>
                 <div v-for="quote in weeklyForecast" :key="'forecast-' + quote.currency" class="forecast-evidence"><p>{{ forecastMethod(quote.method) }}{{ t('usageMonitor.text.recorded') }} {{ summaryMoney(quote.observedSubtotal, quote.currency) }} {{ t('usageMonitor.text.estimatedRemainingPeriod') }} {{ summaryMoney(quote.additionalSubtotal, quote.currency) }}{{ t('usageMonitor.text.predictsOnlyCollectedBillableRecordsGapsInLogsDo') }}<template v-if="quote.method === 'weekday_hour'">{{ t('usageMonitor.text.historicalWeekdaySlotsAlignedBy') }} {{ quote.timeBasis || 'UTC' }} {{ t('usageMonitor.text.label4') }}</template></p><p v-if="!quote.comparisons.length">{{ t('usageMonitor.text.insufficientHistoryUsingThisWeekSUsagePaceFor') }}</p><p v-for="comparison in quote.comparisons" :key="comparison.method">{{ forecastMethod(comparison.method) }} · {{ comparison.folds }} {{ t('usageMonitor.text.historicalBacktestsMeanAbsoluteError') }} {{ summaryMoney(comparison.mae, quote.currency) }}{{ t('usageMonitor.text.collectedRecordsOnlyNotActualBillingError') }}</p></div>
@@ -984,7 +1030,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
               <details v-for="group in quotaGroups" :key="group.id" class="quota-group" :class="{ 'current-quotas': group.id === 'current' }" :open="group.id === 'current'" @toggle="group.id === 'history' && (quotaHistoryOpen = ($event.currentTarget as HTMLDetailsElement).open)">
                 <summary>{{ group.label }} <span>{{ group.items.length }}</span></summary>
                 <div v-if="group.id === 'current' || quotaHistoryOpen" class="allowance-list" role="region" :aria-label="group.id === 'current' ? t('usageMonitor.text.remainingQuotaByAccount') : t('usageMonitor.text.historicalQuotasUnidentifiedAccounts')" tabindex="0">
-                <div v-for="item in group.items" :key="item.id" class="allowance-item" :class="{ 'is-stale': item.stale || item.expired || !!item.sourceError, 'has-account-amounts': accountUsageQuotaIds.has(item.id) && accountUsageByKey.has(item.accountKey), 'has-quota-dial': group.id === 'current' && item.remainingPercent != null }" :style="{ '--quota-color': quotaIsHistorical(item) || item.remainingPercent == null ? usageColors.unknown : item.remainingPercent === 0 ? usageColors.danger : item.remainingPercent <= 10 ? usageColors.warning : usageColors.success }">
+                <div v-for="item in group.items" :key="item.id" class="allowance-item" :class="{ 'is-stale': quotaIsHistorical(item), 'has-account-amounts': accountUsageQuotaIds.has(item.id) && accountUsageByKey.has(item.accountKey), 'has-quota-dial': group.id === 'current' && item.remainingPercent != null }" :style="{ '--quota-color': quotaIsHistorical(item) || item.remainingPercent == null ? usageColors.unknown : item.remainingPercent === 0 ? usageColors.danger : item.remainingPercent <= 10 ? usageColors.warning : usageColors.success }">
                   <div v-if="group.id === 'current' && item.remainingPercent != null" class="quota-dial" role="img" :aria-label="quotaAccountLabel(item) + (quotaIsHistorical(item) ? t('usageMonitor.text.lastUsed') : t('usageMonitor.text.used')) + usagePercentLabel(100 - item.remainingPercent) + (quotaIsHistorical(item) ? t('usageMonitor.text.lastRemaining') : t('usageMonitor.text.remaining')) + quotaValue(item)" :style="{ '--quota-fill': (100 - item.remainingPercent) * 3.6 + 'deg' }"><strong>{{ usagePercentLabel(100 - item.remainingPercent) }}<small>{{ quotaIsHistorical(item) ? t('usageMonitor.text.lastUsed') : t('usageMonitor.text.used') }}</small></strong></div>
                   <div class="quota-copy">
                   <div class="quota-account-header" :class="{ 'has-account-amounts': accountUsageQuotaIds.has(item.id) && accountUsageByKey.has(item.accountKey) }">
@@ -999,18 +1045,21 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
                   <small>{{ item.resetsAtMs ? t('usageMonitor.text.resets') + time(item.resetsAtMs) : t('usageMonitor.text.resetTimeNotReported') }} {{ t('usageMonitor.text.updated2') }} {{ time(item.observedAtMs) }}</small>
                   <small v-if="item.modelId">{{ item.modelId }}</small><small>{{ item.source === 'codex_local_log' ? t('usageMonitor.text.codexLocalLogs') : item.source === 'codex_official_usage' ? t('usageMonitor.text.codexOfficialQuota') : item.source === 'cockpit_snapshot' ? t('usageMonitor.text.cockpitAccountSnapshot') : item.source }}<template v-if="item.attribution !== 'account'"> {{ t('usageMonitor.text.noAccountInformationOnlyTheSourceSessionIsKnown') }}</template></small>
                   <p v-if="item.sourceError" class="unpriced">{{ item.sourceError }}</p>
+                  <p v-if="item.providerStatus" class="quota-provider-status" :class="{ unpriced: quotaProviderBlocked(item) }"><template v-if="quotaIsHistorical(item)">{{ t('usageMonitor.text.lastRecorded') }} · </template>{{ quotaProviderStatus(item) }}<template v-if="quotaProviderReason(item)"> · {{ quotaProviderReason(item) }}</template></p>
+                  <div v-if="item.providerStatus?.spendControl" class="provider-spend-control"><small>{{ t('usageMonitor.text.officialSpendControl') }} · {{ spendControlState(item.providerStatus.spendControl.reached) }}</small><template v-if="item.providerStatus.spendControl.individualLimit"><p>{{ t('usageMonitor.text.officialSpendAmounts', { limit: item.providerStatus.spendControl.individualLimit.limit ?? '—', used: item.providerStatus.spendControl.individualLimit.used ?? '—', remaining: item.providerStatus.spendControl.individualLimit.remaining ?? '—' }) }}</p><small v-if="item.providerStatus.spendControl.individualLimit.usedPercent != null || item.providerStatus.spendControl.individualLimit.remainingPercent != null">{{ t('usageMonitor.text.officialSpendPercentages', { used: item.providerStatus.spendControl.individualLimit.usedPercent?.toLocaleString(usageLocale()) ?? '—', remaining: item.providerStatus.spendControl.individualLimit.remainingPercent?.toLocaleString(usageLocale()) ?? '—' }) }}</small><small v-if="item.providerStatus.spendControl.individualLimit.source">{{ item.providerStatus.spendControl.individualLimit.source }}</small><small v-if="item.providerStatus.spendControl.individualLimit.resetsAtMs">{{ t('usageMonitor.text.resets') }} {{ time(item.providerStatus.spendControl.individualLimit.resetsAtMs) }}</small><small v-else-if="item.providerStatus.spendControl.individualLimit.resetAfterSeconds != null">{{ t('usageMonitor.text.officialResetCountdown', { seconds: item.providerStatus.spendControl.individualLimit.resetAfterSeconds }) }}</small></template></div>
+                  <small v-if="item.resetsAtMs == null && item.resetAfterSeconds != null">{{ t('usageMonitor.text.officialResetCountdown', { seconds: item.resetAfterSeconds }) }}</small>
                   <p v-if="group.id === 'current' && !quotaIsHistorical(item) && item.billingAccountVerified !== false" class="quota-estimate">{{ quotaForecast(item) }}<small v-if="item.depletion && item.remainingPercent !== 0">{{ item.depletion.sampleCount }} {{ t('usageMonitor.text.recordsDuration') }} {{ duration(item.depletion.spanMs) }}<template v-if="item.depletion.consumptionPercentPerHour != null"> {{ t('usageMonitor.text.consumptionAbout') }} {{ item.depletion.consumptionPercentPerHour.toFixed(2) }} {{ t('usageMonitor.text.percentagePointsHour') }}</template></small></p>
                   </div>
                 </div>
                 </div>
               </details>
-              <UsageAccountPeriods v-if="selectedAccountUsage && !displayAccountKeys.has(selectedQuotaAccountKey)" :account="selectedAccountUsage" />
+              <UsageAccountPeriods v-if="selectedAccountUsage && !selectedAccountHasUsageCard" :account="selectedAccountUsage" />
               <section v-if="creditGroups.length" class="credits-section" :aria-label="t('usageMonitor.text.extraCreditBalance')">
                 <div class="allowance-heading"><h3>{{ t('usageMonitor.text.extraCredits') }}</h3><span>{{ t('usageMonitor.text.countedOncePerAccount') }}</span></div>
                 <p v-if="!creditGroups.some(group => group.id === 'current')" class="page-note">{{ t('usageMonitor.text.currentCreditBalanceUnavailableExpandToViewHistoricalRecords') }}</p>
                 <details v-for="group in creditGroups" :key="group.id" class="credit-group" :class="{ 'current-credits': group.id === 'current' }" :open="group.id === 'current'">
                   <summary>{{ group.label }} <span>{{ group.items.length }}</span></summary>
-                  <div class="credit-accounts" role="region" :aria-label="group.label" tabindex="0"><div v-for="account in group.items" :key="account.accountKey" class="credit-account" :class="{ 'historical-credit': quotaIsHistorical(account) }"><div><span>{{ quotaAccountLabel(account) }}</span><small>{{ creditState(account) }}</small></div><strong :title="account.credits?.balance ?? undefined">{{ creditBalance(account) }}<small v-if="account.credits?.balance != null">{{ quotaIsHistorical(account) ? t('usageMonitor.text.lastCreditBalance') : t('usageMonitor.text.credits') }}</small></strong><p>{{ t('usageMonitor.text.updated3') }} {{ time(account.observedAtMs) }}<template v-if="quotaIsHistorical(account)"> {{ t('usageMonitor.text.lastRecorded') }}</template></p></div></div>
+                  <div class="credit-accounts" role="region" :aria-label="group.label" tabindex="0"><div v-for="account in group.items" :key="account.accountKey" class="credit-account" :class="{ 'historical-credit': creditIsHistorical(account) }"><div><span>{{ quotaAccountLabel(account) }}</span><small>{{ creditState(account) }}</small></div><strong :title="account.credits?.balance ?? undefined">{{ creditBalance(account) }}<small v-if="account.credits?.balance != null">{{ creditIsHistorical(account) ? t('usageMonitor.text.lastCreditBalance') : t('usageMonitor.text.credits') }}</small></strong><p>{{ t('usageMonitor.text.updated3') }} {{ time(account.observedAtMs) }}<template v-if="creditIsHistorical(account)"> {{ t('usageMonitor.text.lastRecorded') }}</template></p></div></div>
                 </details>
                 <p class="page-note">{{ t('usageMonitor.text.creditsAndPlanQuotaAreSeparateNotConvertedTo') }}</p>
               </section>

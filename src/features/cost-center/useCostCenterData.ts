@@ -369,6 +369,20 @@ export function useCostCenterData() {
     : costDataText('localCostProfilesReadFailed', { detail: localCostProfilesReadError.value }))
   let localCostProfilesLoading: Promise<void> | null = null
   const legacyLocalCostProfileCount = computed(() => Object.keys(localCostProfiles.value ?? {}).filter(key => /^-?\d+$/.test(key)).length)
+  /** A failed full-file read cannot prove that an absent entry means default/free.
+   * Only a previously validated exact source-qualified key may survive as stale.
+   */
+  function localCostProfileState(id: CostAccountId): 'available' | 'stale' | 'unavailable' {
+    if (localCostProfilesReadError.value == null) return 'available'
+    return typeof id === 'string' && Object.prototype.hasOwnProperty.call(localCostProfiles.value ?? {}, id) ? 'stale' : 'unavailable'
+  }
+
+  function applyLocalCostProfileReadState(): void {
+    if (localCostProfilesReadError.value == null || (activeSourceKey.value !== 'cliproxy' && activeSourceKey.value !== 'cockpit')) return
+    const unavailable = !accounts.value.length || accounts.value.some(account => localCostProfileState(account.id) === 'unavailable')
+    if (unavailable) accountEconomics.value = null
+    setSourceState('economics', unavailable || !accountEconomics.value ? 'unavailable' : 'stale', () => localCostProfilesError.value)
+  }
   /**
    * cockpit 账号分组映射(`accountId(原始或数字形式) → 分组名`)。
    * 由 `loadFromCockpit` 从 `account_groups.json` / `codex_account_groups.json` 注入,
@@ -1389,7 +1403,8 @@ export function useCostCenterData() {
       const derived = deriveLoadedEconomics(platform, range, accountIds)
       accountEconomics.value = derived
       setSourceState('economics', derived ? 'estimated' : 'unavailable', () => (costDataText('derivedFromTheLocalCpaPluginApiReferenceValue')))
-      return derived
+      applyLocalCostProfileReadState()
+      return accountEconomics.value
     }
     const sequence = ++economicsRequestSequence
     const remoteIds = accountIds.map(requireSub2apiAccountId)
@@ -1530,38 +1545,13 @@ export function useCostCenterData() {
     applySourceKey('cockpit')
     // 分组映射落到 store ref:独立窗口重算(loadCockpitModelWindow)也要用同一份。
     cockpitGroupNameMap.value = cockpitGroupNames ?? new Map()
-    // quota_history 最新点位 → accountId Map(maxUtil=100-最低 remaining;reset 已过视为已重置不限流)。
-    // 驱动状态派生:利用率≥95% 且重置时间在未来 → 账号标限流(真实重置倒计时)。
-    const emailToAccountId = new Map<string, string>()
-    for (const acc of cockpitStats.accounts) {
-      if (acc.email) emailToAccountId.set(acc.email, acc.accountId)
-    }
-    const quotaByAccount = new Map<string, { maxUtil: number; resetAtMs: number | null }>()
-    for (const file of quotaHistories) {
-      const accountId = emailToAccountId.get(file.email)
-      if (!accountId) continue
-      let maxUtil = 0
-      let resetAtMs: number | null = null
-      for (const history of Object.values(file.models)) {
-        const points = history.points
-        if (!points?.length) continue
-        const last = points[points.length - 1]
-        const util = 100 - last.remainingPercentage
-        if (util > maxUtil) {
-          maxUtil = util
-          resetAtMs = last.resetTime > 0 ? last.resetTime : null
-        }
-      }
-      if (maxUtil <= 0) continue
-      // 重置时间已过 → 窗口已刷新,当前不再限流,不标
-      if (maxUtil >= 95 && resetAtMs != null && resetAtMs <= Date.now()) continue
-      quotaByAccount.set(accountId, { maxUtil, resetAtMs })
-    }
+    // quota_history is a legacy Google/email compatibility source. It cannot
+    // establish a Codex gateway account's current rate-limit state, even when
+    // the two providers happen to use the same email address.
     // 账号清单 + 今日用量(口径:cockpit 无分钟桶,daily 是本机自然日累计,最贴近 todayStats 语义)
     // apikey 账号 name 用渠道名映射 + baseUrl 塞 credentials(归 relay 中转,不套"OpenAI 官方")
     // accountMeta 透传修 created_at（P0 主路径，删 epoch bug）+ extra 塞 plan_type
-    // quotaByAccount 驱动限流状态派生
-    accounts.value = cockpitStatsToAccounts(cockpitStats, apiKeyInfos, accountMeta, localAccess?.customRoutingRules, quotaByAccount, cockpitGroupNames, sourceInstanceId)
+    accounts.value = cockpitStatsToAccounts(cockpitStats, apiKeyInfos, accountMeta, localAccess?.customRoutingRules, undefined, cockpitGroupNames, sourceInstanceId)
     // 多平台账号合并(gemini/antigravity/claude/cursor/kiro:cockpit 上游只产 codex 用量,
     // 这些平台有账号无 stats——进清单供 tabs/采购配置,用量列诚实显示无数据;按 id 去重防撞)
     if (platformAccounts.length) {
@@ -1813,8 +1803,9 @@ export function useCostCenterData() {
       : (multiDayOps && multiDayOps.length ? multiDayOps : cockpitLogToOpsTrend(apiLog, range))
     opsTrendFromRequestLog.value = rlOps.length > 0
 
-    // accountUsage:cockpit quota_history 配额窗口(remainingPercentage→UsageProgress)
-    accountUsage.value = cockpitQuotaToAccountUsage(quotaHistories, cockpitStats.accounts, sourceInstanceId)
+    // Historical compatibility observations bind only to unique explicit Google
+    // pool metadata. Native snapshots attach independently with their raw IDs.
+    accountUsage.value = cockpitQuotaToAccountUsage(quotaHistories, platformAccounts, sourceInstanceId)
 
     // modelRoutes:优先使用覆盖完整所选窗口的 request_logs;文本日志聚合只在库不可用/无分组时回退。
     // 两条聚合路径最终都复用 cockpitOpsRoutesToModelRoutes,当天日志仅作最后兜底。
@@ -1959,7 +1950,7 @@ export function useCostCenterData() {
     // 造幽灵 key),故这里的条目数 == **命中账号数**。命中 0 个必须是 empty ——
     // 陈旧配额文件不得因为"文件数非 0"就把状态抬成 measured(陈旧数据冒充实时)。
     const quotaAccountCount = Object.keys(accountUsage.value).length
-    setSourceState('accountUsage', quotaAccountCount ? 'measured' : 'empty', () => (quotaAccountCount ? costDataText('cockpitQuotaHistoryLoadedQuotaHistoryMatchedAccounts', { p0: quotaAccountCount }) : costDataText('noCockpitQuotaHistoryQuotaHistoryMatchedNoAccounts')))
+    setSourceState('accountUsage', quotaAccountCount ? 'partial' : 'empty', () => (quotaAccountCount ? costDataText('cockpitQuotaHistoryLoadedQuotaHistoryMatchedAccounts', { p0: quotaAccountCount }) : costDataText('noCockpitQuotaHistoryQuotaHistoryMatchedNoAccounts')))
     // modelRoutes 的数值分支与标签共用 routesBasis,确保来源说明永远跟随实际选中的数据。
     setSourceState(
       'modelRoutes',
@@ -1991,6 +1982,7 @@ export function useCostCenterData() {
       ? costDataText('cockpitUsageCostsCalculatedFromRecordedDataProcurementPrices', { p0: unknown > 0 ? costDataText('includesAccountsWithUnknownPlansEstimatedAs0', { p0: unknown }) : '' })
       : costDataText('noCockpitEconomicData')))
     setSourceState('exchangeRate', 'estimated', () => (costDataText('cockpitUsesTheOfflineFallbackExchangeRate')))
+    applyLocalCostProfileReadState()
 
     // Publish the independent window only when its own loader has fresh data.
     if (retainedModelWindow) {
@@ -2366,6 +2358,8 @@ export function useCostCenterData() {
       }
     }
 
+    applyLocalCostProfileReadState()
+
     lastUpdated.value = new Date()
     loading.value = false
     error.value = ''
@@ -2405,6 +2399,7 @@ export function useCostCenterData() {
         localCostProfilesReadError.value = null
       } catch (readError) {
         localCostProfilesReadError.value = readError instanceof Error ? readError.message : String(readError)
+        applyLocalCostProfileReadState()
       }
     })()
     try { await localCostProfilesLoading } finally { localCostProfilesLoading = null }
@@ -2472,6 +2467,7 @@ export function useCostCenterData() {
         costMultiplier: cockpitCostMultiplier.value,
       })
     }
+    applyLocalCostProfileReadState()
   }
 
   /** 保存 cockpit 全局倍率（写入 cockpit_cost_profiles.json 的特殊 key）。 */
@@ -2650,6 +2646,7 @@ export function useCostCenterData() {
     preloadLocalCostProfiles,
     legacyLocalCostProfileCount,
     localCostProfilesError,
+    localCostProfileState,
     cockpitCostMultiplier,
     saveCockpitCostMultiplier,
   }

@@ -138,7 +138,7 @@ describe('标签映射', () => {
   })
 })
 
-describe('命令封装 · 失败不抛错，返回空', () => {
+describe('命令封装 · 区分读取失败与成功的空结果', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset()
   })
@@ -150,9 +150,9 @@ describe('命令封装 · 失败不抛错，返回空', () => {
     expect(invoke).toHaveBeenCalledWith('quota_list_channels')
   })
 
-  it('quota_snapshots 失败 → 空数组（单渠道失败不影响其它渠道）', async () => {
+  it('quota_snapshots 失败 → 由视图报告错误并保留同源旧观测', async () => {
     vi.mocked(invoke).mockRejectedValueOnce(new Error('boom'))
-    await expect(getQuotaSnapshots('kiro')).resolves.toEqual([])
+    await expect(getQuotaSnapshots('kiro')).rejects.toThrow('boom')
   })
 
   it('quota_snapshots 传 channel 参数', async () => {

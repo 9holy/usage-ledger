@@ -20,9 +20,9 @@ import './costDataI18n'
  *   同函数对缺 accountId 的处理是如实写「未记录（日志无 accountId）」——同一个缺口两套待遇。
  */
 import { describe, expect, it } from 'vitest'
-import { cockpitLogToModelRoutes, cockpitQuotaToAccountUsage } from '../cockpitAdapter'
+import { cockpitLogToModelRoutes, cockpitQuotaToAccountUsage, type CockpitPlatformAccountInput } from '../cockpitAdapter'
 import { useCostCenterData } from '../useCostCenterData'
-import type { CockpitQuotaHistoryFile, CockpitStatsAccount } from '@/api/cockpit'
+import type { CockpitQuotaHistoryFile } from '@/api/cockpit'
 
 function makeFile(email: string, modelId = 'claude-4-5'): CockpitQuotaHistoryFile {
   return {
@@ -40,15 +40,15 @@ function makeFile(email: string, modelId = 'claude-4-5'): CockpitQuotaHistoryFil
   }
 }
 
-function makeStatsAccount(accountId: string, email: string): CockpitStatsAccount {
-  return { accountId, email, usage: {} as CockpitStatsAccount['usage'] }
+function makeGoogleAccount(id: string, email: string): CockpitPlatformAccountInput {
+  return { id, email, platform: 'antigravity' }
 }
 
 describe('D7 · cockpitQuotaToAccountUsage 不得用 file.email 冒充 accountId', () => {
   it('email 未命中真实账号 → 跳过该文件,不产生幽灵 key', () => {
     const files = [makeFile('ghost-1@example.com'), makeFile('ghost-2@example.com')]
-    // stats.accounts 里只有别的邮箱 → 两个文件都不该命中
-    const stats = [makeStatsAccount('acct-live', 'live@example.com')]
+    // 明确 Google 账号清单里只有别的邮箱 → 两个文件都不该命中
+    const stats = [makeGoogleAccount('acct-live', 'live@example.com')]
 
     const result = cockpitQuotaToAccountUsage(files, stats)
 
@@ -67,7 +67,7 @@ describe('D7 · cockpitQuotaToAccountUsage 不得用 file.email 冒充 accountId
 
   it('email 命中真实账号 → 按 accountId 派生 key,配额负载完整', () => {
     const files = [makeFile('live@example.com', 'gpt-6-astra')]
-    const stats = [makeStatsAccount('acct-live', 'live@example.com')]
+    const stats = [makeGoogleAccount('acct-live', 'live@example.com')]
 
     const result = cockpitQuotaToAccountUsage(files, stats)
     const keys = Object.keys(result)
@@ -81,7 +81,7 @@ describe('D7 · cockpitQuotaToAccountUsage 不得用 file.email 冒充 accountId
 
   it('命中与未命中混合 → 只保留命中账号,命中数 == 条目数', () => {
     const files = [makeFile('live@example.com'), makeFile('ghost@example.com')]
-    const stats = [makeStatsAccount('acct-live', 'live@example.com')]
+    const stats = [makeGoogleAccount('acct-live', 'live@example.com')]
 
     expect(Object.keys(cockpitQuotaToAccountUsage(files, stats))).toHaveLength(1)
   })

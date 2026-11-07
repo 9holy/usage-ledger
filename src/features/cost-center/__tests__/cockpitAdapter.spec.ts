@@ -798,6 +798,17 @@ describe('cockpit usage ledger', () => {
     return { email, updatedAt, usage }
   }
 
+  it('rejects ambiguous same-email current accounts before applying or replacing retained history', () => {
+    const stats = makeStats()
+    const first = stats.accounts[0]!
+    stats.accounts.push({ ...first, accountId: 'distinct-source-account', usage: usage({ requestCount: 3 }) })
+    const ledger = [ledgerEntry(first.email!, usage({ requestCount: 150 }))]
+    const original = JSON.stringify({ stats, ledger })
+    expect(() => applyCockpitUsageLedger(stats, ledger)).toThrow(/ambiguous/i)
+    expect(JSON.stringify({ stats, ledger })).toBe(original)
+    expect(() => snapshotCockpitLedger(stats)).toThrow(/ambiguous/i)
+  })
+
   it('restores a regressed account: re-added account reset to 0 gets ledger values back (per-field max)', () => {
     const stats = makeStats()
     // 重加后 cockpit 从 0 计数:当前只剩 2 次请求,台账里是历史全量 150 次

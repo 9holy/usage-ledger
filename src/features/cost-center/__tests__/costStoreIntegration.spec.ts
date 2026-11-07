@@ -69,6 +69,8 @@ describe('cost store source integration', () => {
     expect(mocks.read).toHaveBeenCalledTimes(2)
     expect(data.cockpitCostMultiplier.value).toBe(0.6)
     expect(data.accounts.value[0].extra?.cost_profile).toMatchObject({ amount: profile.amount })
+    expect(data.sourceStates.value.economics.status).toBe('stale')
+    expect(data.accountEconomics.value).not.toBeNull()
     expect(data.legacyLocalCostProfileCount.value).toBe(1)
     expect(data.localCostProfilesError.value).toContain('本次无法读取成本设置')
     i18n.global.locale.value = 'en'
@@ -90,7 +92,26 @@ describe('cost store source integration', () => {
     expect(data.rangeAccountStats.value['cliproxy:raw-index'].cost).toBeCloseTo(0.4)
     expect(data.cockpitCostMultiplier.value).toBe(0.2)
     expect(data.localCostProfilesError.value).toContain('本次无法读取成本设置')
+    expect(data.accountEconomics.value).toBeNull()
+    expect(data.sourceStates.value.economics.status).toBe('unavailable')
     await expect(data.bulkSaveCockpitCostProfile(['cliproxy:raw-index'], profile)).rejects.toThrow('initial fixture read denied')
+    expect(mocks.write).not.toHaveBeenCalled()
+  })
+
+  it('cannot borrow a validated profile from a different CPA source after the file becomes unreadable', async () => {
+    stored['cliproxy:raw-index'] = profile
+    const data = useCostCenterData()
+    await data.preloadLocalCostProfiles()
+    mocks.read.mockRejectedValue(new Error('fixture read denied'))
+    await data.preloadLocalCostProfiles()
+    data.loadFromCliproxy([], null, null, [event()], prices, {}, '1h', '1h', 7, now, true, null,
+      { sourceInstanceId: 'cpa:other-root', managementLinkAllowed: false })
+    await data.mergeLocalCostProfiles()
+    expect(data.accounts.value[0].id).not.toBe('cliproxy:raw-index')
+    expect(data.accounts.value[0].extra?.cost_profile).toBeUndefined()
+    expect(data.rangeAccountStats.value[String(data.accounts.value[0].id)].requests).toBe(1)
+    expect(data.accountEconomics.value).toBeNull()
+    expect(data.sourceStates.value.economics.status).toBe('unavailable')
     expect(mocks.write).not.toHaveBeenCalled()
   })
 

@@ -142,6 +142,9 @@ function resolveTime(field: keyof typeof epochKeys): number | null {
 
 async function reload() {
   const sequence = ++readSequence
+  // The displayed scope/window updates before the asynchronous read completes.
+  // Never keep an old snapshot under those new labels, including after errors.
+  snapshot.value = null
   loading.value = true
   error.value = ''
   try {

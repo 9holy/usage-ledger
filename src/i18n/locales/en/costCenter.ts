@@ -615,6 +615,7 @@ export default {
     "authentication": "Authentication",
     "apiKeyForV1Authentication": "API key (for /v1/* authentication)",
     "version": "Version",
+    "cpaManagementReportedVersion": "Running version reported by this management response’s X-CPA-VERSION header; unknown when omitted",
     "cpaDoesNotExposeAVersionInterface": "CPA does not expose a version interface",
     "authFiles": "Auth files",
     "routingStrategy": "Routing strategy",

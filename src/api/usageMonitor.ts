@@ -393,6 +393,25 @@ export interface MonitorForecastSummary {
   comparisons: Array<{ method: string; folds: number; mae: number | null; reason?: string }>
 }
 
+export interface MonitorQuotaProviderStatus {
+  allowed: boolean | null
+  limitReached: boolean | null
+  rateLimitReachedType: string | null
+  spendControl: {
+    reached: boolean | null
+    individualLimit: {
+      source: string | null
+      limit: string | null
+      used: string | null
+      remaining: string | null
+      usedPercent: number | null
+      remainingPercent: number | null
+      resetAfterSeconds: number | null
+      resetsAtMs: number | null
+    } | null
+  } | null
+}
+
 export interface MonitorQuota {
   id: number
   tool: string
@@ -403,6 +422,8 @@ export interface MonitorQuota {
   limitId: string
   slot: string
   windowMinutes: number | null
+  windowSeconds?: number | null
+  resetAfterSeconds?: number | null
   plan: string | null
   modelId: string | null
   poolLabel: string | null
@@ -416,6 +437,7 @@ export interface MonitorQuota {
   sourceError: string | null
   depletion?: DepletionEstimate
   credits?: { hasCredits: boolean | null; unlimited: boolean | null; balance: string | null } | null
+  providerStatus?: MonitorQuotaProviderStatus | null
 }
 
 export interface DepletionEstimate {

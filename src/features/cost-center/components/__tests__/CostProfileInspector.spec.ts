@@ -51,6 +51,18 @@ function mountInspector(account: Account, sourceKind: SourceKind = 'sub2api') {
 }
 
 describe('CostProfileInspector billing modes', () => {
+  it('does not convert a cleared procurement amount to an explicitly free contract', async () => {
+    const wrapper = mountInspector(makeAccount({ type: 'oauth', extra: { plan_type: 'plus' } }), 'cliproxy')
+    await wrapper.get('#cost-amount').setValue('')
+    expect((wrapper.vm as any).isValid).toBe(false)
+    ;(wrapper.vm as any).submit()
+    expect(wrapper.emitted('save')).toBeUndefined()
+    await wrapper.get('#cost-amount').setValue('0')
+    expect((wrapper.vm as any).isValid).toBe(true)
+    ;(wrapper.vm as any).submit()
+    expect(wrapper.emitted('save')?.[0]?.[0]).toMatchObject({ amount: 0, source: 'custom' })
+    wrapper.unmount()
+  })
   it('focuses the close control on open and restores the trigger on close', async () => {
     const trigger = document.createElement('button')
     document.body.append(trigger)

@@ -88,6 +88,173 @@ describe('UsageMonitorView', () => {
   })
   afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.restoreAllMocks(); vi.useRealTimers() })
 
+  it('contract followup: shows current zero credits even without numeric quota windows', async () => {
+    const quota = forecastQuota('codex:1', { slot: 'summary', windowMinutes: null, usedPercent: null, remainingPercent: null, resetsAtMs: null,
+      source: 'codex_official_usage', credits: { hasCredits: false, unlimited: false, balance: '0' } })
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [quota] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.find('.current-credits').exists()).toBe(true)
+    expect(wrapper.get('.current-credits').text()).toContain('暂无可用积分')
+    expect(wrapper.get('.current-credits .credit-account strong').text()).toContain('0')
+    expect(wrapper.find('.quota-dial').exists()).toBe(false)
+  })
+
+  it('contract followup: a rounded near-week pool cannot supply a monetary week projection', async () => {
+    const nearWeek = { ...forecastQuota(), source: 'codex_official_usage', windowSeconds: 604799 }
+    mockAccountForecast(forecastAccount(), nearWeek)
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈')
+    wrapper.unmount()
+    mockAccountForecast(forecastAccount(), { ...nearWeek, windowSeconds: 604800 })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('≈')
+  })
+
+  it('contract followup: renders provider restrictions and spend controls without replacing quota facts', async () => {
+    const quota = { ...forecastQuota('codex:1', { source: 'codex_official_usage', windowMinutes: 300, usedPercent: 25, remainingPercent: 75 }),
+      providerStatus: { allowed: false, limitReached: true, rateLimitReachedType: 'workspace_member_usage_limit_reached',
+        spendControl: { reached: true, individualLimit: { source: 'workspace', limit: '100.00', used: '99.00', remaining: '1.00',
+          usedPercent: 99, remainingPercent: 1, resetAfterSeconds: 3600, resetsAtMs: NOW + 3600000 } } } }
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [quota] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.get('.quota-provider-status').text()).toContain('源端已限制使用')
+    expect(wrapper.get('.provider-spend-control').text()).toContain('99.00')
+    expect(wrapper.get('.provider-spend-control').text()).not.toContain('$')
+    expect(wrapper.get('.quota-dial').text()).toContain('25')
+    expect(wrapper.get('.remaining-label').text()).toContain('75')
+    expect(wrapper.find('.allowance-item.is-stale').exists()).toBe(false)
+    expect(wrapper.findComponent(UsageAccountPeriods).exists()).toBe(false)
+  })
+
+  it('contract followup: extra pool labels keep exact seconds while credits remain account scoped', async () => {
+    const main = forecastQuota('codex:1', { source: 'codex_official_usage', windowMinutes: 300, credits: { hasCredits: true, unlimited: false, balance: '2' } })
+    const extra = { ...main, id: 2, limitId: 'codex_spark', poolLabel: 'Spark', windowMinutes: 2, windowSeconds: 61, credits: null }
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [extra, main] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const items = wrapper.findAll('.current-quotas .allowance-item')
+    expect(items).toHaveLength(2)
+    const spark = items.find(item => item.text().includes('Spark'))!
+    expect(spark.text()).toContain('61 秒')
+    expect(wrapper.findAll('.current-credits .credit-account')).toHaveLength(1)
+    expect(wrapper.get('.current-credits .credit-account strong').text()).toContain('2')
+  })
+
+  it('contract followup: an exhausted optional pool does not stop the main weekly forecast', async () => {
+    const main = forecastQuota('codex:1', { source: 'codex_official_usage', windowMinutes: 300 })
+    const extra = { ...main, id: 2, limitId: 'code_review', poolLabel: 'Code review', windowMinutes: 10080, usedPercent: 100, remainingPercent: 0 }
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [main, extra] })
+    vi.mocked(getUsageMonitorWeekly).mockResolvedValue({ startMs: monitorWeekBounds(NOW).startMs, endMs: NOW,
+      firstRecordAtMs: NOW - 1000, lastRecordAtMs: NOW, totals: snapshot().totals, byTool: [],
+      forecast: [{ currency: 'USD', method: 'week_average', projectedAmount: 70, projectedSubtotal: 70,
+        observedSubtotal: 50, additionalSubtotal: 20, pricedRequests: 1, unpricedRequests: 0,
+        coverage: 'observed_records_only', reason: 'fixture', comparisons: [] }] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.find('.forecast-evidence').exists()).toBe(true)
+    expect(wrapper.findAll('.current-quotas .allowance-item')).toHaveLength(2)
+    expect(wrapper.find('.forecast-paused').exists()).toBe(false)
+  })
+
+  it('contract followup: reported credits do not override an explicit provider spend restriction', async () => {
+    const quota = { ...forecastQuota('codex:1', { source: 'codex_official_usage', usedPercent: 100, remainingPercent: 0,
+      credits: { hasCredits: true, unlimited: false, balance: '12.50' } }),
+      providerStatus: { allowed: false, limitReached: true, rateLimitReachedType: null,
+        spendControl: { reached: true, individualLimit: null } } }
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [quota] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.get('.forecast-paused').text()).not.toContain('当前有额外积分')
+    expect(wrapper.get('.current-credits').text()).toContain('12.5')
+    expect(wrapper.get('.quota-provider-status').text()).toContain('源端已限制使用')
+  })
+
+  it('contract followup: a standalone extra pool cannot own the account monetary panel', async () => {
+    const extra = forecastQuota('codex:1', { source: 'codex_official_usage', limitId: 'code_review', poolLabel: 'Code review' })
+    mockAccountForecast(forecastAccount(), extra)
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const panels = wrapper.findAllComponents(UsageAccountPeriods)
+    expect(panels).toHaveLength(1)
+    expect(panels[0].element.closest('.allowance-item')).toBeNull()
+    expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈')
+  })
+
+  it('contract followup: retained quota cards become historical on query failure and recover on success', async () => {
+    const quota = forecastQuota('codex:1', { source: 'codex_official_usage', credits: { hasCredits: true, unlimited: false, balance: '9' } })
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [quota] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.find('.allowance-item.is-stale').exists()).toBe(false)
+    vi.mocked(getUsageMonitorQuotas).mockRejectedValueOnce(new Error('fixture read failure'))
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.find('.allowance-item.is-stale').exists()).toBe(true)
+    expect(wrapper.find('.credit-account.historical-credit').exists()).toBe(true)
+    expect(wrapper.get('.remaining-label').text()).toContain('80')
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.find('.allowance-item.is-stale').exists()).toBe(false)
+    expect(wrapper.find('.credit-account.historical-credit').exists()).toBe(false)
+  })
+
+  it('contract followup: credits age is independent from the quota reset time', async () => {
+    const quota = forecastQuota('codex:1', { source: 'codex_official_usage', expired: true, stale: true,
+      resetsAtMs: NOW - 1000, credits: { hasCredits: true, unlimited: false, balance: '9.00' } })
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [quota] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.find('.allowance-item.is-stale').exists()).toBe(true)
+    expect(wrapper.find('.credit-account.historical-credit').exists()).toBe(false)
+    expect(wrapper.get('.current-credits').text()).toContain('9')
+    wrapper.unmount()
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW + 300001, sources: [], quotas: [quota] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.find('.credit-account.historical-credit').exists()).toBe(true)
+  })
+
+  it.each(['allowed', 'spend'])('contract followup: provider gate stops nonexhausted main projections and snapshot capture: %s', async reason => {
+    const providerStatus = { allowed: reason === 'allowed' ? false : null, limitReached: false, rateLimitReachedType: null,
+      spendControl: reason === 'spend' ? { reached: true, individualLimit: null } : null }
+    const quota = forecastQuota('codex:1', { source: 'codex_official_usage', windowSeconds: 604800, providerStatus,
+      credits: { hasCredits: true, unlimited: false, balance: '12.50' } })
+    mockAccountForecast(forecastAccount(), quota)
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈')
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('源端已限制使用')
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).exists()).toBe(false)
+    expect(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)).toBeNull()
+    expect(wrapper.get('.quota-dial').text()).toContain('20')
+    expect(wrapper.get('.remaining-label').text()).toContain('80')
+    mockAccountForecast(forecastAccount(), { ...quota, providerStatus: { ...providerStatus, allowed: true, spendControl: null } })
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('≈')
+    const saved = localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)
+    expect(saved).not.toBeNull()
+    mockAccountForecast(forecastAccount(), quota)
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈')
+    expect(wrapper.find('.quota-prediction-updated').exists()).toBe(false)
+    expect(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)).toBe(saved)
+  })
+
+  it.each(['codex', 'code_review'])('contract followup: provider gate keeps summary restriction in its own pool: %s', async limitId => {
+    const main = forecastQuota('codex:1', { source: 'codex_official_usage', windowSeconds: 604800 })
+    const status = forecastQuota('codex:1', { id: 2, source: 'codex_official_usage', limitId, slot: 'summary',
+      windowMinutes: null, usedPercent: null, remainingPercent: null, resetsAtMs: null,
+      providerStatus: { allowed: false, limitReached: true, rateLimitReachedType: null, spendControl: null } })
+    mockAccountForecast(forecastAccount(), main)
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: limitId === 'codex' ? [status] : [main, status] })
+    vi.mocked(getUsageMonitorWeekly).mockResolvedValue({ startMs: monitorWeekBounds(NOW).startMs, endMs: NOW,
+      firstRecordAtMs: NOW - 1000, lastRecordAtMs: NOW, totals: snapshot().totals, byTool: [],
+      forecast: [{ currency: 'USD', method: 'week_average', projectedAmount: 70, projectedSubtotal: 70,
+        observedSubtotal: 50, additionalSubtotal: 20, pricedRequests: 1, unpricedRequests: 0,
+        coverage: 'observed_records_only', reason: 'fixture', comparisons: [] }] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.find('.forecast-evidence').exists()).toBe(limitId !== 'codex')
+    expect(wrapper.get('.account-quota-forecast').text().includes('≈')).toBe(limitId !== 'codex')
+    expect(wrapper.find('.forecast-paused').exists()).toBe(limitId === 'codex')
+    if (limitId === 'codex') {
+      expect(wrapper.get('.forecast-paused').text()).toContain('源端已限制使用')
+      expect(wrapper.get('.forecast-paused').text()).not.toContain('已耗尽')
+      expect(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)).toBeNull()
+    }
+    if (limitId === 'codex') expect(wrapper.find('.quota-dial').exists()).toBe(false)
+    else expect(wrapper.get('.quota-dial').text()).toContain('20')
+  })
+
   it.each(['creator', 'quota', 'cached'])('strict account evidence blocks unsafe quota projection: %s', async (missing) => {
     const account = forecastAccount('codex:1', 100, 20)
     account.billingAccountVerified = missing === 'quota'
@@ -1053,11 +1220,17 @@ describe('UsageMonitorView', () => {
     { hasCredits: true, unlimited: false, balance: '0' },
     { hasCredits: false, unlimited: false, balance: '10' },
     { hasCredits: null, unlimited: null, balance: null },
-    { hasCredits: true, unlimited: false, balance: 'not-a-number' }])('hides the credits section when no usable credits are reported: %j', async credits => {
-    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [{ ...forecastQuota(), credits }] });
+    { hasCredits: true, unlimited: false, balance: 'not-a-number' }])('keeps reported credit facts distinct from spendable credits: %j', async credits => {
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [{ ...forecastQuota(), usedPercent: 100, remainingPercent: 0, credits }] });
     wrapper = mount(UsageMonitorView, options); await flushPromises();
-    expect(wrapper.find('.credits-section').exists()).toBe(false);
-    expect(wrapper.find('.credit-account').exists()).toBe(false);
+    const reported = credits != null && (credits.hasCredits != null || credits.unlimited != null || credits.balance != null)
+    expect(wrapper.find('.credits-section').exists()).toBe(reported);
+    expect(wrapper.find('.credit-account').exists()).toBe(reported);
+    if (reported) {
+      expect(wrapper.get('.credit-account strong').attributes('title')).toBe(credits!.balance);
+      expect(wrapper.get('.credit-account strong').text()).toContain(credits!.balance!);
+    }
+    expect(wrapper.get('.forecast-paused').text()).not.toContain('当前有额外积分');
   })
 
   it.each([{ hasCredits: true, unlimited: false, balance: '0.004' },
@@ -1069,7 +1242,7 @@ describe('UsageMonitorView', () => {
 
   it('keeps fresh and last-known account credits visible while source notes remain expandable', async () => {
     const base = { id: 1, accountKey: 'codex:1', tool: 'codex', accountLabel: 'Account 1', attribution: 'account', billingAccountVerified: true, limitId: 'codex', slot: 'primary', windowMinutes: 10080, plan: 'pro', modelId: null, poolLabel: null, observedAtMs: NOW, resetsAtMs: NOW + 86400000, usedPercent: 100, remainingPercent: 0, source: 'codex_local_log', stale: false, expired: false, sourceError: null, credits: { hasCredits: true, unlimited: false, balance: '47023.68' } }
-    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, quotas: [base, { ...base, id: 2, accountKey: 'codex:old', accountLabel: 'Account old', stale: true, expired: true, resetsAtMs: NOW - 1000, credits: { ...base.credits, balance: '62500' } }], sources: [{ tool: 'claude', source: 'fixture', status: 'not_reported', error: null }] })
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, quotas: [base, { ...base, id: 2, accountKey: 'codex:old', accountLabel: 'Account old', observedAtMs: NOW - 301000, stale: true, expired: true, resetsAtMs: NOW - 1000, credits: { ...base.credits, balance: '62500' } }], sources: [{ tool: 'claude', source: 'fixture', status: 'not_reported', error: null }] })
     wrapper = mount(UsageMonitorView, options); await flushPromises()
     const current = wrapper.get('.current-credits')
     expect(current.attributes('open')).toBeDefined()
@@ -1089,16 +1262,18 @@ describe('UsageMonitorView', () => {
     expect(sources.text()).toContain('Claude Code · 尚未报告额度')
   })
 
-  it('does not describe credits from an expired recent quota as currently available', async () => {
+  it('keeps an expired quota historical without expiring independently recent credits', async () => {
     vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [forecastQuota('codex:1', {
-      observedAtMs: NOW - 2000, resetsAtMs: NOW - 1000, usedPercent: 100, remainingPercent: 0,
-      stale: false, expired: true, credits: { hasCredits: true, unlimited: false, balance: '47.5' },
+      source: 'codex_official_usage', observedAtMs: NOW - 2000, resetsAtMs: NOW - 1000, usedPercent: 100, remainingPercent: 0,
+      stale: true, expired: true, credits: { hasCredits: true, unlimited: false, balance: '47.5' },
     })] })
     wrapper = mount(UsageMonitorView, options); await flushPromises()
-    expect(wrapper.get('.current-credits .historical-credit').text()).toContain('47.5')
-    expect(wrapper.get('.current-credits .historical-credit').text()).toContain('状态待更新')
-    expect(wrapper.get('.forecast-paused').text()).toContain('尚未确认有可用积分')
-    expect(wrapper.get('.forecast-paused').text()).not.toContain('当前有额外积分')
+    expect(wrapper.get('.current-credits .credit-account').text()).toContain('47.5')
+    expect(wrapper.find('.current-credits .historical-credit').exists()).toBe(false)
+    expect(wrapper.get('.current-credits .credit-account').text()).toContain('积分可用')
+    expect(wrapper.find('.allowance-item.is-stale').exists()).toBe(true)
+    expect(wrapper.get('.forecast-paused').text()).toContain('当前有额外积分')
+    expect(wrapper.find('.forecast-evidence').exists()).toBe(false)
   })
 
   it('keeps an account and its amounts visible after five minutes without presenting cached quotas or credits as current', async () => {
@@ -1538,7 +1713,17 @@ describe('UsageMonitorView', () => {
     wrapper = mount(UsageMonitorView, options); await flushPromises();
     expect(wrapper.find('.forecast-paused').exists()).toBe(false);
     vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [],
-      quotas: [{ ...old, limitId: 'independent-pool' }, current] });
+      quotas: [{ ...old, limitId: 'independent-pool', poolLabel: 'Independent pool' }, current] });
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises();
+    expect(wrapper.find('.forecast-paused').exists()).toBe(false);
+    const historical = wrapper.get<HTMLDetailsElement>('.quota-group:not(.current-quotas)')
+    historical.element.open = true
+    await historical.trigger('toggle'); await flushPromises()
+    expect(wrapper.findAll('.allowance-item').some(item => item.text().includes('Independent pool'))).toBe(true);
+    // A different exhausted main window remains a blocker; a renewed seven-day
+    // window cannot establish that the main five-hour allowance was replenished.
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [],
+      quotas: [{ ...old, windowMinutes: 300 }, current] });
     await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises();
     expect(wrapper.find('.forecast-paused').exists()).toBe(true);
   })
