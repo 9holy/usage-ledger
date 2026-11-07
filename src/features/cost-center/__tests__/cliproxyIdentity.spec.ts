@@ -151,12 +151,15 @@ describe('CPA source identity and usage evidence', () => {
     expect(Object.values(data.rangeAccountStats.value).reduce((n, row) => n + row.requests, 0)).toBe(1)
   })
 
-  it('joins only the exact nonempty local auth_index and keeps current management status', () => {
+  it('matches the exact local slot without reassigning its historical state to the current owner', () => {
     const data = useCostCenterData()
     data.loadFromCliproxy([file()], null, null, [event({ failed: true, status_code: 429 })], prices, {}, '1h', '1h', 7, new Date(), true)
     expect(data.accounts.value).toHaveLength(1)
-    expect(data.accounts.value[0]!.status).toBe('active')
-    expect(data.accounts.value[0]!.extra).toMatchObject({ cliproxy_identity_source: 'management', cliproxy_status_basis: 'management_current', cliproxy_usage_linked: true })
+    // Upstream auth_index is derived from the file path; current status cannot rewrite history.
+    expect(data.accounts.value[0]!.status).toBe('error')
+    expect(data.accounts.value[0]!.extra).toMatchObject({ cliproxy_identity_source: 'usage_only', cliproxy_status_basis: 'historical_requests', cliproxy_owner_verified: false, cliproxy_management_slot_observed: true })
+    expect(cliproxyAuthFilesToAccounts(data.cliproxyAuthFiles.value, [])[0]!.status).toBe('active')
+    expect(Object.values(data.rangeAccountStats.value).reduce((total, row) => total + row.requests, 0)).toBe(1)
   })
 
   it('preserves failed zero-usage counts and separates route reference/account amounts', () => {

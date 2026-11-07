@@ -74,8 +74,14 @@ import { COCKPIT_PRICE_BOOK, cockpitPriceSetFor, cockpitServiceTierLabel, cockpi
 import type { CockpitModelPriceSet } from './cockpitPriceBook'
 
 /** Keep the source and complete raw ID; no lossy hash or implicit legacy ownership. */
-export function accountIdToCostId(accountId: string): string {
-  return localCostAccountId('cockpit', accountId)
+function cockpitIdentityPrefix(sourceInstanceId = 'local'): string {
+  if (!sourceInstanceId.trim()) throw new Error('Cockpit source identity is required')
+  return sourceInstanceId === 'local' ? 'cockpit' : `cockpit:instance:${encodeURIComponent(sourceInstanceId)}`
+}
+
+export function accountIdToCostId(accountId: string, sourceInstanceId = 'local'): string {
+  const localId = localCostAccountId('cockpit', accountId)
+  return sourceInstanceId === 'local' ? localId : `${cockpitIdentityPrefix(sourceInstanceId)}:${encodeURIComponent(accountId)}`
 }
 
 type LedgerStatsAccount = CockpitStatsAccount & { costIdentityKind: 'ledger-email' }
@@ -84,10 +90,10 @@ function isLedgerStatsAccount(account: CockpitStatsAccount): account is LedgerSt
   return (account as Partial<LedgerStatsAccount>).costIdentityKind === 'ledger-email'
 }
 
-export function statsAccountCostId(account: CockpitStatsAccount): string {
+export function statsAccountCostId(account: CockpitStatsAccount, sourceInstanceId = 'local'): string {
   return isLedgerStatsAccount(account) && account.email
-    ? `cockpit:ledger-email:${encodeURIComponent(account.email)}`
-    : accountIdToCostId(account.accountId)
+    ? `${cockpitIdentityPrefix(sourceInstanceId)}:ledger-email:${encodeURIComponent(account.email)}`
+    : accountIdToCostId(account.accountId, sourceInstanceId)
 }
 
 /** 从 accountId 前缀派生 sub2api AccountPlatform(cockpit 渠道 → sub2api 平台枚举)。 */
@@ -248,9 +254,10 @@ function cockpitAccountToAccount(
   statsSinceMs?: number,
   routingRules?: Array<{ accountId: string; priority: number; weight: number; isBackup?: boolean; isPreferred?: boolean }>,
   quotaWindow?: { maxUtil: number; resetAtMs: number | null },
+  sourceInstanceId = 'local',
 ): Account {
   void index
-  const id = statsAccountCostId(acc)
+  const id = statsAccountCostId(acc, sourceInstanceId)
   const platform = isLedgerStatsAccount(acc) ? 'openai' : cockpitPlatformOf(acc.accountId)
   const type = isLedgerStatsAccount(acc) ? 'oauth' : cockpitAccountTypeOf(acc.accountId)
   const info = type === 'apikey' ? apiKeyInfos.get(acc.accountId) : undefined
@@ -265,6 +272,7 @@ function cockpitAccountToAccount(
   const extra = {
     ...(baseExtra ?? {}),
     usage_granularity: 'token_level' as UsageGranularity,
+    cockpit_source_instance_id: sourceInstanceId,
     scheduler_score_source: 'derived',
     scheduler_score_basis: 'cockpit_usage_success_requests_latency_with_neutral_quota',
   }
@@ -320,9 +328,10 @@ export function cockpitStatsToAccounts(
   routingRules?: Array<{ accountId: string; priority: number; weight: number; isBackup?: boolean; isPreferred?: boolean }>,
   quotaByAccount?: Map<string, { maxUtil: number; resetAtMs: number | null }>,
   groupNames?: Map<string, string> | null,
+  sourceInstanceId = 'local',
 ): Account[] {
   return stats.accounts.filter(acc => acc.accountId?.trim()).map((acc, i) => {
-    const account = cockpitAccountToAccount(acc, i, apiKeyInfos, accountMeta?.get(acc.accountId), stats.since, routingRules, quotaByAccount?.get(acc.accountId))
+    const account = cockpitAccountToAccount(acc, i, apiKeyInfos, accountMeta?.get(acc.accountId), stats.since, routingRules, quotaByAccount?.get(acc.accountId), sourceInstanceId)
     const group = groupNames?.get(acc.accountId) ?? groupNames?.get(String(account.id))
     if (group) account.extra = { ...account.extra, cockpit_group_names: [group] }
     return account
@@ -736,13 +745,14 @@ function emptySplit(): CockpitTokenSplit {
 export function filterCockpitRequestLogByAccount(
   summary: CockpitRequestLogSummary | null,
   selectedAccountId: CostAccountId | null,
+  sourceInstanceId = 'local',
 ): CockpitRequestLogSummary | null {
   if (!summary || selectedAccountId == null) return summary
   const target = String(selectedAccountId)
   return {
     ...summary,
     groups: (summary.groups ?? []).filter(
-      (group) => !!group.accountId?.trim() && accountIdToCostId(group.accountId) === target,
+      (group) => !!group.accountId?.trim() && accountIdToCostId(group.accountId, sourceInstanceId) === target,
     ),
   }
 }
@@ -827,6 +837,7 @@ export function cockpitRequestLogToAccountStats(
   summary: CockpitRequestLogSummary | null,
   priceSets: Record<string, CockpitModelPriceSet>,
   multiplier?: number,
+  sourceInstanceId = 'local',
 ): Record<string, AccountWindowUsage> {
   if (!summary?.available || !summary.groups?.length) return {}
   // 同一账号跨多模型:逐 (模型×账号) 分别计价后累加(不能先合并 token 再算,
@@ -834,7 +845,7 @@ export function cockpitRequestLogToAccountStats(
   const mult = resolveCostMultiplier(multiplier)
   const byAccount = new Map<string, { cost: number; unknownRequests: number; requests: number; tokens: number }>()
   for (const g of summary.groups) {
-    const id = g.accountId?.trim() ? accountIdToCostId(g.accountId) : UNATTRIBUTED_USAGE_ACCOUNT_ID
+    const id = g.accountId?.trim() ? accountIdToCostId(g.accountId, sourceInstanceId) : UNATTRIBUTED_USAGE_ACCOUNT_ID
     const priced = cockpitSplitCostUsd(g, cockpitPriceSetFor(priceSets, g.model), multiplier, g.serviceTier)
     const { costBasis } = priced
     const cost = priced.knownCostUsd ?? priced.cost
@@ -1160,12 +1171,13 @@ export function cockpitRequestLogGroupCost(
   summary: CockpitRequestLogSummary | null,
   priceSets: Record<string, CockpitModelPriceSet>,
   multiplier?: number,
+  sourceInstanceId = 'local',
 ): Map<string, CockpitRouteGroupCost> {
   const result = new Map<string, CockpitRouteGroupCost>()
   const mult = resolveCostMultiplier(multiplier)
   if (!summary?.available || !summary.groups?.length) return result
   for (const g of summary.groups) {
-    const key = `${g.model}\u0000${g.accountId?.trim() ? accountIdToCostId(g.accountId) : UNATTRIBUTED_USAGE_ACCOUNT_ID}`
+    const key = `${g.model}\u0000${g.accountId?.trim() ? accountIdToCostId(g.accountId, sourceInstanceId) : UNATTRIBUTED_USAGE_ACCOUNT_ID}`
     // 算不出来时 cockpitSplitCostUsd 返回哨兵 0(costBasis no_price_no_estimate),不是实测成本。
     // 该状态必须随组一路带到路由行,不能在这里被 `.cost` 抹平 —— 否则显示层只能看到 $0.000000。
     const priceSet = cockpitPriceSetFor(priceSets, g.model)
@@ -1342,6 +1354,7 @@ export function cockpitWindowToAccountStats(
   window: CockpitStatsWindow | undefined,
   costMultiplier?: number,
   pricing?: Record<string, CockpitPricedModel>,
+  sourceInstanceId = 'local',
 ): Record<string, AccountWindowUsage> {
   if (!window?.accounts) return {}
   // 账号级聚合无模型维度 → 用本窗口自算的混合单价还原(与模型表同口径,合计守恒)
@@ -1349,7 +1362,7 @@ export function cockpitWindowToAccountStats(
   const result: Record<string, AccountWindowUsage> = {}
   for (const acc of window.accounts) {
     if (!acc.accountId?.trim()) continue
-    const id = statsAccountCostId(acc)
+    const id = statsAccountCostId(acc, sourceInstanceId)
     const u = acc.usage
     const priced = cockpitAggregateCostUsd(u, blended, costMultiplier)
     // 算不出来 ⇒ 三个成本字段一起 null(不是哨兵 0),由视图走"无数据"分支。
@@ -1769,6 +1782,7 @@ function cockpitQuotaPointToUsageProgress(point: CockpitQuotaPoint): RecordedQuo
 export function cockpitQuotaToAccountUsage(
   files: CockpitQuotaHistoryFile[],
   statsAccounts: CockpitStatsAccount[],
+  sourceInstanceId = 'local',
 ): Record<string, AccountUsageInfo> {
   // email → accountId 映射(stats.accounts 有 email + accountId)
   const emailToAccountId = new Map<string, string>()
@@ -1785,7 +1799,7 @@ export function cockpitQuotaToAccountUsage(
     //     模型是 claude-4-5/g3-pro/g3-flash 的 antigravity 系,与当前 codex 池不同源)。
     const accountId = emailToAccountId.get(file.email)
     if (!accountId?.trim()) continue
-    const id = accountIdToCostId(accountId)
+    const id = accountIdToCostId(accountId, sourceInstanceId)
     const antigravityQuota: NonNullable<AccountUsageInfo['antigravity_quota']> = {}
     let latestUpdatedMs = file.updatedAt
     for (const [modelId, history] of Object.entries(file.models)) {
@@ -1821,6 +1835,7 @@ export function cockpitSnapshotsToAccountUsage(
   accounts: Account[],
   existing: Record<string, AccountUsageInfo> = {},
   nowMs = Date.now(),
+  sourceInstanceId = 'local',
 ): Record<string, AccountUsageInfo> {
   const result = { ...existing }
   const selected = new Map<string, { id: string; slot: 'five_hour' | 'seven_day' | 'seven_day_sonnet'; snapshot: QuotaSnapshot }>()
@@ -1829,8 +1844,9 @@ export function cockpitSnapshotsToAccountUsage(
       || !Number.isFinite(snapshot.percent) || snapshot.percent < 0 || snapshot.percent > 100) continue
     const platform = snapshot.channel === 'codex' ? 'openai' : snapshot.channel === 'claude_manager' ? 'anthropic' : null
     if (!platform) continue
-    const canonical = accountIdToCostId(snapshot.accountId)
-    const matches = accounts.filter(account => account.platform === platform && typeof account.id === 'string'
+    const canonical = accountIdToCostId(snapshot.accountId, sourceInstanceId)
+    const matches = accounts.filter(account => (account.extra?.cockpit_source_instance_id ?? 'local') === sourceInstanceId
+      && account.platform === platform && typeof account.id === 'string'
       && account.id.startsWith('cockpit:') && (account.id === canonical || account.extra?.cockpit_account_id === snapshot.accountId))
     if (matches.length !== 1) continue
     const model = snapshot.modelId
@@ -1996,6 +2012,7 @@ export function parseCockpitApiLog(log: string | null): { events: CockpitLogEven
 function eventsToUsageLogs(
   events: CockpitLogEvent[],
   accounts: Account[],
+  sourceInstanceId = 'local',
 ): { logs: AdminUsageLog[]; channels: Channel[] } {
   const accountInfoById = new Map<string, { name: string; type: AccountType; baseUrl?: string; isProviderTest: boolean }>()
   for (const acc of accounts) {
@@ -2028,7 +2045,7 @@ function eventsToUsageLogs(
 
   const logs: AdminUsageLog[] = []
   for (const evt of events) {
-    const sourceAccountId = evt.accountId?.trim() ? accountIdToCostId(evt.accountId) : null
+    const sourceAccountId = evt.accountId?.trim() ? accountIdToCostId(evt.accountId, sourceInstanceId) : null
     const info = sourceAccountId != null ? accountInfoById.get(String(sourceAccountId)) : undefined
     const createdAt = evt.completedAtMs
       ? new Date(evt.completedAtMs).toISOString()
@@ -2197,9 +2214,10 @@ export function cockpitLogToModelRoutes(
   pricing?: Record<string, CockpitPricedModel>,
   /** `accountId(原始或来源身份形式) → cockpit 账号分组名`;传了才回填「分组」列。 */
   groupNameByAccountId?: Map<string, string> | null,
+  sourceInstanceId = 'local',
 ): { routes: ModelRouteRow[]; truncated: boolean; logs: AdminUsageLog[] } {
   const { events, truncated } = parseCockpitApiLog(log)
-  const { logs, channels } = eventsToUsageLogs(events, accounts)
+  const { logs, channels } = eventsToUsageLogs(events, accounts, sourceInstanceId)
   const routes = buildModelRouteRows(logs, channels)
   if (groupNameByAccountId?.size) {
     for (const row of routes) {
@@ -2235,6 +2253,7 @@ export function cockpitLogToModelRoutes(
 export function cockpitGroupNameByAccountId(
   codexGroups?: CockpitAccountGroup[] | null,
   accountGroups?: CockpitAccountGroup[] | null,
+  sourceInstanceId = 'local',
 ): Map<string, string> {
   const map = new Map<string, string>()
   const all: CockpitAccountGroup[] = [
@@ -2249,7 +2268,7 @@ export function cockpitGroupNameByAccountId(
     for (const id of ids) {
       if (typeof id !== 'string' || !id.trim()) continue
       if (!map.has(id)) map.set(id, name)
-      const costId = accountIdToCostId(id)
+      const costId = accountIdToCostId(id, sourceInstanceId)
       if (!map.has(costId)) map.set(costId, name)
     }
   }
@@ -2264,7 +2283,7 @@ export function cockpitGroupNameByAccountId(
  * 可派生路由行。本函数将 groups 转成 CockpitOpsRouteAgg 格式,复用 cockpitOpsRoutesToModelRoutes。
  *
  * 合并:同 (model, accountId) 的多个 group(apiKeyId 不同)合并为一条,
- * 与 cockpitRequestLogGroupCost 的 `${model}\u0000${accountIdToCostId(accountId)}` 键一致。
+ * 与 cockpitRequestLogGroupCost 的 `${model}\u0000${accountIdToCostId(accountId, sourceInstanceId)}` 键一致。
  * success_count/error_count 置 0(groups 无 success/error 维度,路由表不显示这两列)。
  */
 export function cockpitRequestLogGroupsToOpsRoutes(
@@ -2316,6 +2335,7 @@ export function cockpitOpsRoutesToModelRoutes(
   /** `accountId → cockpit 账号分组名`(由 {@link cockpitGroupNameByAccountId} 构建)。
    *  传了才回填路由行的「分组」列;不传保持 buildModelRouteRows 的「未分组」默认值。 */
   groupNameByAccountId?: Map<string, string> | null,
+  sourceInstanceId = 'local',
 ): { routes: ModelRouteRow[]; totalRequests: number } {
   if (!routes.length) return { routes: [], totalRequests: 0 }
   const events: CockpitLogEvent[] = routes.map((agg, index) => ({
@@ -2326,7 +2346,7 @@ export function cockpitOpsRoutesToModelRoutes(
     startedAtMs: agg.first_ms ?? undefined,
     completedAtMs: agg.last_ms ?? undefined,
   }))
-  const { logs, channels } = eventsToUsageLogs(events, accounts)
+  const { logs, channels } = eventsToUsageLogs(events, accounts, sourceInstanceId)
   const rows: ModelRouteRow[] = []
   let totalRequests = 0
   for (let i = 0; i < logs.length && i < routes.length; i++) {
@@ -2368,6 +2388,7 @@ export function cockpitRequestLogToModelRoutes(
   priceSets: Record<string, CockpitModelPriceSet>,
   costMultiplier?: number,
   groupNameByAccountId?: Map<string, string> | null,
+  sourceInstanceId = 'local',
 ): { routes: ModelRouteRow[]; totalRequests: number } | null {
   if (!summary?.available) return null
   return cockpitOpsRoutesToModelRoutes(
@@ -2376,8 +2397,9 @@ export function cockpitRequestLogToModelRoutes(
     undefined,
     costMultiplier,
     undefined,
-    cockpitRequestLogGroupCost(summary, priceSets, costMultiplier),
+    cockpitRequestLogGroupCost(summary, priceSets, costMultiplier, sourceInstanceId),
     groupNameByAccountId,
+    sourceInstanceId,
   )
 }
 
@@ -2563,10 +2585,10 @@ export function clipOpsBucketsToWindow(
  * 与 stats accountId 同一标识体系,聚合后经 accountIdToCostId 映射即可与账号行对上。
  * 请求数用日志真滚动窗口;成本/Token 日志没有字段,保持快照口径由视图标注。
  */
-export function cockpitOpsAccountsToRequestCounts(accounts: CockpitOpsAccountAgg[]): Record<string, number> {
+export function cockpitOpsAccountsToRequestCounts(accounts: CockpitOpsAccountAgg[], sourceInstanceId = 'local'): Record<string, number> {
   const result: Record<string, number> = {}
   for (const agg of accounts) {
-    if (agg.account_id?.trim()) result[accountIdToCostId(agg.account_id)] = agg.requests
+    if (agg.account_id?.trim()) result[accountIdToCostId(agg.account_id, sourceInstanceId)] = agg.requests
   }
   return result
 }
@@ -2899,9 +2921,10 @@ export interface CockpitPlatformAccountInput {
 
 export function cockpitPlatformAccountsToAccounts(
   items: CockpitPlatformAccountInput[],
+  sourceInstanceId = 'local',
 ): Account[] {
   return items.filter(item => item.id?.trim()).map((item) => {
-    const id = accountIdToCostId(item.id)
+    const id = accountIdToCostId(item.id, sourceInstanceId)
     const createdAtIso = item.createdAt
       ? new Date(item.createdAt < 1e12 ? item.createdAt * 1000 : item.createdAt).toISOString()
       : new Date(0).toISOString()
@@ -2916,6 +2939,7 @@ export function cockpitPlatformAccountsToAccounts(
       // P0-19:旧的 cockpit_platform_no_usage 已废弃(它基于"非 codex 无用量"这个被推翻的结论),
       // 改为三态 usage_granularity —— 有配额 ≠ 无用量。
       extra: {
+        cockpit_source_instance_id: sourceInstanceId,
         usage_granularity: item.usageGranularity ?? cockpitUsageGranularityOf(item.planType),
         ...(item.planLabel ? { cockpit_plan_label: item.planLabel } : {}),
       },

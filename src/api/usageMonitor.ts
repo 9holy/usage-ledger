@@ -432,7 +432,7 @@ export interface DepletionEstimate {
 export interface MonitorQuotaReport {
   collectedAtMs: number
   quotas: MonitorQuota[]
-  sources: Array<{ tool: string; source: string; status: string; error: string | null; scopeNote?: string | null; coverage?: { registeredFiles: number; metadataErrors: number; scopesReported: number; scopesUnreported: number; tailErrors: number } | null }>
+  sources: Array<{ tool: string; source: string; sourceInstance?: string | null; status: string; error: string | null; scopeNote?: string | null; coverage?: { registeredFiles: number; metadataErrors: number; scopesReported: number; scopesUnreported: number; tailErrors: number } | null }>
 }
 
 export function getUsageMonitorWeekly(startMs: number, endMs: number, forecastEndMs?: number): Promise<MonitorWeeklyUsage> {

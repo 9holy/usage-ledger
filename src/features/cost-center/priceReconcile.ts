@@ -8,8 +8,8 @@ import { costDataText } from './costDataText'
  * 此前没有任何东西能回答一个致命问题：**"我们的价目表对吗？"**
  *
  * `request_logs` 里的 `input_usd_per_million` / `output_usd_per_million` /
- * `cached_input_usd_per_million` 是 cockpit 自己落库的、**当时实际使用**的单价（100% 有值），
- * 外加 `model_pricing_version`。这就是现成的独立基准。
+ * `cached_input_usd_per_million` 是 cockpit 自己落库的源单价，外加 `model_pricing_version`。
+ * 缓存单价在上游 schema 中允许 NULL：未记录时不能当成免费价格或完成对账。
  *
  * ## ⚠️ 最容易误判的一点：同一模型天然有两组单价
  *
@@ -56,7 +56,7 @@ export type PriceReconcileStatus =
   | 'not_in_book'
   /** 同一档位内出现**多组不同单价** ⇒ 真正的窗口内调价 */
   | 'price_changed'
-  /** 数据源侧三档单价全为 0（未记录单价），无从对账 */
+  /** 数据源侧三档单价全为 0 或缓存单价为 NULL，无法完整对账 */
   | 'no_price_recorded'
   /** 源有长文本档单价，但我们价目表标注该模型 `sessionLongContext: false` */
   | 'long_context_not_declared'
@@ -68,7 +68,7 @@ export interface PriceTierReconcile {
   /** 该档请求数 */
   rows: number
   /** cockpit 实际单价（该档内行数最多的那组） */
-  cockpit: { input: number; cached: number; output: number } | null
+  cockpit: { input: number; cached: number | null; output: number } | null
   /** 我们价目表的单价 */
   ours: { input: number; cached: number; output: number } | null
   /** 该档内出现过几组不同单价（>1 = 真正的窗口内调价） */
@@ -112,12 +112,13 @@ export interface PriceReconcileResult {
 const EPS = 1e-9
 
 type PriceTriple = { input: number; cached: number; output: number }
+type SourcePriceTriple = { input: number; cached: number | null; output: number }
 
-function isAllZero(p: PriceTriple): boolean {
+function isAllZero(p: SourcePriceTriple): boolean {
   return p.input === 0 && p.cached === 0 && p.output === 0
 }
 
-function toTriple(v: CockpitPriceVariant): PriceTriple {
+function toTriple(v: CockpitPriceVariant): SourcePriceTriple {
   return {
     input: v.inputUsdPerMillion,
     cached: v.cachedInputUsdPerMillion,
@@ -139,9 +140,9 @@ function variantTier(v: CockpitPriceVariant): 'standard' | 'long' | 'mixed' {
  *
  *  ⚠️ 非有限值（undefined / NaN）一律判为**不一致** ——
  *  否则 `Math.abs(6 - undefined) > EPS` 为 false，**不一致会被静默判成一致**。 */
-function diffFields(cockpit: PriceTriple, ours: PriceTriple): string[] {
-  const differs = (a: number, b: number) =>
-    !Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a - b) > EPS
+function diffFields(cockpit: SourcePriceTriple, ours: PriceTriple): string[] {
+  const differs = (a: number | null, b: number) =>
+    a === null || !Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a - b) > EPS
   const fields: string[] = []
   if (differs(cockpit.input, ours.input)) fields.push(costDataText('input'))
   if (differs(cockpit.cached, ours.cached)) fields.push(costDataText('cacheHit'))
@@ -215,7 +216,7 @@ export function reconcileCockpitPrices(
       standard,
       long,
       status,
-      pricingVersions: variants[0]?.pricingVersions ?? [],
+      pricingVersions: [...new Set(variants.flatMap((v) => v.pricingVersions ?? []))].sort((a, b) => a - b),
     })
   }
 
@@ -252,7 +253,9 @@ function buildTier(
   let status: PriceReconcileStatus
   let differingFields: string[] = []
 
-  if (!cockpit || isAllZero(cockpit)) {
+  // A NULL cache price records an unknown source price, not a distinct free
+  // price. Do not report a full match or a historical change from that gap.
+  if (!cockpit || variants.some((v) => v.cachedInputUsdPerMillion === null) || isAllZero(cockpit)) {
     status = 'no_price_recorded'
   } else if (!ours) {
     // 长文本档走到这里 = 源有长文本流量,但我们价目表没给该模型派生长文本价
@@ -273,7 +276,9 @@ function buildSummary(
   comparedCount: number,
   issueCount: number,
 ): string {
-  if (rows.length === 0) return costDataText('noReconcilableModelsSourceProvidesNoUnitPriceSnapshots')
+  if (rows.length === 0 || comparedCount === 0) {
+    return costDataText('noReconcilableModelsSourceProvidesNoUnitPriceSnapshots')
+  }
 
   const longCount = rows.filter((r) => r.long).length
   const longNote = longCount > 0 ? costDataText('includingLongContextTiersForModels', { p0: longCount }) : ''

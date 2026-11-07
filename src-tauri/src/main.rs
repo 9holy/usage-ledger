@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cockpit_data_path;
 mod cockpit_logs_db;
 mod cockpit_quota;
 mod cliproxy_usage_db;
@@ -15,13 +16,18 @@ mod usage_monitor;
 
 use desktop_shell::{handle_main_window_event, is_background_launch, setup_desktop_shell, show_main_window};
 
-/// cockpit-tools 用户数据目录(%USERPROFILE%\.antigravity_cockpit)。
-/// cockpit 读本地 JSON 主源:零认证、零进程依赖、成本已预算好(见 codex_local_access_stats.json)。
+/// Cockpit Tools 数据根：当前/旧版、开发环境及显式目录使用同一只读选择规则。
 fn cockpit_data_dir() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "无法定位用户主目录(USERPROFILE/HOME 均未设置)".to_string())?;
-    Ok(std::path::PathBuf::from(home).join(".antigravity_cockpit"))
+    cockpit_data_path::data_dir()
+}
+
+#[tauri::command]
+fn get_cockpit_source_identity() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({"sourceInstanceId": cockpit_data_path::source_instance_id()?}))
+}
+
+fn cockpit_usage_ledger_path() -> Result<std::path::PathBuf, String> {
+    Ok(cockpit_data_path::local_state_dir(&console_data_dir()?)?.join("cockpit_usage_ledger.json"))
 }
 
 /// 本控制台用户数据目录(Windows %APPDATA%\2api-console,其他 ~/.local/share/2api-console)。
@@ -88,24 +94,33 @@ fn write_json_atomically(target: &std::path::Path, json: &str) -> Result<(), Str
 
 /// 读 cockpit 用量台账 JSON。台账保留"已从 cockpit 移除的账号"的历史用量,
 /// 解决 cockpit 端"移除 API 即丢数据、重新加入从 0 计数"的问题——成本端不能丢。
-/// 不存在时返 "{}"(首次使用)。上限裁剪由前端完成后传入(2000 账号封顶)。
+/// 不存在时返 "null"(首次使用)，与损坏的已有账本区分。上限裁剪由前端完成后传入(2000 账号封顶)。
 #[tauri::command]
 fn read_cost_ledger() -> Result<String, String> {
-    let path = console_data_dir()?.join("cockpit_usage_ledger.json");
+    let path = cockpit_usage_ledger_path()?;
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("null".to_string()),
         Err(e) => Err(format!("读取用量台账失败: {e}")),
     }
 }
 
 /// 写 cockpit 用量台账 JSON(全量覆盖;前端先做 2000 上限裁剪再传入)。
 #[tauri::command]
-fn write_cost_ledger(json: String) -> Result<(), String> {
+fn write_cost_ledger(json: String, expected_source_instance_id: Option<String>) -> Result<(), String> {
     if !serde_json::from_str::<serde_json::Value>(&json).map_err(|e| e.to_string())?.is_object() {
         return Err("Cost ledger must be a JSON object".into());
     }
-    write_json_atomically(&console_data_dir()?.join("cockpit_usage_ledger.json"), &json)
+    let identity = cockpit_data_path::source_instance_id()?;
+    if expected_source_instance_id.as_ref().is_some_and(|expected| expected != &identity) {
+        return Err("Cockpit source changed before saving usage history; reload the source".into());
+    }
+    // Select the destination from that captured identity. A subsequent source
+    // switch must never redirect this already-validated batch into another file.
+    let target = cockpit_data_path::local_state_dir_for_identity(&console_data_dir()?, &identity)?
+        .join("cockpit_usage_ledger.json");
+    crate::ledger_db::assert_not_cockpit_path(&target).map_err(|error| error.to_string())?;
+    write_json_atomically(&target, &json)
 }
 
 /// 写 cockpit 本地 JSON 文件(账号导入/路由规则更新等)。
@@ -687,36 +702,157 @@ fn read_cockpit_apikey_names() -> Result<Vec<serde_json::Value>, String> {
     Ok(results)
 }
 
-/// CPA Token Usage 插件目录(%USERPROFILE%\.cli-proxy-api\plugins\codex-token-usage)。
-/// 插件本地存 usage.db(SQLite 完整用量历史 1629+ 行) + model_prices.cache(LiteLLM 3213 模型 per-token USD 定价)。
+/// Match os.UserHomeDir on the producer's operating system.
+fn cliproxy_user_home() -> Option<String> {
+    #[cfg(windows)]
+    let variable = "USERPROFILE";
+    #[cfg(not(windows))]
+    let variable = "HOME";
+    std::env::var(variable).ok()
+}
+
+fn cliproxy_override(variable: &str) -> Result<Option<String>, String> {
+    match std::env::var(variable) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err(format!("{variable} is not a valid Unicode path")),
+    }
+}
+
+/// CPA paths.go: explicit data directory wins over the current user's default.
 fn cliproxy_plugins_dir() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "无法定位用户主目录(USERPROFILE/HOME 均未设置)".to_string())?;
-    Ok(std::path::PathBuf::from(home).join(".cli-proxy-api").join("plugins").join("codex-token-usage"))
+    cliproxy_usage_db::plugin_data_dir(cliproxy_user_home().as_deref(), cliproxy_override("CPA_TOKEN_USAGE_DIR")?.as_deref())
 }
 
 /// Read-only native SQLite query; no external interpreter or API-key column.
 #[tauri::command]
 fn read_cliproxy_usage_events(with_metadata: Option<bool>, start_ms: Option<i64>, end_ms: Option<i64>) -> Result<String, String> {
-    cliproxy_usage_db::read_usage_events(
-        &cliproxy_plugins_dir()?.join("usage.db"),
-        with_metadata.unwrap_or(false),
-        start_ms,
-        end_ms,
-    )
+    let directory = cliproxy_plugins_dir()?;
+    let instance = cliproxy_usage_db::source_instance_id(&directory, cliproxy_user_home().as_deref())?;
+    let with_metadata = with_metadata.unwrap_or(false);
+    let raw = cliproxy_usage_db::read_usage_events(&directory.join("usage.db"), with_metadata, start_ms, end_ms)?;
+    cliproxy_usage_db::attach_source_identity(&raw, with_metadata, &instance)
 }
 
-/// 读 CPA 插件 model_prices.cache 原文 JSON(LiteLLM 3213 模型 per-token USD 定价)。
-/// 不存在时返 "{}"(首次使用/插件未安装)。
+/// Explicit price path is independent of the data directory; otherwise use that
+/// same plugin instance's cache. Missing files remain unavailable as an empty map.
 #[tauri::command]
 fn read_cliproxy_model_prices() -> Result<String, String> {
-    let path = cliproxy_plugins_dir()?.join("model_prices.cache");
+    let explicit = cliproxy_override("CPA_MODEL_PRICE_FILE")?;
+    let path = match explicit.as_deref().filter(|value| !value.trim().is_empty()) {
+        Some(value) => cliproxy_usage_db::absolute_override(value, "CPA_MODEL_PRICE_FILE")?,
+        None => cliproxy_plugins_dir()?.join("model_prices.cache"),
+    };
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".to_string()),
-        Err(e) => Err(format!("读取 model_prices.cache 失败: {e}")),
+        Err(e) => Err(format!("Cannot read CPA model price cache: {e}")),
     }
+}
+
+#[cfg(test)]
+mod cliproxy_path_contract_tests {
+    use super::*;
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("cpa-path-contract-{}-{}", std::process::id(), ledger_db::now_ms()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn contract_audit_cpa_custom_absolute_path_and_price_override_follow_producer_priority() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = Fixture::new();
+        let _home = EnvGuard::set("HOME", &fixture.0);
+        let _profile = EnvGuard::set("USERPROFILE", &fixture.0);
+        let _price = EnvGuard::remove("CPA_MODEL_PRICE_FILE");
+        let custom = fixture.0.join("custom-instance");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("model_prices.cache"), "{\"custom\":{}}").unwrap();
+        let _usage = EnvGuard::set("CPA_TOKEN_USAGE_DIR", format!("  {}  ", custom.display()));
+        assert_eq!(cliproxy_plugins_dir().unwrap(), custom);
+        assert_eq!(read_cliproxy_model_prices().unwrap(), "{\"custom\":{}}");
+        let override_file = fixture.0.join("explicit-price.json");
+        std::fs::write(&override_file, "{\"explicit\":{}}").unwrap();
+        let _price_override = EnvGuard::set("CPA_MODEL_PRICE_FILE", &override_file);
+        assert_eq!(read_cliproxy_model_prices().unwrap(), "{\"explicit\":{}}");
+    }
+
+    #[test]
+    fn contract_audit_cpa_relative_overrides_are_rejected_without_producer_cwd_evidence() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _usage = EnvGuard::set("CPA_TOKEN_USAGE_DIR", "relative-instance");
+        assert!(cliproxy_plugins_dir().unwrap_err().contains("absolute"));
+        let _price = EnvGuard::set("CPA_MODEL_PRICE_FILE", "relative-price.cache");
+        assert!(read_cliproxy_model_prices().unwrap_err().contains("absolute"));
+    }
+
+    #[test]
+    fn contract_audit_cpa_distinct_directories_have_distinct_source_scopes_even_when_unavailable() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = Fixture::new();
+        let _home = EnvGuard::set("HOME", &fixture.0);
+        let _profile = EnvGuard::set("USERPROFILE", &fixture.0);
+        let _price = EnvGuard::remove("CPA_MODEL_PRICE_FILE");
+        let _default = EnvGuard::remove("CPA_TOKEN_USAGE_DIR");
+        let read = || serde_json::from_str::<serde_json::Value>(&read_cliproxy_usage_events(Some(true), Some(0), Some(2000)).unwrap()).unwrap();
+        assert_eq!(read()["sourceInstanceId"], "local");
+        let first;
+        { let _a = EnvGuard::set("CPA_TOKEN_USAGE_DIR", fixture.0.join("a")); first = read(); }
+        let second;
+        { let _b = EnvGuard::set("CPA_TOKEN_USAGE_DIR", fixture.0.join("b")); second = read(); }
+        assert_eq!(first["available"], false);
+        assert_eq!(first["events"], serde_json::json!([]));
+        assert_eq!(first["managementLinkAllowed"], false);
+        assert_ne!(first["sourceInstanceId"], second["sourceInstanceId"]);
+        assert!(!first.to_string().contains(&fixture.0.to_string_lossy().to_string()));
+    }
+    #[test]
+    fn contract_audit_cpa_missing_custom_directory_keeps_its_source_scope_when_created() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = Fixture::new();
+        let _home = EnvGuard::set("HOME", &fixture.0);
+        let _profile = EnvGuard::set("USERPROFILE", &fixture.0);
+        let physical = fixture.0.join("physical");
+        std::fs::create_dir_all(&physical).unwrap();
+        #[cfg(unix)]
+        let parent = {
+            let alias = fixture.0.join("parent-alias");
+            std::os::unix::fs::symlink(&physical, &alias).unwrap();
+            alias
+        };
+        #[cfg(not(unix))]
+        let parent = physical;
+        let custom = parent.join("created-later");
+        let _usage = EnvGuard::set("CPA_TOKEN_USAGE_DIR", &custom);
+        let read = || serde_json::from_str::<serde_json::Value>(&read_cliproxy_usage_events(Some(true), None, None).unwrap()).unwrap();
+        let before = read();
+        std::fs::create_dir_all(&custom).unwrap();
+        let after = read();
+        assert_eq!(before["sourceInstanceId"], after["sourceInstanceId"],
+            "source identity cannot change just because its directory becomes available");
+        assert_eq!(after["managementLinkAllowed"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contract_audit_cpa_broken_directory_alias_is_an_error_not_an_empty_instance() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = Fixture::new();
+        let custom = fixture.0.join("broken-alias");
+        std::os::unix::fs::symlink(fixture.0.join("missing-target"), &custom).unwrap();
+        let _usage = EnvGuard::set("CPA_TOKEN_USAGE_DIR", &custom);
+        assert!(read_cliproxy_usage_events(Some(true), None, None).is_err(),
+            "an unresolved alias must not be published as a valid empty source");
+    }
+
 }
 
 fn main() {
@@ -765,6 +901,7 @@ fn main() {
             read_cockpit_apikey_names,
             read_cost_profiles,
             write_cost_profiles,
+            get_cockpit_source_identity,
             read_cost_ledger,
             write_cost_ledger,
             read_cliproxy_usage_events,
@@ -965,6 +1102,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).expect("建临时主目录失败");
         let _home = EnvGuard::set("USERPROFILE", &tmp);
         let _home2 = EnvGuard::set("HOME", &tmp);
+        let _cockpit_override = EnvGuard::remove("COCKPIT_TOOLS_DATA_DIR");
+        let _cockpit_profile = EnvGuard::remove("COCKPIT_TOOLS_PROFILE");
 
         for ok in ["codex_accounts.json", "codex_local_access.json", "test_data.json"] {
             let r = write_cockpit_file(ok.into(), "{}".into());
@@ -974,7 +1113,7 @@ mod tests {
             );
             // 反证:文件必须落在**临时**目录 —— 若哪天隔离失效,这里立刻炸,而不是悄悄毁真数据。
             assert!(
-                tmp.join(".antigravity_cockpit").join(ok).exists(),
+                tmp.join(".cockpit_tools").join(ok).exists(),
                 "{ok} 必须写进临时目录而非用户真目录: {r:?}"
             );
         }
@@ -1005,6 +1144,8 @@ mod tests {
         std::fs::create_dir_all(&tmp).expect("建临时主目录失败");
         let _home = EnvGuard::set("USERPROFILE", &tmp);
         let _home2 = EnvGuard::set("HOME", &tmp);
+        let _cockpit_override = EnvGuard::remove("COCKPIT_TOOLS_DATA_DIR");
+        let _cockpit_profile = EnvGuard::remove("COCKPIT_TOOLS_PROFILE");
 
         for bad in bad_cases.iter().chain(std::iter::once(&long_name.as_str())) {
             let r = write_cockpit_file((*bad).into(), "{}".into());
@@ -1016,7 +1157,7 @@ mod tests {
             // 空名要跳过:`Path::join("")` 会退化成目录本身,`exists()` 恒真 ⇒ 假失败。
             if !bad.is_empty() {
                 assert!(
-                    !tmp.join(".antigravity_cockpit").join(bad).exists(),
+                    !tmp.join(".cockpit_tools").join(bad).exists(),
                     "非法名 {bad:?} 不该真的写出文件"
                 );
             }
@@ -1024,10 +1165,10 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// read_cost_ledger 首次使用(文件不存在)返 "{}" 而非 Err。
+    /// read_cost_ledger 首次使用(文件不存在)返 "null" 而非 Err。
     /// 设临时 APPDATA 隔离(不依赖外部环境,沙箱可能剥掉 env;持 ENV_LOCK 防并发踩)。
     #[test]
-    fn read_cost_ledger_missing_file_returns_empty_object() {
+    fn read_cost_ledger_missing_file_returns_null() {
         let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join("console_ledger_test_empty");
         std::fs::remove_dir_all(&tmp).ok();
@@ -1035,7 +1176,7 @@ mod tests {
         let r = read_cost_ledger();
         std::fs::remove_dir_all(&tmp).ok();
         assert!(r.is_ok(), "read_cost_ledger 不应失败: {r:?}");
-        assert_eq!(r.unwrap(), "{}", "不存在时应返空对象");
+        assert_eq!(r.unwrap(), "null", "不存在时应返 null");
     }
 
     /// write_cost_ledger 落盘后 read_cost_ledger 能读回同内容(往返一致性)。
@@ -1058,7 +1199,7 @@ mod tests {
                 .unwrap_or(0)
         );
         let payload = format!(r#"{{"accounts":[{{"email":"{marker}","requestCount":42}}]}}"#);
-        let write_result = write_cost_ledger(payload.clone());
+        let write_result = write_cost_ledger(payload.clone(), None);
         let back = read_cost_ledger();
         std::fs::remove_dir_all(&tmp).ok();
         write_result.expect("写入台账失败");

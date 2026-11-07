@@ -19,6 +19,17 @@ import { errMsg } from '@/stores/connection'
 import { isDesktopRuntime as detectDesktop } from '@/api/url'
 import i18n from '@/i18n'
 
+/** Opaque identity of the actual native data root; a failed read never means default local. */
+export interface CockpitSourceIdentity { sourceInstanceId: string }
+export async function getCockpitSourceIdentity(): Promise<CockpitSourceIdentity> {
+  if (!detectDesktop()) throw new Error('Cockpit source identity is available only in the desktop app')
+  const identity = await invoke<CockpitSourceIdentity>('get_cockpit_source_identity')
+  if (!identity || typeof identity.sourceInstanceId !== 'string' || !identity.sourceInstanceId.trim()) {
+    throw new Error('Invalid Cockpit source identity')
+  }
+  return { sourceInstanceId: identity.sourceInstanceId }
+}
+
 /** cockpit 用量统计(codex_local_access_stats.json) */
 export interface CockpitUsageStats {
   requestCount: number
@@ -257,6 +268,7 @@ export interface CockpitGeminiAccount {
 }
 
 /** 读 gemini 账号列表(仅 plan_name,无成本数据) */
+/** Legacy extension pool. Official Cockpit Google accounts use the existing accounts.json reader; do not merge the same pool twice. */
 export async function getCockpitGeminiAccounts(): Promise<CockpitGeminiAccount[]> {
   const data = await readJson<{ accounts: CockpitGeminiAccount[] }>('gemini_accounts.json')
   return data?.accounts ?? []
@@ -789,29 +801,31 @@ export interface CockpitUsageLedger {
 /** 台账条目上限:超出裁 updatedAt 最旧条目,防文件无限膨胀 */
 export const COCKPIT_LEDGER_CAP = 2000
 
-/** 读用量台账。文件不存在/非桌面/旧版宿主缺命令 → 返 null(调用方跳过合并,优雅降级)。 */
+/** Missing file is null; unreadable or malformed history must never be treated as a new ledger. */
 export async function readCostLedger(): Promise<CockpitUsageLedger | null> {
-  if (!detectDesktop()) return null
-  try {
-    const raw = await invoke<string>('read_cost_ledger')
-    const parsed = raw ? (JSON.parse(raw) as CockpitUsageLedger | null) : null
-    return parsed && Array.isArray(parsed.accounts) ? parsed : null
-  } catch (e) {
-    console.warn('[cockpit] 读用量台账失败(旧版宿主可忽略):', errMsg(e, '读取失败'))
-    return null
+  if (!detectDesktop()) throw new Error('Cockpit usage ledger is available only in the desktop app')
+  const raw = await invoke<string>('read_cost_ledger')
+  const parsed: unknown = JSON.parse(raw)
+  if (parsed == null) return null
+  if (typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray((parsed as CockpitUsageLedger).accounts)) {
+    throw new Error('Invalid Cockpit usage ledger: expected an accounts array')
   }
+  for (const entry of (parsed as CockpitUsageLedger).accounts) {
+    if (!entry || typeof entry.email !== 'string' || !entry.email.trim()
+      || typeof entry.updatedAt !== 'number' || !Number.isFinite(entry.updatedAt) || entry.updatedAt < 0
+      || !entry.usage || typeof entry.usage !== 'object' || Array.isArray(entry.usage)
+      || Object.values(entry.usage).some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) {
+      throw new Error('Invalid Cockpit usage ledger: malformed account history')
+    }
+  }
+  return parsed as CockpitUsageLedger
 }
 
-/** 全量写用量台账(Rust 落盘 %APPDATA%/2api-console/cockpit_usage_ledger.json)。
- *  写失败仅告警不抛(台账是附加保障,不能阻塞主数据加载)。 */
-export async function writeCostLedger(entries: CockpitLedgerEntry[]): Promise<void> {
-  if (!detectDesktop()) return
-  try {
-    const payload: CockpitUsageLedger = { accounts: entries.slice(0, COCKPIT_LEDGER_CAP) }
-    await invoke('write_cost_ledger', { json: JSON.stringify(payload, null, 2) })
-  } catch (e) {
-    console.warn('[cockpit] 写用量台账失败(旧版宿主可忽略):', errMsg(e, '写入失败'))
-  }
+/** Native code checks the expected root before writing the per-instance usage ledger. */
+export async function writeCostLedger(entries: CockpitLedgerEntry[], expectedSourceInstanceId?: string): Promise<void> {
+  if (!detectDesktop()) throw new Error('Cockpit usage ledger can only be saved in the desktop app')
+  const payload: CockpitUsageLedger = { accounts: entries.slice(0, COCKPIT_LEDGER_CAP) }
+  await invoke('write_cost_ledger', { json: JSON.stringify(payload, null, 2), expectedSourceInstanceId })
 }
 
 /** 写 cockpit 本地 JSON 文件(账号导入/路由规则更新等)。

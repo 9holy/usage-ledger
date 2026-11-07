@@ -32,15 +32,15 @@ describe('quota period display evidence', () => {
     expect(quotaWindowState({ utilization: 40, recorded_at: null }, NOW, iso(NOW)).updatedAt).toBeNull()
   })
 
-  it('preserves CPA 5h and 7d timestamps independently, including stale valid pairs when newer records omit a period', () => {
+  it('preserves CPA primary and secondary timestamps independently, including stale valid pairs when newer records omit a period', () => {
     const event = (at: number, fields: object) => ({ requested_at: at, failed: false, auth_index: 'runtime-id', ...fields } as CliproxyUsageEvent)
     const usage = cliproxyEventsToAccountUsage([
       event(NOW - 7200000, { primary_used_percent: 12, primary_reset_at: (NOW - 1000) / 1000, secondary_used_percent: 37, secondary_reset_at: (NOW + 86400000) / 1000 }),
       event(NOW - 3600000, { primary_used_percent: 24, primary_reset_at: (NOW + 1000) / 1000, secondary_used_percent: 0, secondary_reset_at: null }),
     ], new Date(NOW))[authIndexToAccountId('runtime-id')]
-    expect(usage.five_hour).toMatchObject({ utilization: 24, recorded_at: iso(NOW - 3600000), snapshot_source: 'recorded' })
-    expect(usage.seven_day).toMatchObject({ utilization: 37, resets_at: iso(NOW + 86400000), recorded_at: iso(NOW - 7200000) })
-    expect(quotaWindowState(usage.seven_day, NOW, usage.updated_at).updatedAt).toBe(iso(NOW - 7200000))
+    expect(usage.primary_window).toMatchObject({ utilization: 24, recorded_at: iso(NOW - 3600000), snapshot_source: 'recorded' })
+    expect(usage.secondary_window).toMatchObject({ utilization: 37, resets_at: iso(NOW + 86400000), recorded_at: iso(NOW - 7200000) })
+    expect(quotaWindowState(usage.secondary_window, NOW, usage.updated_at).updatedAt).toBe(iso(NOW - 7200000))
   })
 })
 

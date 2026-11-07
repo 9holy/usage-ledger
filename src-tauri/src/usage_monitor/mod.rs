@@ -17,6 +17,8 @@ mod request_accounts;
 mod store;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod data_channel_contract_tests;
 pub mod types;
 pub mod weekly;
 
@@ -141,7 +143,11 @@ fn rate_sessions_for_live(sessions: &[SessionSummary], live: &LiveSnapshot) -> V
 #[tauri::command]
 pub async fn usage_monitor_quotas() -> Result<quota::QuotaReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        quota::read(&connection()?, crate::ledger_db::now_ms())
+        let conn = connection()?;
+        let tx = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        let report = quota::read(&tx, crate::ledger_db::now_ms())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(report)
     })
     .await
     .map_err(|e| e.to_string())?

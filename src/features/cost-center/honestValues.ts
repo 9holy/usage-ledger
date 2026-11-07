@@ -135,9 +135,9 @@ export function formatUtilization(value: unknown): string {
   return utilization == null ? UNKNOWN_DASH : `${Math.round(utilization)}%`
 }
 
-/** 是否有主用量窗口(5h / 7d 任一存在)。 */
+/** Whether a source reported an overall quota window, with or without a known duration. */
 export function hasPrimaryUsageWindow(usage?: AccountUsageInfo | null): boolean {
-  return Boolean(usage?.five_hour || usage?.seven_day)
+  return Boolean(usage?.primary_window || usage?.secondary_window || usage?.five_hour || usage?.seven_day)
 }
 
 /**
@@ -156,7 +156,7 @@ export function hasPrimaryUsageWindow(usage?: AccountUsageInfo | null): boolean 
  * ⇒ 不可得的窗口**跳过**;全部窗口都不可得 ⇒ `null`(不落 0、更不落 1)。
  */
 export function quotaRemainingRatio(usage?: AccountUsageInfo | null): number | null {
-  const windows = [usage?.five_hour, usage?.seven_day].filter(Boolean)
+  const windows = [usage?.primary_window, usage?.secondary_window, usage?.five_hour, usage?.seven_day].filter(Boolean)
   if (!windows.length) return null
   let mostConstrained: number | null = null
   for (const window of windows) {

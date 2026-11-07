@@ -60,6 +60,52 @@ function realSolSnapshot(): CockpitModelPriceSnapshot {
   ])
 }
 
+describe('Cockpit upstream source-price contracts', () => {
+  it('keeps a NULL source cache price unknown instead of declaring a price mismatch', () => {
+    const source = snap('gpt-5.6-sol', [{ price: [5, 0.5, 30], rows: 1 }])
+    Object.assign(source.variants[0], { cachedInputUsdPerMillion: null })
+    const result = reconcileCockpitPrices([source])
+    expect(result.rows[0].standard.cockpit?.cached).toBeNull()
+    expect(result.rows[0].status).toBe('no_price_recorded')
+    expect(result.comparedCount).toBe(0)
+    expect(result.issueCount).toBe(0)
+    expect(result.summary).toContain('暂无可比较的模型')
+    expect(result.summary).not.toContain('价目一致')
+  })
+
+  it('keeps an explicitly recorded zero cache price comparable', () => {
+    const source = snap('gpt-5.6-sol', [{ price: [5, 0, 30], rows: 1 }])
+    const result = reconcileCockpitPrices([source])
+    expect(result.rows[0].standard.cockpit?.cached).toBe(0)
+    expect(result.rows[0].status).toBe('mismatch')
+    expect(result.rows[0].standard.differingFields).toEqual(['缓存命中'])
+    expect(result.comparedCount).toBe(1)
+    expect(result.issueCount).toBe(1)
+  })
+
+  it('an unknown cache-price group is not evidence of a price change or a complete match', () => {
+    const source = snap('gpt-5.6-sol', [
+      { price: [5, 0.5, 30], rows: 20 },
+      { price: [5, 0.5, 30], rows: 10 },
+    ])
+    source.variants[1].cachedInputUsdPerMillion = null
+    const result = reconcileCockpitPrices([source])
+    expect(result.rows[0].standard.status).toBe('no_price_recorded')
+    expect(result.rows[0].standard.variantCount).toBe(2)
+    expect(result.comparedCount).toBe(0)
+  })
+
+  it('retains version provenance from all price groups, not just the dominant group', () => {
+    const source = snap('gpt-5.6-sol', [
+      { price: [5, 0.5, 30], rows: 3, versions: [1, 3] },
+      { price: [10, 1, 45], rows: 1, longRows: 1, versions: [2] },
+    ])
+    const result = reconcileCockpitPrices([source])
+    expect(result.rows[0].pricingVersions).toEqual([1, 2, 3])
+    expect(result.sourceVersions).toEqual([1, 2, 3])
+  })
+})
+
 describe('长文本档归位（最关键）', () => {
   it('标准档 + 长文本档两组单价必须判为 match，绝不能误报成"窗口内调价"', () => {
     const r = reconcileCockpitPrices([realSolSnapshot()])
@@ -177,7 +223,8 @@ describe('边界与排序', () => {
     expect(r.rows[0].standard.status).toBe('no_price_recorded')
     expect(r.comparedCount).toBe(0)
     expect(r.issueCount).toBe(0)
-    expect(r.summary).toContain('价目一致')
+    expect(r.summary).toContain('暂无可比较的模型')
+    expect(r.summary).not.toContain('价目一致')
   })
 
   it('无 variants → no_price_recorded，不崩', () => {

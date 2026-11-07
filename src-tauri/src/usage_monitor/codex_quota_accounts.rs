@@ -40,9 +40,13 @@ impl Reader {
             }
             match result.payload {
                 Ok(payload) => {
-                    save_authenticated(conn, &result.home, &result.account, &payload, result.observed_ms)?
+                    if save_authenticated(conn, &result.home, &result.account, &payload, result.observed_ms).is_err() {
+                        // An invalid successful body is a failure for this
+                        // account; it must not abort unrelated queued results.
+                        super::quota::authenticated_codex_unavailable(conn, &result.account, result.observed_ms)?;
+                    }
                 }
-                Err(error) => eprintln!("Official Codex account quota unavailable: {error}"),
+                Err(_) => super::quota::authenticated_codex_unavailable(conn, &result.account, result.observed_ms)?,
             }
         }
         schedule(self.sender.clone(), conn, sources, now)?;
@@ -287,6 +291,128 @@ fn schedule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn contract_audit_quota(used: i32) -> Value {
+        serde_json::json!({"plan_type":"pro","rate_limit":{
+            "primary_window":{"limit_window_seconds":18000,"reset_at":19000,"used_percent":used},
+            "secondary_window":{"limit_window_seconds":604800,"reset_at":700000,"used_percent":20}
+        }})
+    }
+
+    #[test]
+    fn contract_audit_official_quota_failure_is_account_scoped_historical_and_clears_on_success() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        let now = 1_000_000;
+        for account in ["a", "b"] {
+            save_authenticated(&conn, Path::new("fixture"), account, &contract_audit_quota(40), now).unwrap();
+        }
+        let id = |account: &str| conn.query_row(
+            "SELECT id FROM monitor_quotas WHERE account_key=?1 AND slot='primary'",
+            [format!("account:{account}")], |r| r.get::<_, i64>(0),
+        ).unwrap();
+        let (a, b) = (id("a"), id("b"));
+        let mut reader = Reader::new();
+        reader.sender.send(OfficialQuota {
+            home: PathBuf::from("fixture"), account: "a".into(), observed_ms: now + 1000,
+            payload: Err("Authorization: Bearer fixture-only-key".into()), subscription: None,
+        }).unwrap();
+        reader.collect(&conn, &[], now + 1500).unwrap();
+        let report = super::super::quota::read(&conn, now + 1501).unwrap();
+        let failed = report.quotas.iter().find(|q| q.id == a).unwrap();
+        assert!(failed.stale);
+        assert!(failed.source_error.is_some());
+        assert_eq!(failed.observed_at_ms, Some(now));
+        assert_eq!(failed.used_percent, Some(40.0));
+        let unaffected = report.quotas.iter().find(|q| q.id == b).unwrap();
+        assert!(!unaffected.stale);
+        assert!(unaffected.source_error.is_none());
+        assert!(!serde_json::to_string(&report).unwrap().contains("fixture-only-key"));
+
+        reader.sender.send(OfficialQuota {
+            home: PathBuf::from("fixture"), account: "a".into(), observed_ms: now + 2000,
+            payload: Ok(contract_audit_quota(0)), subscription: None,
+        }).unwrap();
+        reader.collect(&conn, &[], now + 2500).unwrap();
+        let report = super::super::quota::read(&conn, now + 2501).unwrap();
+        let recovered = report.quotas.iter().find(|q| q.id == a).unwrap();
+        assert!(!recovered.stale);
+        assert!(recovered.source_error.is_none());
+        assert_eq!(recovered.observed_at_ms, Some(now + 2000));
+        assert_eq!((recovered.used_percent, recovered.remaining_percent), (Some(0.0), Some(100.0)));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_quotas", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
+    }
+
+    #[test]
+    fn contract_audit_official_nullable_or_changed_slots_preserve_history_without_staying_current() {
+        // OpenAI Codex efdacaf... generated RateLimitStatusDetails permits
+        // missing/null primary_window and secondary_window, with independent durations.
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        let now = 1_000_000;
+        save_authenticated(&conn, Path::new("fixture"), "a", &contract_audit_quota(40), now).unwrap();
+        let changed = serde_json::json!({"plan_type":"pro","rate_limit":{
+            "primary_window":null,
+            "secondary_window":{"limit_window_seconds":18000,"reset_at":19000,"used_percent":0}
+        }});
+        save_authenticated(&conn, Path::new("fixture"), "a", &changed, now + 1000).unwrap();
+        let report = super::super::quota::read(&conn, now + 1001).unwrap();
+        assert_eq!(report.quotas.len(), 3);
+        let current: Vec<_> = report.quotas.iter().filter(|q| !q.stale).collect();
+        assert_eq!(current.len(), 1);
+        assert_eq!((current[0].slot.as_str(), current[0].window_minutes, current[0].used_percent), ("secondary", Some(300), Some(0.0)));
+        for old in report.quotas.iter().filter(|q| q.observed_at_ms == Some(now)) {
+            assert!(old.stale);
+            assert!(old.source_error.is_some());
+            assert!(old.used_percent.is_some());
+        }
+        save_authenticated(&conn, Path::new("fixture"), "a", &serde_json::json!({"plan_type":"pro","rate_limit":null}), now + 2000).unwrap();
+        assert!(super::super::quota::read(&conn, now + 2001).unwrap().quotas.iter().all(|q| q.stale));
+        // A delayed older response must not revive a window omitted by a newer success.
+        save_authenticated(&conn, Path::new("fixture"), "a", &contract_audit_quota(80), now + 1500).unwrap();
+        assert!(super::super::quota::read(&conn, now + 2500).unwrap().quotas.iter().all(|q| q.stale));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_quotas", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn contract_audit_invalid_official_success_does_not_abort_other_accounts_or_erase_prior_facts() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        let now = 1_000_000;
+        save_authenticated(&conn, Path::new("fixture"), "a", &contract_audit_quota(40), now).unwrap();
+        let mut reader = Reader::new();
+        for (account, payload) in [("a", serde_json::json!({"error":"fixture-only-key"})), ("b", contract_audit_quota(0))] {
+            reader.sender.send(OfficialQuota {
+                home: PathBuf::from("fixture"), account: account.into(), observed_ms: now + 1000,
+                payload: Ok(payload), subscription: None,
+            }).unwrap();
+        }
+        assert!(reader.collect(&conn, &[], now + 1500).is_ok());
+        let report = super::super::quota::read(&conn, now + 1501).unwrap();
+        assert_eq!(report.quotas.len(), 4);
+        assert_eq!(report.quotas.iter().filter(|q| q.stale && q.source_error.is_some()).count(), 2);
+        assert_eq!(report.quotas.iter().filter(|q| !q.stale && q.slot == "primary").next().unwrap().used_percent, Some(0.0));
+        assert!(!serde_json::to_string(&report).unwrap().contains("fixture-only-key"));
+    }
+
+    #[test]
+    fn contract_audit_first_official_failure_is_reported_without_inventing_a_quota() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::store::initialize(&conn).unwrap();
+        let mut reader = Reader::new();
+        reader.sender.send(OfficialQuota {
+            home: PathBuf::from("fixture"), account: "a".into(), observed_ms: 1_000_000,
+            payload: Err("https://example.test/?api_key=fixture-only-key".into()), subscription: None,
+        }).unwrap();
+        reader.collect(&conn, &[], 1_000_001).unwrap();
+        let report = super::super::quota::read(&conn, 1_000_002).unwrap();
+        assert!(report.quotas.is_empty());
+        let value = serde_json::to_value(report).unwrap();
+        let sources = value["sources"].as_array().unwrap();
+        assert!(sources.iter().any(|source| source["source"] == "codex_official_usage" && source["status"] == "error" && source["error"].is_string()));
+        assert!(!value.to_string().contains("fixture-only-key"));
+    }
+
     #[test]
     fn quota_keeps_its_observation_time_when_subscription_check_fails_or_collection_is_delayed() {
         let conn=Connection::open_in_memory().unwrap();

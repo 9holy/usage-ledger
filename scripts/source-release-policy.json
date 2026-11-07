@@ -1,5 +1,5 @@
 {
-  "version": "0.2.37",
+  "version": "0.2.38",
   "repository": "9holy/usage-ledger",
   "directories": ["src", "public", "LICENSES", "src-tauri/src", "src-tauri/icons", "src-tauri/capabilities"],
   "files": [
@@ -20,6 +20,9 @@
     "scripts/export-source-release.mjs", "scripts/source-release-policy.json",
     "scripts/build-macos.mjs", "scripts/test-macos.mjs", "scripts/smoke-macos.mjs", "scripts/__tests__/macos-build-contract.test.mjs",
     "docs/platforms/macos.md", "docs/audit-2026-11-07.md", "docs/monitor-accuracy-audit-2026-11-07.md", "docs/re-review-2026-11-07.md",
+    "docs/data-channel-audit-2026-11-07.md", "docs/sub2api-data-contract-audit-2026-11-07.md",
+    "docs/cliproxy-data-contract-audit-2026-11-07.md", "docs/cockpit-data-contract-audit-2026-11-07.md",
+    "docs/monitor-quota-contract-audit-2026-11-07.md", "docs/release/0.2.38.md",
     "docs/PRIVACY.md", "docs/release/0.2.24.md", "docs/release/0.2.25.md", "docs/release/0.2.36.md", "docs/release/0.2.37.md", "docs/integrations/deepseek-harness.md",
     "docs/legal/admin-compliance.zh.md", "docs/legal/admin-compliance.en.md",
     "docs/demo/readme-fixtures.js", "docs/screenshots/README.md", "docs/screenshots/capture-manifest.json",

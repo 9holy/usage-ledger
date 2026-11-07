@@ -2,7 +2,7 @@
 
 # 用量账本
 
-**版本 0.2.37 · AI 用量监控与成本工作台 · English / 中文**
+**版本 0.2.38 · AI 用量监控与成本工作台 · English / 中文**
 
 用量账本是一款桌面应用，用于了解 AI 工具的使用情况，以及背后账号和服务的成本。它把本地用量监控与 Sub2API、CLIProxyAPI、Cockpit 的成本工作台放在同一应用中。
 
@@ -20,15 +20,15 @@
 
 ## 获取应用
 
-0.2.37 包含三轮账号归属、用量统计、账本一致性与桌面安全修复。变更及验证边界见[双语发布说明](docs/release/0.2.37.md)。
+0.2.38 根据 Sub2API、CLIProxyAPI/CPA、Cockpit 与用量监控的来源源码修复数据通道、实例隔离、历史用量及额度状态，保留本项目自己的成本公式。变更及验证边界见[双语发布说明](docs/release/0.2.38.md)。
 
-[用量账本 v0.2.37 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.37)会在发布检查与三个平台的构建全部通过后提供以下下载：
+[用量账本 v0.2.38 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.38)会在发布检查与三个平台的构建全部通过后提供以下下载：
 
-- Windows x64 安装包：[Usage-Ledger_0.2.37_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_windows_x64-setup.exe)。
-- macOS Apple Silicon 预览：[Usage-Ledger_0.2.37_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_macos_arm64.dmg)。
-- macOS Intel 预览：[Usage-Ledger_0.2.37_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_macos_x64.dmg)。
+- Windows x64 安装包：[Usage-Ledger_0.2.38_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_windows_x64-setup.exe)。
+- macOS Apple Silicon 预览：[Usage-Ledger_0.2.38_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_arm64.dmg)。
+- macOS Intel 预览：[Usage-Ledger_0.2.38_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_x64.dmg)。
 
-源码提交和构建证据见 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/BUILD-INFO.json)，文件校验值见 [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/SHA256SUMS.txt)。仅提供手动下载；本版不提供 updater `.sig` 文件、`latest.json` 自动更新清单或便携 EXE。
+源码提交和构建证据见 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/BUILD-INFO.json)，文件校验值见 [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/SHA256SUMS.txt)。仅提供手动下载；本版不提供 updater `.sig` 文件、`latest.json` 自动更新清单或便携 EXE。
 
 Windows 升级时先备份重要数据，从托盘完全退出应用，再运行新安装包覆盖现有安装，保留原应用数据；不要为了更新先卸载或删除账本。Mac 退出应用后选择匹配处理器的 DMG，替换 `/Applications` 中的应用。现有数据目录继续使用，必要的数据库升级和有证据的修复在启动时执行。
 
@@ -259,7 +259,7 @@ pnpm desktop:build:mac
   全部为虚构 DEMO 数据，不是真实账号账单。
 - [DeepSeek Harness 接入说明](docs/integrations/deepseek-harness.md)。
 - [macOS 构建与测试指南](docs/platforms/macos.md)。
-- [0.2.37 发布说明](docs/release/0.2.37.md)。
+- [0.2.38 发布说明](docs/release/0.2.38.md)。
 - [2026-11-07 审核与验证报告](docs/audit-2026-11-07.md)。
 - [2026-11-07 用量统计与账号归属专项复核](docs/monitor-accuracy-audit-2026-11-07.md)。
 - [2026-11-07 第三轮复审：并发、账号证据与账本准确性](docs/re-review-2026-11-07.md)。

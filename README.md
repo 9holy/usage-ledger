@@ -2,7 +2,7 @@
 
 # Usage Ledger
 
-**Version 0.2.37 · AI usage monitoring and cost workspace · English / 中文**
+**Version 0.2.38 · AI usage monitoring and cost workspace · English / 中文**
 
 Usage Ledger is a desktop app for understanding AI-tool activity and the cost of the accounts and services behind it. It combines a local usage monitor with a cost workspace for Sub2API, CLIProxyAPI, and Cockpit.
 
@@ -20,15 +20,15 @@ Amounts calculated by Usage Ledger are estimates based on available usage, prici
 
 ## Get the App
 
-Version 0.2.37 includes the three-round fixes for account attribution, usage statistics, ledger consistency, and desktop security. See the [bilingual release notes](docs/release/0.2.37.md) for changes and verification boundaries.
+Version 0.2.38 adds source-code contract fixes for Sub2API, CLIProxyAPI/CPA, Cockpit, and usage-monitor quotas, including source isolation and preserved historical usage. Your own cost formulas are retained. See the [bilingual release notes](docs/release/0.2.38.md) for changes and verification boundaries.
 
-The [v0.2.37 release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.37) provides these downloads once the release checks and all three platform builds pass:
+The [v0.2.38 release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.38) provides these downloads once the release checks and all three platform builds pass:
 
-- Windows x64 installer: [Usage-Ledger_0.2.37_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_windows_x64-setup.exe).
-- macOS Apple Silicon preview: [Usage-Ledger_0.2.37_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_macos_arm64.dmg).
-- macOS Intel preview: [Usage-Ledger_0.2.37_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/Usage-Ledger_0.2.37_macos_x64.dmg).
+- Windows x64 installer: [Usage-Ledger_0.2.38_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_windows_x64-setup.exe).
+- macOS Apple Silicon preview: [Usage-Ledger_0.2.38_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_arm64.dmg).
+- macOS Intel preview: [Usage-Ledger_0.2.38_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/Usage-Ledger_0.2.38_macos_x64.dmg).
 
-See [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/BUILD-INFO.json) for the source commit and build evidence, and [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.37/SHA256SUMS.txt) for download checksums. Downloads are manual only: this release supplies no updater `.sig` files, `latest.json` update feed, or portable executable.
+See [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/BUILD-INFO.json) for the source commit and build evidence, and [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.38/SHA256SUMS.txt) for download checksums. Downloads are manual only: this release supplies no updater `.sig` files, `latest.json` update feed, or portable executable.
 
 To upgrade on Windows, back up important data, fully quit the app from the tray, and run the new installer over the existing installation. This keeps the existing application data; do not uninstall or delete the ledger to update. On Mac, quit the app, choose the DMG for your processor, and replace the application in `/Applications`. Existing data directories remain in use; required database upgrades and evidence-based repairs run when the app starts.
 
@@ -268,7 +268,7 @@ The separate [Mac preview workflow](.github/workflows/macos-test.yml) still runs
   all screenshots use fictional DEMO data, not real account statements.
 - [DeepSeek Harness integration](docs/integrations/deepseek-harness.md).
 - [macOS build and test guide](docs/platforms/macos.md).
-- [0.2.37 release notes](docs/release/0.2.37.md).
+- [0.2.38 release notes](docs/release/0.2.38.md).
 - [2026-11-07 audit and validation report](docs/audit-2026-11-07.md).
 - [2026-11-07 usage statistics and account attribution follow-up](docs/monitor-accuracy-audit-2026-11-07.md).
 - [2026-11-07 third review: concurrency, attribution and ledger accuracy](docs/re-review-2026-11-07.md).

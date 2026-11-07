@@ -1324,6 +1324,9 @@ export interface GrokBillingSummary {
 }
 
 export interface AccountUsageInfo {
+  /** CPA raw quota slots: no duration is guaranteed by these field names. */
+  primary_window?: UsageProgress | null
+  secondary_window?: UsageProgress | null
   source?: 'passive' | 'active'
   updated_at: string | null
   five_hour: UsageProgress | null

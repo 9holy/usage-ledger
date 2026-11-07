@@ -85,6 +85,8 @@ pub struct DepletionEstimate {
 pub struct QuotaSourceStatus {
     tool: String,
     source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_instance: Option<String>,
     status: String,
     error: Option<String>,
     coverage: Option<BootstrapCoverage>,
@@ -242,7 +244,62 @@ pub fn codex_observations(
         .collect()
 }
 
+const OFFICIAL_CODEX_CHECK_PREFIX: &str = "official_codex_quota_check:";
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OfficialCodexQuotaCheck {
+    observed_at_ms: i64,
+    error: Option<String>,
+}
+
+fn official_codex_checks(conn: &Connection) -> Result<BTreeMap<String, OfficialCodexQuotaCheck>, String> {
+    let mut statement = conn.prepare("SELECT key,data FROM monitor_state WHERE key GLOB 'official_codex_quota_check:*'")
+        .map_err(|error| error.to_string())?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?;
+    rows.map(|row| {
+        let (key, data) = row.map_err(|error| error.to_string())?;
+        let check = serde_json::from_str(&data).map_err(|error| error.to_string())?;
+        Ok((key.trim_start_matches(OFFICIAL_CODEX_CHECK_PREFIX).to_owned(), check))
+    }).collect()
+}
+
+fn save_official_codex_check(conn: &Connection, account: &str, now: i64, failed: bool) -> Result<(), String> {
+    if account.trim().is_empty() || now <= 0 {
+        return Err("Official quota has no valid account observation".into());
+    }
+    let check = OfficialCodexQuotaCheck {
+        observed_at_ms: now,
+        // Transport errors may contain URLs or credentials. Only a fixed safe
+        // message crosses the data boundary; this is not a new quota reading.
+        error: failed.then(|| "Official Codex quota refresh failed".into()),
+    };
+    conn.execute("INSERT INTO monitor_state(key,data) VALUES(?1,?2)
+        ON CONFLICT(key) DO UPDATE SET data=excluded.data
+        WHERE COALESCE(json_extract(excluded.data,'$.observedAtMs'),0)>=COALESCE(json_extract(monitor_state.data,'$.observedAtMs'),0)",
+        params![format!("{OFFICIAL_CODEX_CHECK_PREFIX}account:{account}"), serde_json::to_string(&check).map_err(|error| error.to_string())?])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(super) fn authenticated_codex_unavailable(conn: &Connection, account: &str, now: i64) -> Result<(), String> {
+    save_official_codex_check(conn, account, now, true)
+}
+
 pub(super) fn save_authenticated_codex(conn: &Connection, account: &str, payload: &Value, now: i64) -> Result<(), String> {
+    let transaction = if conn.is_autocommit() {
+        Some(rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?)
+    } else { None };
+    let account_key = format!("account:{account}");
+    let last_check = official_codex_checks(conn)?.remove(&account_key);
+    let latest_observation: Option<i64> = conn.query_row(
+        "SELECT MAX(observed_ms) FROM monitor_quotas WHERE tool='codex' AND account_key=?1 AND json_extract(data,'$.source')='codex_official_usage'",
+        [&account_key], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if last_check.is_some_and(|check| check.observed_at_ms > now) || latest_observation.is_some_and(|time| time > now) {
+        return Ok(());
+    }
     let mut limits = serde_json::json!({"limit_id":"codex","plan_type":payload["plan_type"],"credits":payload["credits"]});
     for (slot, key) in [("primary","primary_window"),("secondary","secondary_window")] {
         let window = &payload["rate_limit"][key];
@@ -250,13 +307,32 @@ pub(super) fn save_authenticated_codex(conn: &Connection, account: &str, payload
             limits[slot] = serde_json::json!({"window_minutes":seconds/60,"resets_at":window["reset_at"],"used_percent":window["used_percent"]});
         }
     }
-    for mut observation in codex_observations(&serde_json::json!({"rate_limits":limits}),Some(account),"",Some(now)) {
-        observation.account_key = format!("account:{account}");
+    let observations = codex_observations(&serde_json::json!({"rate_limits":limits}),Some(account),"",Some(now));
+    let current_windows: Vec<_> = observations.iter().map(|observation| (observation.slot.clone(), observation.window_minutes.unwrap_or(-1))).collect();
+    for mut observation in observations {
+        observation.account_key = account_key.clone();
         observation.attribution = "account".into();
         observation.source = "codex_official_usage".into();
         observation.billing_account_verified = Some(true);
         save(conn,&observation)?;
     }
+    // This endpoint returns a snapshot, not a sparse update. Missing/null slots
+    // and changed durations retire the prior windows without deleting history
+    // or changing the time/percentage of any earlier observation.
+    let mut statement = conn.prepare(
+        "SELECT id,slot,window_minutes FROM monitor_quotas WHERE tool='codex' AND account_key=?1
+          AND json_extract(data,'$.source')='codex_official_usage' AND COALESCE(observed_ms,0)<=?2",
+    ).map_err(|error| error.to_string())?;
+    let rows = statement.query_map(params![account_key, now], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))
+        .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    for (id, slot, minutes) in rows {
+        if !current_windows.contains(&(slot, minutes)) {
+            conn.execute("UPDATE monitor_quotas SET data=json_set(data,'$.source_error','Official quota window not reported by the latest successful check') WHERE id=?1", [id])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    save_official_codex_check(conn, account, now, false)?;
+    if let Some(transaction) = transaction { transaction.commit().map_err(|error| error.to_string())?; }
     Ok(())
 }
 
@@ -338,6 +414,17 @@ pub fn save(conn: &Connection, observation: &QuotaObservation) -> Result<(), Str
             ],
         )
         .map_err(|e| e.to_string())?;
+    }
+    if id.is_none() && observation.source == "cockpit_snapshot" {
+        // A failed source probe can retain exactly the previous quota timestamp.
+        // Refresh only its error evidence, never the recorded percentage or time.
+        conn.execute("UPDATE monitor_quotas SET data=json_set(data,'$.source_error',json(?1))
+            WHERE tool=?2 AND account_key=?3 AND limit_id=?4 AND slot=?5 AND window_minutes=?6
+              AND observed_ms IS ?7 AND json_extract(data,'$.source')='cockpit_snapshot'",
+            params![serde_json::to_string(&observation.source_error).map_err(|error| error.to_string())?,
+                observation.tool, observation.account_key, observation.limit_id, observation.slot,
+                observation.window_minutes.unwrap_or(-1), observation.observed_at_ms])
+            .map_err(|error| error.to_string())?;
     }
     if let Some(transaction) = transaction { transaction.commit().map_err(|e| e.to_string())?; }
     Ok(())
@@ -506,7 +593,15 @@ fn prune_samples(conn: &Connection, now_ms: i64) -> Result<(), String> {
     Ok(())
 }
 
-fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str) -> QuotaObservation {
+fn cockpit_account_in_scope(account_key: &str, instance: &str) -> bool {
+    if instance == "local" {
+        account_key.starts_with("cockpit:") && !account_key.starts_with("cockpit:instance:")
+    } else {
+        account_key.starts_with(&format!("cockpit:instance:{instance}:"))
+    }
+}
+
+fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str, instance: &str) -> QuotaObservation {
     use crate::cockpit_quota::QuotaWindowKind;
     let window_minutes = match row.window_kind {
         QuotaWindowKind::FiveHour => Some(300),
@@ -520,7 +615,8 @@ fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str) -> QuotaOb
     };
     QuotaObservation {
         tool: tool.into(),
-        account_key: format!("cockpit:{}", row.account_id),
+        account_key: if instance == "local" { format!("cockpit:{}", row.account_id) }
+            else { format!("cockpit:instance:{instance}:{}", row.account_id) },
         account_label: row.email.chars().next().map(|c| format!("{c}***")),
         attribution: "account".into(),
         limit_id,
@@ -535,7 +631,7 @@ fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str) -> QuotaOb
         credits: None,
         source: "cockpit_snapshot".into(),
         billing_account_verified: None,
-        source_error: row.unavailable_reason,
+        source_error: row.source_error.or(row.unavailable_reason),
         stale_after_ms: if row.raw_kind == crate::cockpit_quota::SUBDIR_QUOTA_DESKTOP {
             60_000
         } else {
@@ -546,6 +642,7 @@ fn from_cockpit(row: crate::cockpit_quota::QuotaSnapshot, tool: &str) -> QuotaOb
 
 pub fn collect_offline(conn: &Connection) -> Result<(), String> {
     prune_samples(conn, crate::ledger_db::now_ms())?;
+    let instance = crate::cockpit_data_path::source_instance_id()?;
     let mut sources = Vec::new();
     for (tool, channel) in [
         ("claude", crate::cockpit_quota::CH_CLAUDE),
@@ -553,7 +650,11 @@ pub fn collect_offline(conn: &Connection) -> Result<(), String> {
     ] {
         let (status, error) = match crate::cockpit_quota::quota_snapshots(channel.into()) {
             Ok(rows) => {
-                let error = rows.iter().find_map(|row| row.source_error.clone());
+                if crate::cockpit_data_path::source_instance_id()? != instance {
+                    return Err("Cockpit quota source changed during collection".into());
+                }
+                let failures = rows.iter().filter(|row| row.source_error.is_some() || row.unavailable_reason.is_some()).count();
+                let error = (failures > 0).then(|| format!("{failures} quota readings unavailable; other account readings are retained"));
                 let status = if rows.is_empty() {
                     "not_reported"
                 } else if error.is_some() {
@@ -562,23 +663,46 @@ pub fn collect_offline(conn: &Connection) -> Result<(), String> {
                     "available"
                 };
                 for row in rows {
-                    save(conn, &from_cockpit(row, tool))?;
+                    save(conn, &from_cockpit(row, tool, &instance))?;
                 }
                 (status, error)
             }
-            Err(error) => ("error", Some(error)),
+            Err(error) => {
+                if crate::cockpit_data_path::source_instance_id()? != instance {
+                    return Err("Cockpit quota source changed during collection".into());
+                }
+                ("error", Some(error))
+            },
         };
+        if status == "error" {
+            // Keep a failed source historical even after the user selects a
+            // different root and the aggregate source-status entry changes.
+            // A later successful save clears only this scope's error metadata.
+            conn.execute(
+                "UPDATE monitor_quotas SET data=json_set(data,'$.source_error',
+                    COALESCE(json_extract(data,'$.source_error'),?1))
+                 WHERE tool=?2 AND json_extract(data,'$.source')='cockpit_snapshot'
+                   AND ((?3='local' AND account_key LIKE 'cockpit:%' AND account_key NOT LIKE 'cockpit:instance:%')
+                     OR (?3<>'local' AND substr(account_key,1,length(?4))=?4))",
+                params!["Cockpit source refresh failed; previous readings remain historical",
+                    tool, instance, format!("cockpit:instance:{instance}:")],
+            ).map_err(|error| error.to_string())?;
+        }
         if status != "available" {
             conn.execute(
                 "DELETE FROM monitor_quota_samples WHERE quota_id IN
-                (SELECT id FROM monitor_quotas WHERE tool=?1 AND account_key LIKE 'cockpit:%')",
-                [tool],
+                (SELECT id FROM monitor_quotas WHERE tool=?1
+                  AND ((?2='local' AND account_key LIKE 'cockpit:%' AND account_key NOT LIKE 'cockpit:instance:%')
+                    OR (?2<>'local' AND substr(account_key,1,length(?3))=?3))
+                  AND (?4 OR json_extract(data,'$.source_error') IS NOT NULL))",
+                params![tool, instance, format!("cockpit:instance:{instance}:"), status == "error"],
             )
             .map_err(|e| e.to_string())?;
         }
         sources.push(QuotaSourceStatus {
             tool: tool.into(),
             source: "cockpit_snapshot".into(),
+            source_instance: Some(instance.clone()),
             status: status.into(),
             error,
             coverage: None,
@@ -637,6 +761,7 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
         .transpose()
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
+    let official_checks = official_codex_checks(conn)?;
     let report_identities = ["codex", "claude", "antigravity", "deepseek-harness"]
         .into_iter()
         .map(|tool| account_report_identities(conn, tool).map(|ids| (tool, ids)))
@@ -672,10 +797,20 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
             || observation
                 .observed_at_ms
                 .is_none_or(|time| now_ms.saturating_sub(time) > observation.stale_after_ms);
-        let source_error = observation.source_error.clone().or_else(|| {
+        let official_error = (observation.source == "codex_official_usage").then(|| {
+            official_checks.get(&observation.account_key)
+                .filter(|check| observation.observed_at_ms.is_none_or(|observed| check.observed_at_ms >= observed))
+                .and_then(|check| check.error.clone())
+        }).flatten();
+        let source_error = observation.source_error.clone().or(official_error).or_else(|| {
+            // Official status is per account. Its aggregate source warning must
+            // never mark another account's successful observation as failed.
+            if observation.source == "codex_official_usage" { return None; }
             sources
                 .iter()
-                .find(|s| s.tool == observation.tool && s.source == observation.source)
+                .find(|s| s.tool == observation.tool && s.source == observation.source
+                    && (observation.source != "cockpit_snapshot" || (s.status == "error"
+                        && cockpit_account_in_scope(&observation.account_key, s.source_instance.as_deref().unwrap_or("local")))))
                 .and_then(|s| s.error.clone())
         });
         let stale = stale || source_error.is_some();
@@ -726,6 +861,18 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
             depletion,
         });
     }
+    if !official_checks.is_empty() {
+        let failed = official_checks.values().filter(|check| check.error.is_some()).count();
+        let current = quotas.iter().any(|quota| quota.source == "codex_official_usage" && !quota.stale);
+        sources.push(QuotaSourceStatus {
+            tool: "codex".into(), source: "codex_official_usage".into(),
+            source_instance: None,
+            status: if failed == official_checks.len() { "error" } else if failed > 0 { "partial" }
+                else if current { "available" } else { "not_reported" }.into(),
+            error: (failed > 0).then(|| format!("Official quota refresh failed for {failed} account(s); previous readings remain historical")),
+            coverage: None, scope_note: None,
+        });
+    }
     let bootstrap: Option<String> = conn
         .query_row(
             "SELECT data FROM monitor_state WHERE key='quota_bootstrap_v1'",
@@ -754,6 +901,7 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
     sources.push(QuotaSourceStatus {
         tool: "codex".into(),
         source: "codex_local_log".into(),
+        source_instance: None,
         status: if reported && partial {
             "partial"
         } else if reported {
@@ -986,6 +1134,130 @@ mod tests {
     fn event(used: Value) -> Value {
         json!({"type":"token_count","info":null,"rate_limits":{"limit_id":"codex",
             "primary":{"used_percent":used,"window_minutes":10080,"resets_at":2000},"secondary":null}})
+    }
+
+    fn contract_cockpit_account(root: &Path, id: &str, used: i32, observed: i64, failed: bool) {
+        let directory = root.join("claude_accounts");
+        std::fs::create_dir_all(&directory).unwrap();
+        let payload = json!({"id":id,"email":format!("{id}@example.test"),"usage_updated_at":observed,
+            "quota_query_last_error":if failed { "retained fixture failure" } else { "" },
+            "quota":{"five_hour_percentage":used,"seven_day_percentage":used,
+                "five_hour_reset_time":(observed + 18_000_000)/1000,
+                "seven_day_reset_time":(observed + 604_800_000)/1000}});
+        std::fs::write(directory.join(format!("{id}.json")), payload.to_string()).unwrap();
+    }
+
+    #[test]
+    fn contract_audit_cockpit_roots_keep_same_raw_account_separate_and_default_identity_stable() {
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let now = crate::ledger_db::now_ms();
+        let fixture = std::env::temp_dir().join(format!("monitor-quota-scope-{}-{now}", std::process::id()));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let _profile = crate::EnvGuard::set("USERPROFILE", &fixture);
+        let _home = crate::EnvGuard::set("HOME", &fixture);
+        let _dev = crate::EnvGuard::remove("COCKPIT_TOOLS_PROFILE");
+        let conn = db();
+        let first = fixture.join("first");
+        let second = fixture.join("second");
+        contract_cockpit_account(&first, "same", 20, now, false);
+        contract_cockpit_account(&second, "same", 70, now + 1000, false);
+        {
+            let _root = crate::EnvGuard::set("COCKPIT_TOOLS_DATA_DIR", &first);
+            collect_offline(&conn).unwrap();
+        }
+        {
+            let _root = crate::EnvGuard::set("COCKPIT_TOOLS_DATA_DIR", &second);
+            collect_offline(&conn).unwrap();
+        }
+        assert_eq!(conn.query_row("SELECT COUNT(DISTINCT account_key) FROM monitor_quotas WHERE tool='claude'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        let report = read(&conn, now + 1001).unwrap();
+        assert_eq!(report.quotas.iter().filter(|quota| quota.tool == "claude").count(), 4);
+        // The provider exposes a fraction through 1 - remaining; compare the
+        // round trip at floating-point precision without rounding source data.
+        assert_eq!(report.quotas.iter().filter(|quota| quota.used_percent.is_some_and(|used| (used - 20.0).abs() < 1e-9)).count(), 2);
+        assert_eq!(report.quotas.iter().filter(|quota| quota.used_percent == Some(70.0)).count(), 2);
+        contract_cockpit_account(&fixture.join(".cockpit_tools"), "same", 10, now + 2000, false);
+        {
+            let _root = crate::EnvGuard::remove("COCKPIT_TOOLS_DATA_DIR");
+            collect_offline(&conn).unwrap();
+        }
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_quotas WHERE account_key='cockpit:same'", [], |row| row.get::<_, i64>(0)).unwrap(), 0,
+            "independent modern stores cannot claim the historical legacy account key");
+        assert_eq!(conn.query_row("SELECT COUNT(DISTINCT account_key) FROM monitor_quotas WHERE tool='claude'", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+        contract_cockpit_account(&fixture.join(".antigravity_cockpit"), "same", 30, now + 3000, false);
+        {
+            let _root = crate::EnvGuard::remove("COCKPIT_TOOLS_DATA_DIR");
+            collect_offline(&conn).unwrap();
+        }
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_quotas WHERE account_key='cockpit:same'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
+        assert_eq!(conn.query_row("SELECT COUNT(DISTINCT account_key) FROM monitor_quotas WHERE tool='claude'", [], |row| row.get::<_, i64>(0)).unwrap(), 4);
+        assert_eq!(read(&conn, now + 3001).unwrap().quotas.len(), 8);
+        let _ = std::fs::remove_dir_all(fixture);
+    }
+
+    #[test]
+    fn contract_audit_cockpit_row_errors_and_full_source_failure_do_not_cross_accounts_or_roots() {
+        let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let now = crate::ledger_db::now_ms();
+        let fixture = std::env::temp_dir().join(format!("monitor-quota-errors-{}-{now}", std::process::id()));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let _profile = crate::EnvGuard::set("USERPROFILE", &fixture);
+        let _home = crate::EnvGuard::set("HOME", &fixture);
+        let _dev = crate::EnvGuard::remove("COCKPIT_TOOLS_PROFILE");
+        let conn = db();
+        let first = fixture.join("first");
+        let second = fixture.join("second");
+        contract_cockpit_account(&first, "good", 0, now, false);
+        contract_cockpit_account(&first, "bad", 40, now, true);
+        {
+            let _root = crate::EnvGuard::set("COCKPIT_TOOLS_DATA_DIR", &first);
+            collect_offline(&conn).unwrap();
+        }
+        let report = read(&conn, now + 1).unwrap();
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "g***").all(|quota| !quota.stale && quota.source_error.is_none() && quota.used_percent == Some(0.0)));
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "b***").all(|quota| quota.stale && quota.source_error.is_some() && quota.used_percent == Some(40.0)));
+        assert_eq!(report.quotas.len(), 4);
+        contract_cockpit_account(&second, "other", 70, now, false);
+        {
+            let _root = crate::EnvGuard::set("COCKPIT_TOOLS_DATA_DIR", &second);
+            collect_offline(&conn).unwrap();
+            std::fs::write(second.join("claude_accounts/other.json"), "invalid-json").unwrap();
+            collect_offline(&conn).unwrap();
+        }
+        let report = read(&conn, now + 2).unwrap();
+        assert_eq!(report.quotas.len(), 6);
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "g***").all(|quota| quota.source_error.is_none()));
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "o***").all(|quota| quota.stale && quota.source_error.is_some() && quota.observed_at_ms == Some(now) && quota.used_percent == Some(70.0)));
+        // Switching to a default root replaces aggregate source status, but must
+        // not erase a known failure recorded for the previous custom root.
+        contract_cockpit_account(&fixture.join(".cockpit_tools"), "default", 5, now, false);
+        {
+            let _root = crate::EnvGuard::remove("COCKPIT_TOOLS_DATA_DIR");
+            collect_offline(&conn).unwrap();
+        }
+        let report = read(&conn, now + 3).unwrap();
+        assert_eq!(report.quotas.len(), 8);
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "o***").all(|quota| quota.stale && quota.source_error.is_some() && quota.observed_at_ms == Some(now) && quota.used_percent == Some(70.0)), "switching roots must not revive a known failed reading");
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "d***").all(|quota| !quota.stale && quota.source_error.is_none() && quota.used_percent.is_some_and(|used| (used - 5.0).abs() < 1e-9)));
+        // A successful reread of the same evidence clears only that source's
+        // error without inventing a newer quota timestamp.
+        {
+            let _root = crate::EnvGuard::set("COCKPIT_TOOLS_DATA_DIR", &second);
+            contract_cockpit_account(&second, "other", 70, now, false);
+            collect_offline(&conn).unwrap();
+        }
+        let report = read(&conn, now + 4).unwrap();
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "o***").all(|quota| !quota.stale && quota.source_error.is_none() && quota.observed_at_ms == Some(now) && quota.used_percent == Some(70.0)));
+        {
+            let _root = crate::EnvGuard::set("COCKPIT_TOOLS_DATA_DIR", &second);
+            contract_cockpit_account(&second, "other", 0, now + 5000, false);
+            collect_offline(&conn).unwrap();
+        }
+        let report = read(&conn, now + 5001).unwrap();
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "o***").all(|quota| !quota.stale && quota.source_error.is_none() && quota.observed_at_ms == Some(now + 5000) && quota.used_percent == Some(0.0)));
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "b***").all(|quota| quota.stale && quota.source_error.is_some() && quota.used_percent == Some(40.0)));
+        assert!(report.quotas.iter().filter(|quota| quota.account_label == "g***" || quota.account_label == "d***").all(|quota| !quota.stale && quota.source_error.is_none()));
+        let _ = std::fs::remove_dir_all(fixture);
     }
 
     // Cycle, credit and trend arithmetic fixtures represent directly authenticated

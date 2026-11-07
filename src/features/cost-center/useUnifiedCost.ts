@@ -5,6 +5,7 @@ import { ref, computed, type Ref } from 'vue'
 import { isDesktopRuntime } from '@/api/url'
 import { useConnectionStore, type ConnectionConfig } from '@/stores/connection'
 import {
+  getCockpitSourceIdentity,
   getCockpitStats,
   getCockpitCodexAccounts,
   getCockpitRequestLogSummary,
@@ -13,7 +14,9 @@ import {
   type CockpitCodexAccount,
   type CockpitLocalAccess,
 } from '@/api/cockpit'
+import { assertCockpitSourceIdentity, cockpitWindowSourceId } from '@/api/cockpit/sourceIdentity'
 import { getCliproxyUsageSnapshot, getCliproxyModelPrices, type CliproxyUsageSnapshot, type CliproxyUsageEvent, type LitellmPricing } from '@/api/cliproxy/cpaData'
+import { cliproxySourceInstance, scopedCliproxyEvents, cliproxyWindowSourceId } from '@/api/cliproxy/sourceIdentity'
 import { cliproxyEventsPricedCost, pricedEventCostUsd, resolveModelPricing } from './cliproxyAdapter'
 import { cockpitSplitCostUsd, isCockpitSentinelZero } from './cockpitAdapter'
 import { cockpitEffectivePriceSets, cockpitPriceSetFor } from './cockpitPriceBook'
@@ -108,6 +111,7 @@ export interface SourceStatus {
 
 /** Raw metadata from this primary reload only; never retained for a later read. */
 export interface CockpitBatchMetadata {
+  sourceInstanceId: string
   stats?: CockpitStats
   accounts?: CockpitCodexAccount[]
   localAccess?: CockpitLocalAccess
@@ -122,6 +126,7 @@ export function useUnifiedCost(
   _cockpitCumulativeTotalUsd?: Ref<number | null>,
   _cockpitCumulativeCostBasis?: Ref<CostBasisKind | null>,
   cockpitCumulativeAccountBasis?: Ref<Record<string, CostBasisKind> | null>,
+  cockpitCumulativeSourceInstanceId?: Ref<string>,
 ) {
   const connectionStore = useConnectionStore()
   const isDesktop = isDesktopRuntime()
@@ -147,6 +152,7 @@ export function useUnifiedCost(
   const cockpitStats = ref<CockpitStats | null>(null)
   const cockpitAccounts = ref<CockpitCodexAccount[]>([])
   const cockpitAvailable = ref(false)
+  const cockpitSnapshotSourceInstanceId = ref('unavailable')
 
   // cliproxy 数据
   const cliproxyEstimate = ref<CliproxyCostEstimate | null>(null)
@@ -222,12 +228,13 @@ export function useUnifiedCost(
         // D-4 同源守卫(与 cockpitCost 同一不变式):cockpitCumulativeCost 只由视图的 cockpit 分支写
         // (CostCenterView:3629,行号基准 2026-09-23 第八轮),非 cockpit 连接下它是上一个源的残留 ⇒ 不参与自算判定,
         // 回退到本次 reload 刚读到的 stats 估算(costIsOurs 随之变 false,标注由 pricedCost 决定)。
-        const ours = activeSource.value === 'cockpit' ? cockpitCumulativeCost?.value?.[a.accountId] : undefined
+        const sameSource = activeSource.value === 'cockpit' && cockpitCumulativeSourceInstanceId?.value === cockpitSnapshotSourceInstanceId.value
+        const ours = sameSource ? cockpitCumulativeCost?.value?.[a.accountId] : undefined
         const hasOurs = typeof ours === 'number' && Number.isFinite(ours)
         // ★ 逐账号的计价依据(2026-09-23):账号金额同样是逐组求和 ⇒ 算不出来的组贡献哨兵 0
         //   ⇒ 只要有组算不出来,这个金额就只是**下界**。此前一律按 hasOurs 标 priced
         //   ⇒ 与"完全实测"长得一模一样(同一缺陷的第二个消费点)。
-        const oursBasis = activeSource.value === 'cockpit'
+        const oursBasis = sameSource
           ? cockpitCumulativeAccountBasis?.value?.[a.accountId]
           : undefined
         const oursUnknown = hasOurs && isUnknownCostBasis(oursBasis ?? 'priced')
@@ -280,7 +287,7 @@ export function useUnifiedCost(
   /** Old callers may inject arrays, but only explicit read metadata proves an empty query. */
   function setCliproxyData(events: CliproxyUsageEvent[], prices: Record<string, LitellmPricing>, snapshot?: Omit<CliproxyUsageSnapshot, 'events'>) {
     injectedPrices.value = prices
-    injectedSnapshot.value = snapshot ? { ...snapshot, events } : null
+    injectedSnapshot.value = snapshot ? { ...snapshot, events: scopedCliproxyEvents(events, snapshot) } : null
   }
 
   function setSub2apiData(connection: Pick<ConnectionConfig, 'id' | 'baseUrl'>, reading: WindowCostReading & { source: 'sub2api' }) {
@@ -303,7 +310,7 @@ export function useUnifiedCost(
     const reusableSub = sub && injectedSub?.id === sub.id && injectedSub.baseUrl === sub.baseUrl
       && injectedSub.reading.instanceId === `sub2api:${sub.id}` && injectedSub.reading.startMs === window.start.getTime() && injectedSub.reading.endMs === window.end.getTime()
       ? injectedSub.reading : null
-    const instances = { sub2api: sub ? `sub2api:${sub.id}` : 'sub2api:unconfigured', cockpit: 'cockpit:local:request_logs', cliproxy: 'cliproxy:local:cpa_usage_events' }
+    const instances = { sub2api: sub ? `sub2api:${sub.id}` : 'sub2api:unconfigured', cockpit: cockpitWindowSourceId('unavailable'), cliproxy: cliproxyWindowSourceId(cliproxySourceInstance(injectedSnapshot.value?.events ?? [], injectedSnapshot.value ?? undefined)) }
     async function read(key: UnifiedSourceKey, action: () => Promise<WindowCostReading>) {
       if (!selectedSources.value.has(key)) return
       sourceReadings.value[key] = { ...windowCostReading(key, instances[key], window), state: 'loading', get reason() { return costDataText('readingRecordedRowsForTheSameWindow') } }
@@ -311,6 +318,10 @@ export function useUnifiedCost(
         const result = await action()
         if (sequence === loadSequence) sourceReadings.value[key] = result
       } catch {
+        if (key === 'cockpit') {
+          instances.cockpit = cockpitWindowSourceId('unavailable')
+          if (sequence === loadSequence) { cockpitStats.value = null; cockpitAccounts.value = []; cockpitAvailable.value = false; cockpitSnapshotSourceInstanceId.value = 'unavailable' }
+        }
         if (sequence === loadSequence) sourceReadings.value[key] = { ...windowCostReading(key, instances[key], window), get reason() { return costDataText('readOnlyQueryFailedForThisSource') } }
       }
     }
@@ -319,13 +330,18 @@ export function useUnifiedCost(
       read('cockpit', async () => {
         const result = windowCostReading('cockpit', instances.cockpit, window)
         if (!isDesktop) return { ...result, get reason() { return costDataText('localDatabasesAreReadableOnlyInTheDesktopApp') } }
+        const { sourceInstanceId } = await getCockpitSourceIdentity()
+        instances.cockpit = cockpitWindowSourceId(sourceInstanceId)
+        result.instanceId = instances.cockpit
+        if (cockpitMetadata && cockpitMetadata.sourceInstanceId !== sourceInstanceId) throw new Error('Cockpit metadata belongs to a different source instance')
         const [summary, access, stats, accounts] = await Promise.all([
           getCockpitRequestLogSummary(1, window.start.getTime(), window.end.getTime() - 1, false),
           cockpitMetadata?.localAccess ?? getCockpitLocalAccess().catch(() => null),
           cockpitMetadata?.stats ?? getCockpitStats().catch(() => null),
           cockpitMetadata?.accounts ?? getCockpitCodexAccounts().catch(() => []),
         ])
-        if (sequence === loadSequence) { cockpitStats.value = stats; cockpitAccounts.value = accounts; cockpitAvailable.value = !!summary?.available }
+        await assertCockpitSourceIdentity(sourceInstanceId)
+        if (sequence === loadSequence) { cockpitStats.value = stats; cockpitAccounts.value = accounts; cockpitAvailable.value = !!summary?.available; cockpitSnapshotSourceInstanceId.value = sourceInstanceId }
         if (!summary?.available) return { ...result, get reason() { return costDataText('cockpitRequestStoreUnavailableCumulativeSnapshotsCannotSubstituteFor') } }
         const sets = cockpitEffectivePriceSets(access?.modelPricings)
         let cost = 0, known = 0, unknown = 0, estimated = 0
@@ -349,6 +365,7 @@ export function useUnifiedCost(
           && injectedSnapshot.value.readStartMs <= result.startMs && injectedSnapshot.value.readEndMs >= result.endMs
         const [snapshot, prices] = reusable && injectedSnapshot.value && injectedPrices.value
           ? [injectedSnapshot.value, injectedPrices.value] : await Promise.all([getCliproxyUsageSnapshot(window), getCliproxyModelPrices()])
+        result.instanceId = cliproxyWindowSourceId(cliproxySourceInstance(snapshot.events, snapshot))
         const events = snapshot.events.filter((item) => item.requested_at >= result.startMs && item.requested_at < result.endMs)
         const covered = snapshot.available && snapshot.readStartMs != null && snapshot.readEndMs != null && snapshot.readStartMs <= result.startMs && snapshot.readEndMs >= result.endMs
         if (!snapshot.available && !snapshot.events.length) return { ...result, get reason() { return costDataText('localCpaStoreUnavailableOrTheLegacyApiDoes') } }

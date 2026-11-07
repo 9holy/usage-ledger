@@ -201,6 +201,8 @@ def main():
         for key in list(env):
             if key.startswith(("MONITOR_", "USAGE_MONITOR_", "USAGE_LEDGER_", "CODEX_MODE_LOG_")):
                 env.pop(key)
+        for key in ("COCKPIT_TOOLS_DATA_DIR", "COCKPIT_TOOLS_PROFILE", "CPA_TOKEN_USAGE_DIR", "CPA_MODEL_PRICE_FILE"):
+            env.pop(key, None)
         for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"):
             env[key] = fixture
         for key, folder in (("CODEX_HOME", ".codex"), ("CLAUDE_CONFIG_DIR", ".claude"), ("DSH_HOME", ".dsh")):

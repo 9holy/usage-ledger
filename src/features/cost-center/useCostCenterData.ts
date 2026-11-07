@@ -11,6 +11,7 @@ import type {
   DashboardStats,
   ModelStat as ApiModelStat,
   PaginatedResponse,
+  UsageProgress,
   WindowStats,
 } from '@/types'
 import type { CostAccountId, SourceAccount as Account, SourceAdminUsageLog as AdminUsageLog, SourceModelStat as ModelStat } from './sourceTypes'
@@ -34,6 +35,7 @@ import { loadUsdCnyExchangeRate, getStoredUserOverrideRate, type UsdCnyExchangeR
 import { describeCurrentAccountState, type AccountProbeState } from './upstreamTable'
 import { captureAuthConnection, isAuthConnectionCurrent, getCliproxyManagementBase, getSub2apiTargetBase } from '@/api/url'
 import { aggregateSub2apiWindowLogs, type WindowCostReading } from './unifiedSourceReader'
+import type { QuotaWindowReading } from './quotaWindowState'
 import {
   COST_CENTER_SOURCE_KEYS,
   createDataSourceStates,
@@ -109,11 +111,13 @@ import {
 } from './cliproxyAdapter'
 import {
   cliproxyAuthFilesToAccounts,
+  hasCurrentCliproxyAuthState,
   cliproxyEventsToModelRoutes,
 } from './cliproxyManagementAdapter'
 import type { AuthFile, CliproxyConfig, ApiKeyUsageBucket } from '@/api/cliproxy/management'
 void (0 as unknown as AuthFile)
 import type { CliproxyUsageEvent, LitellmPricing } from '@/api/cliproxy/cpaData'
+import { cliproxySourceInstance, scopedCliproxyEvents, type CliproxySourceMetadata } from '@/api/cliproxy/sourceIdentity'
 
 export type CostCenterRange = 'today' | '1m' | '5m' | '30m' | '1h' | '6h' | '24h' | '7d' | '30d'
 
@@ -343,12 +347,6 @@ function sourceModelStats(models: Array<ModelStat | ApiModelStat>): ModelStat[] 
   }))
 }
 
-function buildOpsSnapshotRange(range: CostCenterRange): Exclude<CostCenterRange, 'today'> {
-  // Rolling ranges map directly. The natural-day range is sent with explicit
-  // local-day boundaries at the call site instead of being mislabeled as 24h.
-  return range === 'today' ? '24h' : range
-}
-
 /** 本地时间短标签(M/D HH:mm),用于截断样本覆盖起点的状态说明。 */
 function shortLocalStamp(value: Date | null): string {
   if (!value || !Number.isFinite(value.getTime())) return ''
@@ -362,6 +360,7 @@ const COCKPIT_MULTIPLIER_KEY = '__cockpit_cost_multiplier__'
 
 export function useCostCenterData() {
   const accounts = ref<Account[]>([])
+  const cockpitSourceInstanceId = ref('unavailable')
   /** cockpit 全局成本倍率(未设置成本价格时用官方价格 × 倍率作为 billed 兜底) */
   const cockpitCostMultiplier = ref(DEFAULT_COST_MULTIPLIER)
   const localCostProfiles = ref<CostProfileMap | null>(null)
@@ -496,6 +495,7 @@ export function useCostCenterData() {
   const cliproxyAuthFiles = ref<AuthFile[]>([])
   const cliproxyManagementSnapshotAt = ref<string | null>(null)
   let cliproxyManagementSnapshotSource = ''
+  const cliproxySourceInstanceId = ref('local')
   const cliproxyLocalAccountLink = ref(false)
   const cliproxyQuotaDataState = ref<'not_loaded' | 'read_unavailable' | 'not_reported' | 'reported'>('not_loaded')
   /** cliproxy 按厂商分组统计(每厂商 model 集合+请求数,保证小众厂商 sensenova 也显示,不被 topModel 吞)。 */
@@ -780,7 +780,9 @@ export function useCostCenterData() {
    * 同时收尾 loading:只有 loadFromCockpit 末尾会把它置回 false,跳过它必须自己置,
    * 否则 reload() 因 loading 恒真而永久早退,页面卡在加载态。
    */
-  function clearCockpitSourceData(reason: string) {
+  function clearCockpitSourceData(reason: string, sourceInstanceId = 'unavailable') {
+    cockpitSourceInstanceId.value = sourceInstanceId
+    modelCostAccountId.value = null
     accounts.value = []
     todayStats.value = {}
     models.value = []
@@ -908,9 +910,11 @@ export function useCostCenterData() {
       }))(),
       readAllPages((page) => adminAPI.channels.list(page, 1000, { sort_by: 'id', sort_order: 'asc' }), currentRequest),
       adminAPI.channels.getPricingStatus(),
-      adminAPI.ops.getDashboardSnapshotV2(range === 'today'
-        ? { start_time: observationStart.toISOString(), end_time: observationEnd.toISOString(), mode: 'auto' }
-        : { time_range: buildOpsSnapshotRange(range), mode: 'auto' }),
+      // The official Ops duration enum omits 1m and silently falls back to 1h.
+      // Explicit bounds also keep all ranges on the already captured usage window.
+      adminAPI.ops.getDashboardSnapshotV2({
+        start_time: observationStart.toISOString(), end_time: observationEnd.toISOString(), mode: 'auto',
+      }),
       adminAPI.settings.getSettings(),
       loadUsdCnyExchangeRate(),
     ])
@@ -1039,7 +1043,7 @@ export function useCostCenterData() {
         const usageCacheIsFresh = Date.now() - lastAccountUsageSyncAt < ACCOUNT_USAGE_CACHE_TTL_MS
         if (usageAccounts.length === 0) {
           setSourceState('accountUsage', 'empty', () => (costDataText('theCurrentAccountTypesDoNotProvideUpstreamQuota')))
-        } else if (!usageCacheIsFresh || usageAccounts.some((account) => !accountUsage.value[String(account.id)])) {
+        } else if (!usageCacheIsFresh || usageAccounts.some((account) => !accountUsage.value[String(account.id)] || sub2apiQuotaProbeFailed(accountUsage.value[String(account.id)]))) {
           const usageResults: PromiseSettledResult<AccountUsageInfo>[] = []
           let next = 0
           const worker = async () => {
@@ -1054,15 +1058,20 @@ export function useCostCenterData() {
           await Promise.all(Array.from({ length: Math.min(MAX_QUOTA_REQUESTS, usageAccounts.length) }, worker))
           if (!currentRequest()) return
           const nextUsage: Record<string, AccountUsageInfo> = {}
+          let succeeded = 0
           usageAccounts.forEach((account, index) => {
             const result = usageResults[index]
-            if (result.status === 'fulfilled') nextUsage[String(account.id)] = result.value
-            else if (accountUsage.value[String(account.id)]) nextUsage[String(account.id)] = accountUsage.value[String(account.id)]
+            const previous = accountUsage.value[String(account.id)]
+            const failed = result.status !== 'fulfilled' || sub2apiQuotaProbeFailed(result.value)
+            if (!failed) succeeded++
+            const reading = result.status === 'fulfilled' ? result.value : {
+              updated_at: null, five_hour: null, seven_day: null, seven_day_sonnet: null,
+            }
+            nextUsage[String(account.id)] = sub2apiQuotaSnapshot(reading, previous, failed)
           })
           accountUsage.value = nextUsage
-          const succeeded = usageResults.filter((result) => result.status === 'fulfilled').length
           if (succeeded === usageAccounts.length) lastAccountUsageSyncAt = Date.now()
-          const retained = usageAccounts.filter((account) => accountUsage.value[String(account.id)]).length
+          const retained = usageAccounts.filter((account) => hasSub2apiQuotaEvidence(accountUsage.value[String(account.id)])).length
           setSourceState(
             'accountUsage',
             succeeded === usageAccounts.length ? 'measured' : retained > 0 ? 'partial' : 'unavailable',
@@ -1259,10 +1268,30 @@ export function useCostCenterData() {
       ? accountIds.includes(account.id) : !platformKey || account.platform === platformKey)
     const usageState = rangeWindowAuthoritative.value ? sourceStates.value.rangeStats : sourceStates.value.todayStats
     const usageAvailable = hasMeasuredData(usageState)
-    const rows = scopedAccounts.map((account) => ({ today: rangeWindowAuthoritative.value
-      ? rangeAccountStats.value[String(account.id)] ?? null : todayStats.value[String(account.id)] ?? null }))
+    const usageById = rangeWindowAuthoritative.value ? rangeAccountStats.value : todayStats.value
+    const lossMap = new Map<CostAccountId, AccountCostLossState>(costLossStates.value.map((loss) => [loss.account_id, loss]))
+    const accountById = new Map(accounts.value.map(account => [String(account.id), account]))
+    const retainedById = new Map(costLossStates.value.filter(loss => loss.account_deleted).map(loss => [String(loss.account_id), loss]))
+    const selectedIds = new Set(accountIds.map(String))
+    const usageIds = new Set(scopedAccounts.map(account => String(account.id)))
+    let missingAccountMetadata = false
+    let unclassifiedPlatformUsage = false
+    if (!localCpa) {
+      // Sub2API soft-deletes account inventory independently of usage_logs. The
+      // request-time account_id and cost snapshots remain facts after deletion.
+      // Select from those facts, not only from the currently visible inventory.
+      for (const id of selectedIds) usageIds.add(id)
+      for (const [id, row] of Object.entries(usageById)) {
+        const metadata = accountById.get(id) ?? retainedById.get(id)
+        if (selectedIds.size ? selectedIds.has(id) : !platformKey || metadata?.platform === platformKey) usageIds.add(id)
+        else if (platformKey && !selectedIds.size && !metadata && row.requests > 0) unclassifiedPlatformUsage = true
+      }
+      missingAccountMetadata = [...usageIds].some(id => !accountById.has(id) && !retainedById.has(id)
+        && (selectedIds.has(id) || (usageById[id]?.requests ?? 0) > 0))
+    }
+    const rows = [...usageIds].map(id => ({ today: usageById[id] ?? null }))
     const unassigned = localCpa && !platformKey && !accountIds.length
-      ? (rangeWindowAuthoritative.value ? rangeAccountStats.value : todayStats.value)[UNATTRIBUTED_USAGE_ACCOUNT_ID] : null
+      ? usageById[UNATTRIBUTED_USAGE_ACCOUNT_ID] : null
     if (unassigned) rows.push({ today: unassigned })
     const activeCpaRows = rows.flatMap(row => row.today && row.today.requests > 0 ? [row.today] : [])
     const cpaAmount = (field: 'cost' | 'standard_cost', knownField: 'known_cost' | 'known_standard_cost'): number | null => {
@@ -1280,7 +1309,6 @@ export function useCostCenterData() {
       const billed = finiteOrNull(row.today.user_cost)
       return billed == null ? null : sum + billed
     }, 0)
-    const lossMap = new Map<CostAccountId, AccountCostLossState>(costLossStates.value.map((loss) => [loss.account_id, loss]))
     const localAccounts: LocalEconomicsAccount[] = scopedAccounts.map((account) => ({
       account,
       health: { successCount: 0, failureCount: 0, state: describeCurrentAccountState(account).state },
@@ -1313,6 +1341,39 @@ export function useCostCenterData() {
       if (localCpa && (unassigned || activeCpaRows.some(row => row.cost == null || row.standard_cost == null))) {
         derived.data_quality.status = 'partial'
         derived.projection.warning = costDataText('amountsIncludeKnownItemsOnlyAndUnattributedRequestsAre', { p0: derived.projection.warning ?? '' })
+      }
+      if (!localCpa) {
+        const incompleteWindow = usageState.status === 'partial' || usageState.status === 'stale' || unclassifiedPlatformUsage
+        const incompleteProcurement = missingAccountMetadata || unclassifiedPlatformUsage
+          || sourceStates.value.accounts.status === 'partial' || sourceStates.value.accounts.status === 'stale'
+        if (incompleteWindow || incompleteProcurement) {
+          derived.data_quality.status = 'partial'
+          derived.projection.warning = [
+            incompleteProcurement ? costDataText('sub2apiUsageMissingAccountMetadata') : '',
+            incompleteWindow ? costDataText('sub2apiIncompleteEconomicsWindow') : '',
+          ].filter(Boolean).join(' ')
+          // Keep recorded billing and account-rate facts. Missing metadata is
+          // not a free procurement profile and cannot establish profit/payback.
+          derived.actual.contribution_margin_cny = null
+          derived.actual.cny_per_billed_usd = null
+          derived.actual.payback_ratio = null
+          derived.actual.projected_contribution_cny_per_hour = null
+          derived.actual.estimated_payback_hours = null
+          derived.projection.confidence = 'unavailable'
+          derived.projection.capacity_adjusted_billed_usd_per_hour = null
+          derived.projection.capacity_adjusted_account_cost_usd_per_hour = null
+          if (incompleteProcurement) {
+            // Lifetime procurement_accrued_cny remains the known profile
+            // subtotal; the warning explicitly disclaims a complete total.
+            derived.actual.window_procurement_cny = null
+            derived.actual.economic_cost_cny = null
+            derived.actual.window_economic_cost_cny = null
+          }
+          if (incompleteWindow) {
+            derived.projection.billed_usd_per_hour = null
+            derived.projection.account_cost_usd_per_hour = null
+          }
+        }
       }
     }
     return derived
@@ -1448,7 +1509,15 @@ export function useCostCenterData() {
      */
     windowTtft?: { p50Ms: number | null; p95Ms: number | null } | null,
     queryWindow = usageWindowBounds(range),
+    sourceInstanceId = 'local',
   ) {
+    if (!sourceInstanceId.trim()) throw new Error('Cockpit source identity is required')
+    if (cockpitSourceInstanceId.value !== sourceInstanceId) {
+      if (cockpitSourceInstanceId.value !== 'unavailable' || activeSourceKey.value != null) modelCostAccountId.value = null
+      modelWindowDetached.value = false
+      probes.value = {}
+    }
+    cockpitSourceInstanceId.value = sourceInstanceId
     const retainedModelWindow = activeSourceKey.value === 'cockpit' && modelWindowDetached.value && modelCostRange.value !== range ? {
       models: models.value, routes: modelRoutes.value, audit: modelAuditSummary.value,
       routesTruncated: modelRoutesTruncated.value, exactFallback: modelStatsExactWindowFallback.value,
@@ -1492,12 +1561,12 @@ export function useCostCenterData() {
     // apikey 账号 name 用渠道名映射 + baseUrl 塞 credentials(归 relay 中转,不套"OpenAI 官方")
     // accountMeta 透传修 created_at（P0 主路径，删 epoch bug）+ extra 塞 plan_type
     // quotaByAccount 驱动限流状态派生
-    accounts.value = cockpitStatsToAccounts(cockpitStats, apiKeyInfos, accountMeta, localAccess?.customRoutingRules, quotaByAccount, cockpitGroupNames)
+    accounts.value = cockpitStatsToAccounts(cockpitStats, apiKeyInfos, accountMeta, localAccess?.customRoutingRules, quotaByAccount, cockpitGroupNames, sourceInstanceId)
     // 多平台账号合并(gemini/antigravity/claude/cursor/kiro:cockpit 上游只产 codex 用量,
     // 这些平台有账号无 stats——进清单供 tabs/采购配置,用量列诚实显示无数据;按 id 去重防撞)
     if (platformAccounts.length) {
       const existingIds = new Set(accounts.value.map((a) => a.id))
-      const platformOnly = cockpitPlatformAccountsToAccounts(platformAccounts).filter((a) => !existingIds.has(a.id))
+      const platformOnly = cockpitPlatformAccountsToAccounts(platformAccounts, sourceInstanceId).filter((a) => !existingIds.has(a.id))
       if (platformOnly.length) accounts.value = [...accounts.value, ...platformOnly]
     }
     // 模型定价目录必须**先**算出来:2026-09-08 起成本由本项目按本地单价 × token 自算
@@ -1541,15 +1610,15 @@ export function useCostCenterData() {
     rangeAccountStatsComplete.value = rlAvailable
 
     todayStats.value = rlTodayAvailable
-      ? cockpitRequestLogToAccountStats(todayRequestLog!, priceSets, cockpitCostMultiplier.value)
-      : cockpitWindowToAccountStats(cockpitStats.daily, cockpitCostMultiplier.value, localPricing)
+      ? cockpitRequestLogToAccountStats(todayRequestLog!, priceSets, cockpitCostMultiplier.value, sourceInstanceId)
+      : cockpitWindowToAccountStats(cockpitStats.daily, cockpitCostMultiplier.value, localPricing, sourceInstanceId)
     // 观察窗口逐账号用量(2026-09-04 修复"观察窗口设置不生效"):
     // 实测 daily 窗口可能只有 1 个账号(自然日刚重置),而 weekly 有 33 / monthly 有 28——
     // 上游排行表若固定读 daily,用户切到 7d/30d 看到的仍是同一份"今日"数据,窗口切换形同无效。
     // 这里额外按当前 range 取窗口,供上游排行的成本/产出/请求/Token 列使用。
     rangeAccountStats.value = rlAvailable
-      ? cockpitRequestLogToAccountStats(requestLog!, priceSets, cockpitCostMultiplier.value)
-      : cockpitWindowToAccountStats(window, cockpitCostMultiplier.value, localPricing)
+      ? cockpitRequestLogToAccountStats(requestLog!, priceSets, cockpitCostMultiplier.value, sourceInstanceId)
+      : cockpitWindowToAccountStats(window, cockpitCostMultiplier.value, localPricing, sourceInstanceId)
     if (multiDayAccountRequests && !rlAvailable) {
       // 2026-09-05 修复"7d/30d 数据是错的":快照 weekly/monthly 是日历累计(本周一/本月1日起),
       // 冒充滚动窗口后 7d(8/31 起 5 天)数字反而大于 30d(9/1 起 4 天)。请求数改用日志聚合的
@@ -1581,7 +1650,7 @@ export function useCostCenterData() {
     // groups 是 (模型×账号),按同一来源限定 ID 过滤后,模型表/口径统计
     // 才真正只反映所选账号。未选账号(null)时原样返回,行为与改动前完全一致。
     // 注意:只作用于模型成本链路;cells 无账号维度,全局成本速率/运行趋势不受影响。
-    const modelScopedLog = filterCockpitRequestLogByAccount(requestLog ?? null, modelCostAccountId.value)
+    const modelScopedLog = filterCockpitRequestLogByAccount(requestLog ?? null, modelCostAccountId.value, sourceInstanceId)
     const rlModels = cockpitRequestLogToModelStats(modelScopedLog ?? null, priceSets, cockpitCostMultiplier.value)
     // 模型表的来源标记 + 快照留存:供模型区**独立窗口**重算复用(见 `cockpitStatsSnapshot` 注释)。
     // 标注与数值**同源**:都看「链路可用」,避免表是快照数据、标注却写"真实滚动窗口"。
@@ -1615,7 +1684,7 @@ export function useCostCenterData() {
       : window?.since != null && window?.updatedAt != null
         ? { start: new Date(window.since), end: new Date(window.updatedAt) } : null
     rangeAccountStatsWindow.value = trendQueryWindow.value
-    rangeAccountStatsScope.value = { source: 'cockpit', instanceId: 'local' }
+    rangeAccountStatsScope.value = { source: 'cockpit', instanceId: sourceInstanceId }
     rangeWindowAuthoritative.value = true
     // 窗口真实已过时长(小时):供视图把"窗口累计"折算成 $/h,口径随 range 真实变化。
     // ★★ 2026-09-24 分母修正:快照实际覆盖的区间是 `since → updatedAt`,**不是** `since → now`。
@@ -1745,12 +1814,12 @@ export function useCostCenterData() {
     opsTrendFromRequestLog.value = rlOps.length > 0
 
     // accountUsage:cockpit quota_history 配额窗口(remainingPercentage→UsageProgress)
-    accountUsage.value = cockpitQuotaToAccountUsage(quotaHistories, cockpitStats.accounts)
+    accountUsage.value = cockpitQuotaToAccountUsage(quotaHistories, cockpitStats.accounts, sourceInstanceId)
 
     // modelRoutes:优先使用覆盖完整所选窗口的 request_logs;文本日志聚合只在库不可用/无分组时回退。
     // 两条聚合路径最终都复用 cockpitOpsRoutesToModelRoutes,当天日志仅作最后兜底。
     // `routesBasis` 同时驱动数值和来源标签,避免二者各写一套优先级后再次分叉。
-    const sqlRoutes = cockpitRequestLogToModelRoutes(requestLog ?? null, accounts.value, priceSets, cockpitCostMultiplier.value, cockpitGroupNames)
+    const sqlRoutes = cockpitRequestLogToModelRoutes(requestLog ?? null, accounts.value, priceSets, cockpitCostMultiplier.value, cockpitGroupNames, sourceInstanceId)
     const routesBasis: 'requestLog' | 'multiDay' | 'todayLog' = sqlRoutes
       ? 'requestLog'
       : multiDayRoutes?.length
@@ -1762,14 +1831,14 @@ export function useCostCenterData() {
       modelAuditSummary.value = cockpitRoutesAuditSummary(sqlRoutes.totalRequests)
     } else if (routesBasis === 'multiDay') {
       const groupCost = rlAvailable
-        ? cockpitRequestLogGroupCost(requestLog!, priceSets, cockpitCostMultiplier.value)
+        ? cockpitRequestLogGroupCost(requestLog!, priceSets, cockpitCostMultiplier.value, sourceInstanceId)
         : null
-      const aggResult = cockpitOpsRoutesToModelRoutes(multiDayRoutes!, accounts.value, window?.models, cockpitCostMultiplier.value, localPricing, groupCost, cockpitGroupNames)
+      const aggResult = cockpitOpsRoutesToModelRoutes(multiDayRoutes!, accounts.value, window?.models, cockpitCostMultiplier.value, localPricing, groupCost, cockpitGroupNames, sourceInstanceId)
       modelRoutes.value = aggResult.routes
       modelRoutesTruncated.value = false
       modelAuditSummary.value = cockpitRoutesAuditSummary(aggResult.totalRequests)
     } else {
-      const routeResult = cockpitLogToModelRoutes(apiLog, accounts.value, window?.models, cockpitCostMultiplier.value, localPricing, cockpitGroupNames)
+      const routeResult = cockpitLogToModelRoutes(apiLog, accounts.value, window?.models, cockpitCostMultiplier.value, localPricing, cockpitGroupNames, sourceInstanceId)
       modelRoutes.value = routeResult.routes
       modelRoutesTruncated.value = routeResult.truncated
       modelAuditSummary.value = summarizeModelAudit(routeResult.logs)
@@ -1959,7 +2028,7 @@ export function useCostCenterData() {
     const sets = cockpitModelPriceSets.value
     const mult = cockpitCostMultiplier.value
     // 「成本账号」筛选同样作用于独立窗口重算(与主窗口同一套来源限定 ID)。
-    const scopedLog = filterCockpitRequestLogByAccount(requestLog, modelCostAccountId.value)
+    const scopedLog = filterCockpitRequestLogByAccount(requestLog, modelCostAccountId.value, cockpitSourceInstanceId.value)
     const rlModels = cockpitRequestLogToModelStats(scopedLog, sets, mult)
     // ★ 2026-09-25:与 :1290 同源 —— 标注与数值都看「链路可用」,不用 `rlModels.length`
     //   (那会把「该窗口 0 行」当成「该回退日历快照」)。
@@ -1980,13 +2049,13 @@ export function useCostCenterData() {
       : modelCostAccountId.value == null
         ? cockpitModelsToModelStats(modelWindow, mult, modelPricing.value)
         : []
-    const sqlRoutes = cockpitRequestLogToModelRoutes(requestLog, accounts.value, sets, mult, cockpitGroupNameMap.value)
+    const sqlRoutes = cockpitRequestLogToModelRoutes(requestLog, accounts.value, sets, mult, cockpitGroupNameMap.value, cockpitSourceInstanceId.value)
     if (sqlRoutes) {
       modelRoutes.value = sqlRoutes.routes
       modelRoutesTruncated.value = false
       modelAuditSummary.value = cockpitRoutesAuditSummary(sqlRoutes.totalRequests)
     } else if (routes?.length) {
-      const agg = cockpitOpsRoutesToModelRoutes(routes, accounts.value, undefined, mult, modelPricing.value, null, cockpitGroupNameMap.value)
+      const agg = cockpitOpsRoutesToModelRoutes(routes, accounts.value, undefined, mult, modelPricing.value, null, cockpitGroupNameMap.value, cockpitSourceInstanceId.value)
       modelRoutes.value = agg.routes
       modelRoutesTruncated.value = false
       modelAuditSummary.value = cockpitRoutesAuditSummary(agg.totalRequests)
@@ -2057,7 +2126,17 @@ export function useCostCenterData() {
     queryNow = new Date(),
     usageReadAvailable?: boolean,
     managementReadError?: string | (() => string) | null,
+    sourceMetadata?: CliproxySourceMetadata,
   ) {
+    const sourceInstance = cliproxySourceInstance(events, sourceMetadata)
+    events = scopedCliproxyEvents(events, sourceMetadata)
+    if (sourceInstance !== cliproxySourceInstanceId.value) {
+      probes.value = {}
+      lastAccountUsageSyncAt = 0
+      accountUsageScope = ''
+      economicsRequestSequence += 1
+    }
+    cliproxySourceInstanceId.value = sourceInstance
     // 切到 cliproxy 源时先清掉 cockpit 的窗口快照与派生序列 —— 这条路径不经过 reload(),
     // 否则 cockpit→cliproxy 同进程切换后,号池表成本/请求列与健康图会继续显示 cockpit 的数字,
     // 而表头标的是 cliproxy 的 rangeLabel(数据跨源 + 标签不符)。
@@ -2067,18 +2146,19 @@ export function useCostCenterData() {
     cliproxyQueryNow = queryNow
     // 存真实数据源:auth-files(账号实体) + api-key-usage(全局成功率,仪表盘同款)
     const managementTarget = getCliproxyManagementBase()
+    const managementSource = JSON.stringify([managementTarget, sourceInstance])
     if (managementReadError) {
-      if (cliproxyManagementSnapshotSource !== managementTarget) {
+      if (cliproxyManagementSnapshotSource !== managementSource) {
         cliproxyAuthFiles.value = []
         cliproxyManagementSnapshotAt.value = null
       }
       authFiles = cliproxyAuthFiles.value
     } else {
       cliproxyAuthFiles.value = authFiles
-      cliproxyManagementSnapshotSource = managementTarget
+      cliproxyManagementSnapshotSource = managementSource
       cliproxyManagementSnapshotAt.value = queryNow.toISOString()
     }
-    const localAccountLink = isLocalCliproxyTarget(managementTarget)
+    const localAccountLink = sourceInstance === 'local' && sourceMetadata?.managementLinkAllowed !== false && isLocalCliproxyTarget(managementTarget)
     cliproxyLocalAccountLink.value = localAccountLink
     cliproxyKeyUsage.value = localAccountLink ? keyUsage : {}
     // vendorMap:LiteLLM litellm_provider 反查(model→真实厂商:智谱/深度求索/商汤/月之暗面)
@@ -2089,7 +2169,7 @@ export function useCostCenterData() {
     cliproxyReasoningEfforts.value = cliproxyEventsToReasoningEfforts(events, range, queryNow)
     // 账号:两源合并——auth-files(11 个真实配置,antigravity/codex/grok) + CPA events 聚合(36 个请求账号,智谱/sensenova/deepseek)
     // 两套 auth_index 不重叠,合并后分组 tabs + 号池表行都两源显示
-    const attributedEvents = events.filter(event => !!event.auth_index)
+    const attributedEvents = events.filter(event => !!event.auth_index?.trim())
     const authFileAccounts = localAccountLink ? cliproxyAuthFilesToAccounts(authFiles, attributedEvents) : []
     const managementIndexes = new Set(localAccountLink ? authFiles.map(file => file.auth_index).filter(index => !!index?.trim()) : [])
     const eventAccounts = cliproxyEventsToAccounts(attributedEvents.filter(event => !managementIndexes.has(event.auth_index)), vendorMap)
@@ -2128,7 +2208,7 @@ export function useCostCenterData() {
     trendBucketHours.value = costTrendBucketHours(range)
     trendQueryWindow.value = cliproxyUsageWindowBounds(range, queryNow)
     rangeAccountStatsWindow.value = trendQueryWindow.value
-    rangeAccountStatsScope.value = { source: 'cliproxy', instanceId: 'local' }
+    rangeAccountStatsScope.value = { source: 'cliproxy', instanceId: sourceInstance }
     trendUsesAccountCost.value = true
 
     // accountUsage:CPA primary_used_percent,与 events 账号 id 一致(auth-files 账号无此数据,row.usage 显示无)
@@ -2146,7 +2226,7 @@ export function useCostCenterData() {
     }
     cliproxyLatencyMap.value = {}
     for (const [authIndex, value] of latestPerAuth) {
-      cliproxyLatencyMap.value[authIndexToAccountId(authIndex)] = value.latency
+      cliproxyLatencyMap.value[authIndexToAccountId(authIndex, sourceInstance)] = value.latency
     }
 
     // ops:CPA 持续采集 latency/ttft/failed/status_code,cliproxy 现在能做 ops(不再 unavailable)
@@ -2168,7 +2248,7 @@ export function useCostCenterData() {
     // 转成 ModelRouteRow 子集填 modelRoutes(让 view 的"真实模型/接口明细"表渲染)
     // CPA 无响应声明模型/渠道/分组维度,这些列显示"—"或"无",诚实降级
     modelRoutes.value = cpRoutes.map((r) => ({
-      key: JSON.stringify([r.model, r.requestedModel, r.authIndex, r.provider]),
+      key: JSON.stringify([r.model, r.requestedModel, r.authIndex, r.provider, sourceInstance]),
       requestedModel: r.requestedModel,
       upstreamModel: r.model,
       upstreamResponseModel: '',
@@ -2244,7 +2324,13 @@ export function useCostCenterData() {
         () => (`${typeof managementReadError === 'function' ? managementReadError() : managementReadError}${previous ? costDataText('keepingTheAccountSnapshotFrom', { p0: previous }) : costDataText('managementAccountsHaveNotBeenObtainedProcurementCannotBe')}`),
         previous ? new Date(previous) : null)
     } else {
-      setSourceState('accounts', accounts.value.length ? 'measured' : 'empty', () => (accounts.value.length ? costDataText('localHistoricalUsageIdentitiesHistoricalRequestStatusDoesNot', { p0: authFileAccounts.length, p1: localAccountLink ? costDataText('localManagementEntities') : costDataText('linkedManagementEntities'), p2: eventAccounts.length }) : costDataText('noCpaAccountsOrUsageIdentities')))
+      setSourceState('accounts', accounts.value.length ? 'measured' : 'empty', () => (accounts.value.length ? costDataText('localHistoricalUsageIdentitiesHistoricalRequestStatusDoesNot', { p0: localAccountLink ? authFiles.filter(hasCurrentCliproxyAuthState).length : 0, p1: localAccountLink ? costDataText('localManagementEntities') : costDataText('linkedManagementEntities'), p2: accounts.value.filter(account => account.extra?.cliproxy_identity_source === 'usage_only').length }) : costDataText('noCpaAccountsOrUsageIdentities')))
+    }
+    const slotSourceState = sourceStates.value.accounts
+    const incompleteCurrentState = localAccountLink && authFiles.some(file => !hasCurrentCliproxyAuthState(file))
+    sourceStates.value.accounts = { ...slotSourceState,
+      status: incompleteCurrentState && !managementReadError ? 'partial' : slotSourceState.status,
+      get reason() { return `${slotSourceState.reason} ${costDataText('cpaSlotIdentityBoundary')}${incompleteCurrentState ? ` ${costDataText('cpaCurrentHealthUnavailable')}` : ''}` },
     }
     setSourceState('todayStats', Object.keys(todayStats.value).length ? 'measured' : 'empty', () => (Object.keys(todayStats.value).length ? costDataText('cpaWindowRequestUsageLoadedEventsAccountDimension') : costDataText('noCpaRequestUsage')))
     setSourceState('dashboard', trend.value.length ? 'measured' : 'empty', () => (trend.value.length ? costDataText('cpaUsageEventsAggregatedIntoRecordedTimeSeriesBuckets') : costDataText('noCpaTimeSeriesSamplesInThisWindow')))
@@ -2542,6 +2628,7 @@ export function useCostCenterData() {
     invalidatePendingRequest,
     loadAccountEconomics,
     loadFromCockpit,
+    cockpitSourceInstanceId,
     loadFromCliproxy,
     refreshPricingCatalog,
     saveCostProfile,
@@ -2552,6 +2639,7 @@ export function useCostCenterData() {
     cliproxyUsageSummary,
     cliproxyAuthFiles,
     cliproxyManagementSnapshotAt,
+    cliproxySourceInstanceId,
     cliproxyLocalAccountLink,
     cliproxyQuotaDataState,
     cliproxyVendorStats,
@@ -2577,4 +2665,66 @@ export function accountUsageSource(account: Pick<Account, 'platform' | 'type'>):
   return account.platform === 'anthropic' && (account.type === 'oauth' || account.type === 'setup-token')
     ? 'passive'
     : 'active'
+}
+
+// Official Sub2API can return a degraded quota snapshot with HTTP 200. Its
+// updated_at may be the failed probe time, not the time of a valid quota reading.
+const SUB2API_QUOTA_PERIODS = [
+  'five_hour', 'seven_day', 'seven_day_sonnet', 'seven_day_fable', 'thirty_day',
+  'gemini_shared_daily', 'gemini_pro_daily', 'gemini_flash_daily',
+  'gemini_shared_minute', 'gemini_pro_minute', 'gemini_flash_minute',
+] as const
+
+function sub2apiQuotaProbeFailed(usage: AccountUsageInfo): boolean {
+  return (typeof usage.error === 'string' && usage.error.trim() !== '')
+    || (typeof usage.error_code === 'string' && usage.error_code.trim() !== '')
+}
+
+function validSub2apiQuotaPeriod(reading: { utilization?: unknown } | null | undefined): boolean {
+  return typeof reading?.utilization === 'number' && Number.isFinite(reading.utilization) && reading.utilization >= 0
+}
+
+function hasSub2apiQuotaEvidence(usage: AccountUsageInfo): boolean {
+  return SUB2API_QUOTA_PERIODS.some(key => validSub2apiQuotaPeriod(usage[key]))
+    || Object.values(usage.antigravity_quota ?? {}).some(validSub2apiQuotaPeriod)
+    || [usage.grok_request_quota, usage.grok_token_quota].some(window =>
+      [window?.limit, window?.remaining].some(value => typeof value === 'number' && Number.isFinite(value) && value >= 0))
+}
+
+function sub2apiQuotaSnapshot(usage: AccountUsageInfo, previous: AccountUsageInfo | undefined, failed: boolean): AccountUsageInfo {
+  const message = failed ? costDataText('failedToReadChannelQuota') : null
+  // Never expose raw probe exceptions: upstream error strings may echo URLs or credentials.
+  const safeErrorCode = ['forbidden', 'unauthenticated', 'rate_limited', 'network_error'].includes(usage.error_code ?? '')
+    ? usage.error_code : 'upstream_error'
+  const next: AccountUsageInfo = { ...usage, error: message ?? undefined, error_code: failed ? safeErrorCode : undefined }
+  const annotate = <T extends { utilization: number }>(reading: T): T & QuotaWindowReading => {
+    const recorded = reading as T & QuotaWindowReading
+    return {
+      ...reading,
+      recorded_at: 'recorded_at' in recorded ? recorded.recorded_at : failed ? null : usage.updated_at ?? null,
+      snapshot_source: failed ? 'recorded' : recorded.snapshot_source,
+      snapshot_stale: failed,
+      snapshot_error: message,
+    }
+  }
+  for (const key of SUB2API_QUOTA_PERIODS) {
+    const incoming = usage[key]
+    const older = previous?.[key]
+    const reading = validSub2apiQuotaPeriod(incoming) ? incoming : failed && validSub2apiQuotaPeriod(older) ? older : incoming
+    if (reading) next[key] = annotate(reading) as UsageProgress
+  }
+  const models = new Set([...Object.keys(usage.antigravity_quota ?? {}), ...(failed ? Object.keys(previous?.antigravity_quota ?? {}) : [])])
+  if (models.size) {
+    next.antigravity_quota = Object.fromEntries([...models].flatMap(model => {
+      const incoming = usage.antigravity_quota?.[model]
+      const older = previous?.antigravity_quota?.[model]
+      const reading = validSub2apiQuotaPeriod(incoming) ? incoming : failed && validSub2apiQuotaPeriod(older) ? older : incoming
+      return reading ? [[model, annotate(reading)]] : []
+    }))
+  }
+  if (failed) {
+    next.grok_request_quota ??= previous?.grok_request_quota
+    next.grok_token_quota ??= previous?.grok_token_quota
+  }
+  return next
 }

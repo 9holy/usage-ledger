@@ -18,6 +18,9 @@ const env = {
 }
 delete env.USAGE_LEDGER_REAL_DATA_AUDIT
 delete env.MONITOR_ACCOUNT_DIAGNOSTIC_COPY
+for (const key of ['COCKPIT_TOOLS_DATA_DIR', 'COCKPIT_TOOLS_PROFILE', 'CPA_TOKEN_USAGE_DIR', 'CPA_MODEL_PRICE_FILE']) {
+  delete env[key]
+}
 
 try {
   const result = spawnSync('cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--locked', '--', '--test-threads=1'], {

@@ -49,6 +49,7 @@ import {
 import type { CostCenterRange } from '../useCostCenterData'
 import type { Account, WindowStats, AdminUsageLog } from '@/types'
 import { UNATTRIBUTED_USAGE_ACCOUNT_ID } from '../model'
+import { quotaWindowState } from '../quotaWindowState'
 
 const ACCOUNT_ID = 4242
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -116,6 +117,99 @@ describe('sub2api 逐账号观察窗口统计接入', () => {
     return data
   }
 
+  it('sends an explicit one-minute Ops window instead of triggering the official unsupported-range fallback to one hour', async () => {
+    const end = Date.now()
+    // Upstream parseOpsDuration has no "1m" branch. parseOpsTimeRange silently
+    // falls back to the snapshot endpoint default "1h" unless start/end are explicit.
+    const requests = [end - 30000, end - 30 * 60000]
+    mocks.opsSnapshot.mockImplementation(async (params) => {
+      const endMs = params.end_time ? Date.parse(params.end_time) : Date.now()
+      const startMs = params.start_time ? Date.parse(params.start_time) : endMs - 3600000
+      return { overview: { start_time: new Date(startMs).toISOString(), end_time: new Date(endMs).toISOString(), request_count_total: requests.filter(at => at >= startMs && at < endMs).length } }
+    })
+    const data = await reload('1m')
+    expect(data.opsOverview.value?.request_count_total).toBe(1)
+    expect(mocks.opsSnapshot).toHaveBeenCalledWith({ start_time: new Date(end - 60000).toISOString(), end_time: new Date(end).toISOString(), mode: 'auto' })
+    expect(data.opsOverview.value?.start_time).toBe(data.trendQueryWindow.value?.start.toISOString())
+  })
+
+  it('uses the captured local-day boundary for today Ops queries', async () => {
+    const end = new Date()
+    const start = new Date(end)
+    start.setHours(0, 0, 0, 0)
+    await reload('today')
+    expect(mocks.opsSnapshot).toHaveBeenCalledWith({ start_time: start.toISOString(), end_time: end.toISOString(), mode: 'auto' })
+  })
+
+  it('keeps the fixed seven-day Ops bounds captured before asynchronous loading advances the clock', async () => {
+    const end = Date.now()
+    mocks.list.mockImplementationOnce(async () => {
+      vi.setSystemTime(end + 45000)
+      return { items: [account], total: 1 }
+    })
+    await reload('7d')
+    expect(mocks.opsSnapshot).toHaveBeenCalledWith({ start_time: new Date(end - 7 * DAY_MS).toISOString(), end_time: new Date(end).toISOString(), mode: 'auto' })
+  })
+
+  it('keeps a degraded HTTP 200 quota reading as historical evidence without calling it a successful sync', async () => {
+    mocks.list.mockResolvedValue({ items: [{ ...account, platform: 'antigravity', type: 'oauth' }], total: 1 })
+    const reading = { utilization: 66, resets_at: new Date(Date.now() + 3600000).toISOString(), remaining_seconds: 3600 }
+    mocks.getUsage.mockResolvedValue({ updated_at: new Date().toISOString(), five_hour: reading, seven_day: null, seven_day_sonnet: null,
+      error: 'request failed Authorization: Bearer fixture-only-key', error_code: 'network_error' })
+    const data = await reload('1h')
+    expect(data.sourceStates.value.accountUsage.status).toBe('partial')
+    const saved = data.accountUsage.value[String(ACCOUNT_ID)]
+    expect(saved.five_hour).toMatchObject(reading)
+    expect(quotaWindowState(saved.five_hour)).toMatchObject({ utilization: 66, historical: true })
+    expect(quotaWindowState(saved.five_hour).sourceError).toBeTruthy()
+    expect(JSON.stringify(saved)).not.toContain('fixture-only-key')
+    expect(data.sourceStates.value.accountUsage.reason).not.toContain('fixture-only-key')
+  })
+
+  it('treats a successful HTTP response containing only an upstream error code as unavailable and retries it', async () => {
+    mocks.list.mockResolvedValue({ items: [{ ...account, platform: 'antigravity', type: 'oauth' }], total: 1 })
+    mocks.getUsage.mockResolvedValue({ updated_at: new Date().toISOString(), five_hour: null, seven_day: null, seven_day_sonnet: null, error_code: 'unauthenticated' })
+    const data = await reload('1h')
+    expect(data.sourceStates.value.accountUsage.status).toBe('unavailable')
+    expect(data.accountUsage.value[String(ACCOUNT_ID)].five_hour).toBeNull()
+    await data.reload('1h')
+    expect(mocks.getUsage).toHaveBeenCalledTimes(2)
+    expect(data.sourceStates.value.accountUsage.status).toBe('unavailable')
+  })
+
+  it('retries a degraded reading inside the success TTL and clears its error on a genuine zero-usage success', async () => {
+    mocks.list.mockResolvedValue({ items: [{ ...account, platform: 'antigravity', type: 'oauth' }], total: 1 })
+    const reading = { utilization: 66, resets_at: new Date(Date.now() + 3600000).toISOString(), remaining_seconds: 3600 }
+    mocks.getUsage.mockResolvedValueOnce({ updated_at: new Date().toISOString(), five_hour: reading, seven_day: null, seven_day_sonnet: null, error: 'quota probe unavailable', error_code: 'network_error' })
+      .mockResolvedValue({ updated_at: new Date().toISOString(), five_hour: { ...reading, utilization: 0 }, seven_day: null, seven_day_sonnet: null })
+    const data = await reload('1h')
+    await data.reload('1h')
+    expect(mocks.getUsage).toHaveBeenCalledTimes(2)
+    expect(data.sourceStates.value.accountUsage.status).toBe('measured')
+    const saved = data.accountUsage.value[String(ACCOUNT_ID)]
+    expect(saved.error).toBeFalsy()
+    expect(saved.error_code).toBeFalsy()
+    expect(quotaWindowState(saved.five_hour)).toMatchObject({ utilization: 0, historical: false, sourceError: null })
+    await data.reload('1h')
+    expect(mocks.getUsage).toHaveBeenCalledTimes(2)
+  })
+
+  it('retains an earlier quota percentage and timestamp after a transport failure without exposing the thrown credentials', async () => {
+    mocks.list.mockResolvedValue({ items: [{ ...account, platform: 'antigravity', type: 'oauth' }], total: 1 })
+    const observedAt = new Date().toISOString()
+    mocks.getUsage.mockResolvedValueOnce({ updated_at: observedAt, five_hour: { utilization: 25, resets_at: new Date(Date.now() + 3600000).toISOString(), remaining_seconds: 3600 }, seven_day: null, seven_day_sonnet: null })
+      .mockRejectedValue(new Error('failed https://example.test/?api_key=fixture-only-key'))
+    const data = await reload('1h')
+    vi.setSystemTime(Date.now() + 5 * 60000 + 1)
+    await data.reload('1h')
+    expect(data.sourceStates.value.accountUsage.status).toBe('partial')
+    const saved = data.accountUsage.value[String(ACCOUNT_ID)]
+    expect(quotaWindowState(saved.five_hour)).toMatchObject({ utilization: 25, updatedAt: observedAt, historical: true })
+    expect(quotaWindowState(saved.five_hour).sourceError).toBeTruthy()
+    expect(JSON.stringify(saved)).not.toContain('fixture-only-key')
+    expect(data.sourceStates.value.accountUsage.reason).not.toContain('fixture-only-key')
+  })
+
   it.each(Object.keys(WINDOW_SPAN_MS) as Exclude<CostCenterRange, 'today'>[])('%s: uses the existing exact log scan instead of assuming start_time is supported by the natural-day batch endpoint', async (range) => {
     const now = Date.now()
     mocks.usageList.mockResolvedValue({ items: [log(1, now - 1000), log(2, now - WINDOW_SPAN_MS[range] - 1000)] })
@@ -164,6 +258,25 @@ describe('sub2api 逐账号观察窗口统计接入', () => {
     expect(data.sourceStates.value.rangeStats.status).toBe('measured')
     expect(data.modelRoutes.value.reduce((sum, row) => sum + row.requests, 0)).toBe(1)
     expect(mocks.usageList.mock.calls.map(([params]) => params.account_id)).toEqual([ACCOUNT_ID, undefined])
+  })
+
+  it('carries request-time facts for a deleted Sub2API account through the economic fallback without inventing its procurement cost', async () => {
+    // Official Sub2API retains usage_logs after soft-deleting the account. Its
+    // inventory can therefore omit an ID that still has exact window usage.
+    mocks.usageList.mockResolvedValue({ items: [
+      log(1, Date.now() - 1000),
+      log(2, Date.now() - 2000, { account_id: 9999, input_tokens: 300, output_tokens: 60, total_cost: 20, account_stats_cost: 6, account_rate_multiplier: 0.25, actual_cost: 44 }),
+    ] })
+    const data = await reload('1h')
+    expect(data.rangeAccountStats.value['9999']).toEqual({ requests: 1, tokens: 360, cost: 1.5, standard_cost: 20, user_cost: 44 })
+    expect(data.rangeAccountStats.value[String(ACCOUNT_ID)]).toMatchObject({ requests: 1, tokens: 100, cost: 1, user_cost: 9 })
+    const snapshot = await data.loadAccountEconomics('all', '1h')
+    expect(snapshot!.actual.account_cost_usd).toBe(2.5)
+    expect(snapshot!.actual.billed_usd).toBe(53)
+    expect(snapshot!.actual.window_procurement_cny).toBeNull()
+    expect(snapshot!.actual.contribution_margin_cny).toBeNull()
+    expect(snapshot!.data_quality.status).toBe('partial')
+    expect(data.sourceStates.value.economics.status).toBe('partial')
   })
 
   it('keeps the global observation window independent of a detached model window', async () => {

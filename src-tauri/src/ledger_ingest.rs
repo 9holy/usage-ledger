@@ -48,6 +48,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::cockpit_data_path::{self, SourceContext};
 use crate::cockpit_logs_db::{TokenSplit, REQUEST_LOG_DB_NAME, SESSION_USAGE_DB_NAME};
 use crate::ledger_db;
 
@@ -181,6 +182,10 @@ pub struct IngestSource {
     pub source_name: String,
     /// 源库文件绝对路径。
     pub db_path: PathBuf,
+    /// 捕获源文件路径时的物理根与账本身份。生产 Cockpit 源始终带此上下文，
+    /// 后续默认目录或别名变化不能把已经选定的源写入另一实例的账本。
+    /// 合成 SQLite 源保留 `None`，由摄取入口捕获当前上下文。
+    pub origin: Option<SourceContext>,
     /// 表名(默认 `request_logs`)。
     pub table: String,
     /// **水位列(有序)**。增量扫描与桶内幂等都依赖它。
@@ -231,9 +236,15 @@ impl IngestSource {
     ///
     /// 路径与库名**直接复用** `cockpit_logs_db`,不在本模块重定义(红线 3 / 共享知识第 10 条)。
     pub fn codex_logs() -> Result<Self, String> {
-        Ok(IngestSource {
+        let context = cockpit_data_path::source_context()?;
+        Ok(Self::codex_logs_from_context(&context))
+    }
+
+    fn codex_logs_from_context(context: &SourceContext) -> Self {
+        IngestSource {
             source_name: ledger_db::SOURCE_CODEX_LOGS.to_string(),
-            db_path: crate::cockpit_logs_db::request_log_db_path()?,
+            db_path: context.data_dir.join(REQUEST_LOG_DB_NAME),
+            origin: Some(context.clone()),
             table: "request_logs".to_string(),
             id_columns: vec!["id".to_string()],
             ts_column: "timestamp".to_string(),
@@ -243,7 +254,7 @@ impl IngestSource {
             success_when_column_absent: None,
             label: format!("cockpit 单请求用量库({REQUEST_LOG_DB_NAME})"),
             columns: None,
-        })
+        }
     }
 
     /// 第二源:cockpit 会话用量库 `%USERPROFILE%\.antigravity_cockpit\codex_session_usage.sqlite`。
@@ -265,9 +276,15 @@ impl IngestSource {
     /// 这类行永远落在水位之外。以 `timestamp`(epoch 秒)为主键、`request_id` 为次级键,
     /// 才是与本表时间语义一致的全序。
     pub fn codex_sessions() -> Result<Self, String> {
-        Ok(IngestSource {
+        let context = cockpit_data_path::source_context()?;
+        Ok(Self::codex_sessions_from_context(&context))
+    }
+
+    fn codex_sessions_from_context(context: &SourceContext) -> Self {
+        IngestSource {
             source_name: ledger_db::SOURCE_CODEX_SESSIONS.to_string(),
-            db_path: crate::cockpit_logs_db::session_usage_db_path()?,
+            db_path: context.data_dir.join(SESSION_USAGE_DB_NAME),
+            origin: Some(context.clone()),
             table: crate::cockpit_logs_db::SESSION_USAGE_TABLE.to_string(),
             // 不用 rowid(见 `id_columns` 字段文档):该表没有 INTEGER PRIMARY KEY,
             // VACUUM / 重建都会重排行值,水位会被静默污染
@@ -282,7 +299,7 @@ impl IngestSource {
             success_when_column_absent: Some(true),
             label: format!("cockpit 会话用量库({SESSION_USAGE_DB_NAME})"),
             columns: None,
-        })
+        }
     }
 
     /// 指向任意 SQLite 源库(**预留 API:第二源接入时用**,见 skill `ledger-add-source`)。
@@ -300,6 +317,7 @@ impl IngestSource {
         IngestSource {
             source_name: ledger_db::DEFAULT_SOURCE_NAME.to_string(),
             db_path,
+            origin: None,
             table: table.to_string(),
             id_columns: vec![id_column.to_string()],
             ts_column: ts_column.to_string(),
@@ -369,10 +387,20 @@ impl IngestSource {
 
     /// 全部已知源(摄取入口按此顺序遍历)。
     ///
-    /// 某个源定位失败(如主目录环境变量缺失)**不阻断其它源** —— 逐源 `Result`,
-    /// 由调用方把失败源如实报成 `sourceAvailable:false`,绝不静默跳过。
+    /// 先捕获一次物理根，再从同一上下文派生两个源。根定位失败时逐源返回错误，
+    /// 由调用方如实报成 `sourceAvailable:false`,绝不静默跳过或改读另一根。
     pub fn all_known() -> Vec<Result<Self, String>> {
-        vec![Self::codex_logs(), Self::codex_sessions()]
+        match cockpit_data_path::source_context() {
+            Ok(context) => Self::all_known_from_context(&context),
+            Err(error) => vec![Err(error.clone()), Err(error)],
+        }
+    }
+
+    fn all_known_from_context(context: &SourceContext) -> Vec<Result<Self, String>> {
+        vec![
+            Ok(Self::codex_logs_from_context(context)),
+            Ok(Self::codex_sessions_from_context(context)),
+        ]
     }
 }
 
@@ -2201,7 +2229,12 @@ pub fn ingest(opts: &IngestOptions) -> Result<IngestResult, String> {
         Some(source) => source.clone(),
         None => IngestSource::codex_logs()?,
     };
-    let ledger_path = ledger_db::ledger_db_path().map_err(|e| e.to_string())?;
+    let context = match &source.origin {
+        Some(context) => context.clone(),
+        None => cockpit_data_path::source_context()?,
+    };
+    let ledger_path = ledger_db::cockpit_ledger_db_path_for_identity(&context.instance_id)
+        .map_err(|e| e.to_string())?;
     let mut conn = ledger_db::open(&ledger_path).map_err(|e| e.to_string())?;
     ingest_into(&mut conn, &source, opts, started)
 }
@@ -2225,11 +2258,19 @@ pub fn ingest_guarded(opts: &IngestOptions) -> Result<IngestResult, String> {
 /// - 顺序固定,便于把 `IngestAllResult.sources` 与 UI 行一一对上。
 pub fn ingest_all(opts: &IngestOptions) -> Result<IngestAllResult, String> {
     let started = ledger_db::now_ms();
+    // An explicitly resolved source keeps its original destination even if the
+    // producer switches roots before this batch runs. The daemon captures one
+    // context here and derives both source files and the destination from it.
+    let context = match opts.source.as_ref().and_then(|source| source.origin.as_ref()) {
+        Some(context) => context.clone(),
+        None => cockpit_data_path::source_context()?,
+    };
     let sources = match &opts.source {
         Some(s) => vec![Ok(s.clone())],
-        None => IngestSource::all_known(),
+        None => IngestSource::all_known_from_context(&context),
     };
-    let ledger_path = ledger_db::ledger_db_path().map_err(|e| e.to_string())?;
+    let ledger_path = ledger_db::cockpit_ledger_db_path_for_identity(&context.instance_id)
+        .map_err(|e| e.to_string())?;
     let mut conn = ledger_db::open(&ledger_path).map_err(|e| e.to_string())?;
 
     let mut outcomes = Vec::with_capacity(sources.len());
@@ -4231,7 +4272,7 @@ mod tests {
     #[test]
     #[ignore = "手动端到端:会真实摄取本机账本(幂等),见文档注释"]
     fn periodic_ingest_thread_actually_runs() {
-        let path = match ledger_db::ledger_db_path() {
+        let path = match ledger_db::cockpit_ledger_db_path() {
             Ok(p) => p,
             Err(e) => {
                 println!("跳过:无法定位账本({e})");

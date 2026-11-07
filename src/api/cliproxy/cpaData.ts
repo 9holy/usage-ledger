@@ -2,8 +2,8 @@
  * CPA Token Usage 插件本地数据源 API
  *
  * 直读插件文件(经 Rust command),不走 cliproxy /v0/management:
- * - usage.db(SQLite usage_events 表,完整用量历史 1629+ 行,30 天窗口)
- * - model_prices.cache(LiteLLM 3213 模型 per-token USD 官方定价)
+ * - usage.db (SQLite usage_events, retained request records in the selected window)
+ * - model_prices.cache (optional per-token reference prices; our cost rules remain local)
  *
  * Rust 侧只读连接(避免锁 WAL);api_key 明文禁止返回(已省略)。
  */
@@ -12,9 +12,12 @@ import { invoke } from '@tauri-apps/api/core'
 import type { UsageQueryWindow } from '@/features/cost-center/usageWindow'
 import { quoteModelCatalogBatch, type ModelCatalogQuoteInput } from '@/api/modelCatalog'
 import type { MonitorCostEstimate } from '@/api/usageMonitor'
+import { scopedCliproxyEvents } from './sourceIdentity'
 
 /** CPA usage_events 一行(Rust 侧 serde 已把 requested_at 秒→毫秒;api_key 明文已省略)。 */
 export interface CliproxyUsageEvent {
+  /** Native local database identity. It is not a management connection or owner ID. */
+  source_instance_id?: string
   /** Some installed native readers omit this column. Never use it as a batch join key. */
   id?: number
   /** 毫秒级时间戳(Rust 侧秒×1000,供 new Date(ms) 与时间桶数值比较)。 */
@@ -43,19 +46,19 @@ export interface CliproxyUsageEvent {
   cache_read_tokens: number
   cache_creation_tokens: number
   total_tokens: number
-  /** 5h 窗口用量百分比(实测 primary_reset_at − requested_at ≈ 4.69h)。 */
+  /** Opaque primary quota slot; usage_events does not store its duration. */
   primary_used_percent: number | null
-  /** 5h 窗口重置时刻(unix 秒)。 */
+  /** Primary reset timestamp (Unix seconds), not a window duration. */
   primary_reset_at: number | null
   primary_used_tokens: number | null
   primary_remaining_tokens: number | null
   primary_limit_tokens: number | null
-  /** 独立 7d 窗口用量百分比(实测 secondary_reset_at − requested_at ≈ 6.78d;与 primary 不是同一窗口)。 */
+  /** Independent secondary slot; not guaranteed to be a seven-day quota. */
   secondary_used_percent: number | null
-  /** 独立 7d 窗口重置时刻(unix 秒)。**非空才算源真的报了 7d 窗口** —— 实测存在
-   *  `secondary_used_percent=0` 且本字段为空的记录,那是"上游没报这个窗口"的缺省编码,不是"用了 0%"。 */
+  /** Secondary reset (Unix seconds). Legacy zero percent plus null reset is absent,
+   * not evidence of an unused secondary quota. */
   secondary_reset_at: number | null
-  /** 以下三个 token 级字段实测全表恒 NULL(7700 行 0 行非空),不可得 ⇒ 不得填 0。 */
+  /** Optional upstream token counters; unavailable values must remain null. */
   secondary_used_tokens: number | null
   secondary_remaining_tokens: number | null
   secondary_limit_tokens: number | null
@@ -75,8 +78,10 @@ export interface LitellmPricing {
   litellm_provider?: string
 }
 
-/** Mirrors CLIProxy usage/accounting.go: OpenAI cache is a subset, Claude's is independent. */
-export function cliproxyTokenBreakdown(event: CliproxyUsageEvent): Pick<ModelCatalogQuoteInput, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'contextTokens'> {
+/** CPA persists raw Detail fields, not TokenBreakdown. Cache is independent for Claude;
+ * parseClaudeUsageNode keeps thinking inside OutputTokens. Gemini's raw output excludes it.
+ * See docs/cliproxy-data-contract-audit-2026-11-07.md for the pinned producer chain. */
+export function cliproxyTokenBreakdown(event: CliproxyUsageEvent): Pick<ModelCatalogQuoteInput, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'contextTokens'> & { totalTokens?: number; accountingComplete: boolean } {
   const executor = event.executor_type.toLowerCase(), provider = event.provider.toLowerCase()
   const subset = executor === 'openaicompatexecutor' || provider === 'openai-compatibility' || provider.startsWith('openai-compatible-')
   const source = `${provider} ${executor}`
@@ -90,7 +95,14 @@ export function cliproxyTokenBreakdown(event: CliproxyUsageEvent): Pick<ModelCat
     : knownSubset || separateReasoning || read + write === 0 ? event.input_tokens : undefined
   const output = separateReasoning ? event.output_tokens + event.reasoning_tokens
     : knownSubset || independent || event.reasoning_tokens === 0 ? event.output_tokens : undefined
-  return { inputTokens: input, contextTokens: input, outputTokens: output, cacheReadTokens: read, cacheWriteTokens: write }
+  const total = Number.isSafeInteger(event.total_tokens) && event.total_tokens >= 0 ? event.total_tokens : undefined
+  // The producer can emit authoritative totals with an unclassified remainder.
+  // CPA does not persist TokenBreakdown/quality, so a non-closing partition cannot be fully priced.
+  const accountingComplete = input != null && output != null && total != null
+    && [input, output, read, write, event.reasoning_tokens].every(value => Number.isSafeInteger(value) && value >= 0)
+    && read + write <= input && (separateReasoning || event.reasoning_tokens <= output)
+    && Number.isSafeInteger(input + output) && input + output === total
+  return { inputTokens: input, contextTokens: input, outputTokens: output, cacheReadTokens: read, cacheWriteTokens: write, totalTokens: total, accountingComplete }
 }
 
 export function cliproxyQuoteInput(event: CliproxyUsageEvent): Omit<ModelCatalogQuoteInput, 'id'> {
@@ -98,13 +110,16 @@ export function cliproxyQuoteInput(event: CliproxyUsageEvent): Omit<ModelCatalog
   // Compatibility route names and auth-provider labels are not catalog provider identities.
   const opaqueProvider = event.executor_type.toLowerCase() === 'openaicompatexecutor'
     || /^(openai-compatible|openai-compatibility|codex|claude|gemini|antigravity)(-|$)/i.test(provider)
+  const { accountingComplete, totalTokens: _sourceTotal, ...tokens } = cliproxyTokenBreakdown(event)
+  void _sourceTotal
   return {
     model: event.model,
     ...(!opaqueProvider && provider ? { provider } : {}),
     actualMode: event.response_service_tier?.trim().toLowerCase() || undefined,
     requestedMode: event.service_tier || undefined,
     timestampMs: event.requested_at,
-    ...cliproxyTokenBreakdown(event),
+    ...tokens,
+    ...(!accountingComplete ? { inputTokens: undefined, outputTokens: undefined } : {}),
   }
 }
 
@@ -128,6 +143,8 @@ export async function getCliproxyUsageEvents(): Promise<CliproxyUsageEvent[]> {
 }
 
 export interface CliproxyUsageSnapshot {
+  sourceInstanceId?: string
+  managementLinkAllowed?: boolean
   available: boolean
   events: CliproxyUsageEvent[]
   readStartMs: number | null
@@ -141,6 +158,7 @@ export async function getCliproxyUsageSnapshot(window?: UsageQueryWindow): Promi
   const snapshot = JSON.parse(json) as CliproxyUsageSnapshot | CliproxyUsageEvent[]
   if (Array.isArray(snapshot)) return { available: false, events: await quoteCliproxyEvents(snapshot), readStartMs: null, readEndMs: null }
   if (!snapshot || typeof snapshot.available !== 'boolean' || !Array.isArray(snapshot.events)) throw new Error('Invalid CPA usage snapshot')
+  if (snapshot.sourceInstanceId != null) snapshot.events = scopedCliproxyEvents(snapshot.events, snapshot)
   await quoteCliproxyEvents(snapshot.events)
   return snapshot
 }

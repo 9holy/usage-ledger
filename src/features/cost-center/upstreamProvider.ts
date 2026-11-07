@@ -144,6 +144,8 @@ function providerFromOfficialHost(host: string): UpstreamProviderKey | null {
 }
 
 export function classifyUpstreamProvider(account: Account): UpstreamProviderKey {
+  if (account.extra?.cliproxy_provider_evidence === 'compatibility') return 'relay'
+  if (account.extra?.cliproxy_provider_evidence === 'unverified') return 'other'
   if (account.type === 'bedrock') return 'bedrock'
 
   const baseUrl = accountUpstreamBaseUrl(account)
@@ -209,6 +211,7 @@ export function describeUpstreamOrigin(account: Account): string {
   // 影响 sub2api+cockpit 所有中转账号,统一口径。
   if (provider === 'relay') return costDataText('upstreamApi')
   if (provider === 'codex') return 'Codex OAuth'
+  if (provider === 'other' && account.extra?.cliproxy_provider_evidence === 'unverified') return costDataText('cpaProviderUnverified')
   if (provider === 'other') return `${account.platform} · ${account.type}`
   return providerLabels[provider]
 }

@@ -5,6 +5,7 @@ import { isLocalCliproxyTarget } from '../cliproxyAdapter'
 import { sourceState } from '../dataState'
 import type { Account } from '@/types'
 import type { AccountWindowUsage, CostAccount } from '../model'
+import { UNATTRIBUTED_USAGE_ACCOUNT_ID } from '../model'
 
 const { getEconomicsSnapshot } = vi.hoisted(() => ({ getEconomicsSnapshot: vi.fn() }))
 vi.mock('@/api/admin', () => ({ adminAPI: { accounts: { getEconomicsSnapshot }, dashboard: {}, ops: {} } }))
@@ -87,6 +88,89 @@ describe('local economics from loaded facts', () => {
     expect(result!.actual.billed_usd).toBeNull()
     expect(result!.actual.account_cost_usd).toBe(6)
     expect(result!.actual.contribution_margin_cny).toBeNull()
+  })
+
+  it('retains Sub2API historical account facts after the current account inventory no longer contains the account', async () => {
+    // Upstream accounts use SoftDeleteMixin; usage_logs keeps account_id and its
+    // request-time cost snapshots. An absent account is not a zero-usage account.
+    const data = loadedData()
+    data.todayStats.value['9999'] = { requests: 3, tokens: 600, cost: 7, standard_cost: 30, user_cost: 70 }
+    getEconomicsSnapshot.mockRejectedValue(new Error('404 optional economics extension'))
+    const result = await data.loadAccountEconomics('all', 'today')
+    expect(result!.actual.billed_usd).toBe(94)
+    expect(result!.actual.account_cost_usd).toBe(13)
+    expect(data.todayStats.value['9999']).toMatchObject({ requests: 3, tokens: 600, cost: 7, user_cost: 70 })
+    expect(result!.health.account_count).toBe(1)
+    expect(result!.data_quality.status).toBe('partial')
+    expect(result!.actual.window_procurement_cny).toBeNull()
+    expect(result!.actual.window_economic_cost_cny).toBeNull()
+    expect(result!.actual.contribution_margin_cny).toBeNull()
+    expect(result!.actual.payback_ratio).toBeNull()
+    expect(result!.projection.billed_usd_per_hour).toBeCloseTo(94 / 12)
+    expect(result!.projection.account_cost_usd_per_hour).toBeCloseTo(13 / 12)
+    expect(result!.projection.confidence).toBe('unavailable')
+    expect(result!.projection.capacity_adjusted_billed_usd_per_hour).toBeNull()
+    expect(result!.projection.capacity_adjusted_account_cost_usd_per_hour).toBeNull()
+    expect(result!.projection.warning).toContain('账号档案')
+  })
+
+  it('can explicitly select a usage-only account ID without inventing its identity or procurement profile', async () => {
+    const data = loadedData()
+    data.todayStats.value['9999'] = { requests: 3, tokens: 600, cost: 7, standard_cost: 30, user_cost: 70 }
+    getEconomicsSnapshot.mockRejectedValue(new Error('404'))
+    const result = await data.loadAccountEconomics('all', 'today', [9999])
+    expect(result!.actual.billed_usd).toBe(70)
+    expect(result!.actual.account_cost_usd).toBe(7)
+    expect(result!.health.account_count).toBe(0)
+    expect(result!.data_quality.status).toBe('partial')
+    expect(result!.actual.window_procurement_cny).toBeNull()
+    expect(result!.actual.contribution_margin_cny).toBeNull()
+  })
+
+  it('does not assign an orphan or unattributed request to an arbitrary platform, while preserving it in the all-platform reading', async () => {
+    const data = loadedData()
+    data.todayStats.value['9999'] = { requests: 3, tokens: 600, cost: 7, standard_cost: 30, user_cost: 70 }
+    data.todayStats.value[UNATTRIBUTED_USAGE_ACCOUNT_ID] = { requests: 2, tokens: 80, cost: 2, standard_cost: 8, user_cost: 10 }
+    getEconomicsSnapshot.mockRejectedValue(new Error('404'))
+    const all = await data.loadAccountEconomics('all', 'today')
+    expect(all!.actual.billed_usd).toBe(104)
+    expect(all!.actual.account_cost_usd).toBe(15)
+    const filtered = await data.loadAccountEconomics('openai', 'today')
+    expect(filtered!.actual.billed_usd).toBe(24)
+    expect(filtered!.actual.account_cost_usd).toBe(6)
+    expect(filtered!.data_quality.status).toBe('partial')
+    expect(filtered!.actual.contribution_margin_cny).toBeNull()
+    expect(filtered!.projection.warning).toContain('平台')
+  })
+
+  it('keeps incomplete Sub2API windows partial instead of projecting a bounded subtotal as a complete window', async () => {
+    const data = loadedData()
+    data.sourceStates.value.todayStats = sourceState('todayStats', 'partial')
+    getEconomicsSnapshot.mockRejectedValue(new Error('404'))
+    const result = await data.loadAccountEconomics('all', 'today')
+    expect(result!.actual.billed_usd).toBe(24)
+    expect(result!.actual.account_cost_usd).toBe(6)
+    expect(result!.data_quality.status).toBe('partial')
+    expect(result!.projection.confidence).toBe('unavailable')
+    expect(result!.projection.billed_usd_per_hour).toBeNull()
+    expect(result!.projection.account_cost_usd_per_hour).toBeNull()
+    expect(result!.actual.contribution_margin_cny).toBeNull()
+    expect(result!.actual.projected_contribution_cny_per_hour).toBeNull()
+  })
+
+  it('preserves an exact zero-usage window and a configured zero procurement amount', async () => {
+    const data = loadedData()
+    data.accounts.value = [{ ...account, extra: { cost_profile: { ...profile, amount: 0 } } }]
+    data.todayStats.value = { '1': { requests: 0, tokens: 0, cost: 0, standard_cost: 0, user_cost: 0 } }
+    data.sourceStates.value.todayStats = sourceState('todayStats', 'empty')
+    getEconomicsSnapshot.mockRejectedValue(new Error('404'))
+    const result = await data.loadAccountEconomics('all', 'today')
+    expect(result!.actual.billed_usd).toBe(0)
+    expect(result!.actual.account_cost_usd).toBe(0)
+    expect(result!.actual.window_procurement_cny).toBe(0)
+    expect(result!.actual.window_economic_cost_cny).toBe(0)
+    expect(result!.actual.contribution_margin_cny).toBe(0)
+    expect(result!.data_quality.status).toBe('estimated')
   })
 
   it('converts CNY exactly once, recognizes loaded loss and stops procurement at the loss time', () => {

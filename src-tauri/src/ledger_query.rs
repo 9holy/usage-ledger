@@ -712,7 +712,7 @@ pub fn list_sources(conn: &Connection) -> Result<Vec<LedgerSourceInfo>, String> 
 #[tauri::command]
 pub async fn ledger_reconcile_sources(window_days: Option<i64>) -> Result<ReconcileResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ledger_db::ledger_db_path().map_err(|e| e.to_string())?;
+        let path = ledger_db::cockpit_ledger_db_path().map_err(|e| e.to_string())?;
         // 账本文件还不存在 = 尚未摄取,如实报不可用(不是 Err)
         if !path.exists() {
             return Ok(ReconcileResult::unavailable(format!(
@@ -732,7 +732,7 @@ pub async fn ledger_reconcile_sources(window_days: Option<i64>) -> Result<Reconc
 #[tauri::command]
 pub async fn ledger_list_sources() -> Result<Vec<LedgerSourceInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ledger_db::ledger_db_path().map_err(|e| e.to_string())?;
+        let path = ledger_db::cockpit_ledger_db_path().map_err(|e| e.to_string())?;
         if !path.exists() {
             return Ok(Vec::new());
         }

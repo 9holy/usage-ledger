@@ -51,7 +51,8 @@ describe('shared native catalog read boundaries', () => {
     expect(cliproxyQuoteInput(event()).actualMode).toBeUndefined()
     expect(cliproxyQuoteInput(event({ provider: 'anthropic', executor_type: 'ClaudeExecutor', input_tokens: 60, service_tier: 'priority' }))).toMatchObject({ provider: 'anthropic', inputTokens: 100, contextTokens: 100, requestedMode: 'priority' })
     expect(cliproxyQuoteInput(event({ provider: 'anthropic', executor_type: 'ClaudeExecutor' })).actualMode).toBeUndefined()
-    expect(cliproxyQuoteInput(event({ provider: 'google', executor_type: 'GeminiExecutor', reasoning_tokens: 7 })).outputTokens).toBe(27)
+    // Gemini total includes separate thinking; keep this valid fixture arithmetically complete.
+    expect(cliproxyQuoteInput(event({ provider: 'google', executor_type: 'GeminiExecutor', reasoning_tokens: 7, total_tokens: 127 })).outputTokens).toBe(27)
     expect(cliproxyQuoteInput(event({ response_service_tier: 'priority' })).actualMode).toBe('priority')
   })
 
@@ -68,7 +69,8 @@ describe('shared native catalog read boundaries', () => {
   })
 
   it.each(['events', 'snapshot'])('joins each %s quote to its own row when the production reader omits id', async reader => {
-    const rows = [event({ model: 'first-model', input_tokens: 100 }), event({ model: 'second-model', input_tokens: 700 })].map(row => {
+    // Changing a row's input also changes its producer total; this case tests row joining.
+    const rows = [event({ model: 'first-model', input_tokens: 100 }), event({ model: 'second-model', input_tokens: 700, total_tokens: 720 })].map(row => {
       const { id: _id, ...productionRow } = row
       return productionRow
     })

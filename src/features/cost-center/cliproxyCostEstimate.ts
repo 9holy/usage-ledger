@@ -1,15 +1,10 @@
 import { costDataText } from './costDataText'
 /**
- * CLIProxyAPI 成本反算 — usage-queue token × 模型定价
- *
- * CLIProxyAPI 的 /v0/management 不暴露成本字段(实测零匹配),只有 usage-queue 的最近 N 条
- * 请求 token 快照。本模块用 token 数 × 模型定价(借用 cockpit modelPricings 或 sub2api 模型
- * 目录)反算 USD 成本。
- *
- * 口径限制(必须向用户标注):
- * - usage-queue 是最近 N 条快照(默认 20),非生命周期累计 → 反算结果是「最近 N 条请求成本」
- * - 定价表跨源借用,未知模型降级跳过(不计入,单独统计 unmatched)
- * - 估算值,不与 sub2api/cockpit 的事实成本同口径
+ * Legacy estimator for records already obtained elsewhere. No production reader calls it.
+ * /usage-queue is a destructive FIFO consumer (PopOldest), not a recent-request snapshot.
+ * It must never be polled for the cost workspace or used to diagnose a running service.
+ * The current workspace reads the local CPA SQLite database with a read-only connection.
+ * This module's types remain in use by the summary; prices continue to use our own rules.
  */
 
 import type { UsageQueueRecord } from '@/api/cliproxy/management'

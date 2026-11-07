@@ -10,7 +10,7 @@
  *    `client_canceled`，而库里实际有 **12 类**。`request_failed`（本机 4,212 条）只能落进
  *    "其他 error"，在 UI 上彻底看不见。
  * 2. **三档单价快照从未被读**：`input/output/cached_input_usd_per_million` 是 cockpit
- *    当时**实际使用**的单价，100% 有值。它不参与我们的计价（红线：计价唯一入口是前端），
+ *    当时记录的单价，cached 单价允许为 NULL。它不参与我们的计价（计价唯一入口是前端），
  *    但它是**唯一能独立校验我们价目表对不对**的基准 —— 此前完全没有交叉校验。
  * 3. **推理 token 不可见**：`reasoning_tokens` 13 万行有量。
  *
@@ -45,7 +45,8 @@ const t = i18n.global.t
 export interface CockpitPriceVariant {
   inputUsdPerMillion: number
   outputUsdPerMillion: number
-  cachedInputUsdPerMillion: number
+  /** NULL 表示源未记录缓存单价，不能转换成免费价格 0。 */
+  cachedInputUsdPerMillion: number | null
   /** 使用该组单价的请求数 */
   rows: number
   /**

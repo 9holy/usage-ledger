@@ -482,7 +482,7 @@ pub fn merged_usage(
 #[tauri::command]
 pub async fn ledger_merged_usage(window_days: Option<i64>) -> Result<MergedUsageResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ledger_db::ledger_db_path().map_err(|e| e.to_string())?;
+        let path = ledger_db::cockpit_ledger_db_path().map_err(|e| e.to_string())?;
         // 账本文件还不存在 = 尚未摄取，如实报不可用（不是 Err）
         if !path.exists() {
             return Ok(MergedUsageResult::unavailable(format!(

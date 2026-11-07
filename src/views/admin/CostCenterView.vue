@@ -693,7 +693,7 @@
             <MetricCell :label="t('costCenter.text.poolRecordedAccountLosses', { value0: rangeLabel })" :value="formatCny(oauthImpairmentCny, 4)" :note="recordedLossNote" :state="oauthImpairmentCny == null ? financePending ? 'loading' : 'unavailable' : financePending || financeError ? 'partial' : economicsDisplayState" accent="gold" />
             <MetricCell :label="t('costCenter.text.estimatedAccountExpenseUsd', { value0: rangeLabel })" :value="formatAmount(oauthWindowCostSummary, 'USD', 4)" :note="t('costCenter.text.sourcePricesAccountRateEstimates')" :title="t('costCenter.text.notProcurementPaymentEvidenceSubscriptionsDoNotAdd')" :state="sourceStates.rangeStats.status" />
             <MetricCell :label="connectionType === 'sub2api' ? t('costCenter.text.poolContributionProfitCny', { value0: rangeLabel }) : t('costCenter.text.poolApiReferenceValueUsd', { value0: rangeLabel })" :value="connectionType === 'sub2api' ? poolOperatingSummary.contributionCny == null ? t('costCenter.text.awaitingExpenseAttribution') : formatCny(poolOperatingSummary.contributionCny, 4) : formatAmount(oauthWindowOutputSummary, 'USD', 4)" :note="connectionType === 'sub2api' ? t('costCenter.text.sameGroupUserBillingOperatingExpenseCompleteProfit') : t('costCenter.text.sameWindowApiReferenceValueBeforeLocalMultiplier')" :state="economicsDisplayState" accent="blue" />
-            <MetricCell :label="t('costCenter.text.poolOperatingStatus')" :value="hasMeasuredData(sourceStates.accounts) ? t('costCenter.text.schedulable', { value0: oauthNormalCount }) : t('costCenter.text.noData')" :note="t('costCenter.text.savedRequestsCurrentlyRateLimitedCurrentErrors', { value0: rangeLabel, value1: formatInteger(oauthRequests), value2: oauthLimitedCount, value3: oauthErrorCount, value4: connectionType === 'cliproxy' ? t('costCenter.text.currentlyDisabled', { value0: cliproxyHealthSummary.inactive }) : '', value5: probeNote })" :state="poolHealthState" />
+            <MetricCell :label="t('costCenter.text.poolOperatingStatus')" :value="currentAccountsReady ? t('costCenter.text.schedulable', { value0: formatInteger(oauthNormalCount) }) : t('costCenter.text.noData')" :note="t('costCenter.text.savedRequestsCurrentlyRateLimitedCurrentErrors', { value0: rangeLabel, value1: formatInteger(oauthRequests), value2: formatInteger(oauthLimitedCount), value3: formatInteger(oauthErrorCount), value4: connectionType === 'cliproxy' ? t('costCenter.text.currentlyDisabled', { value0: formatInteger(cliproxyHealthSummary.inactive) }) : '', value5: probeNote })" :state="poolHealthState" />
             <MetricCell :label="connectionType === 'sub2api' ? t('costCenter.text.selectedPoolUserBillingAverageUsdH') : t('costCenter.text.selectedPoolApiReferenceValueAverageUsdH')" :value="formatKnownAmount(operatingRate(oauthWindowOutputSummary), 'USD', 6, true)" :note="amountCoverage(oauthWindowOutputSummary) + economicsSampleNote" :state="economicsDisplayState" accent="gold" />
             <MetricCell :label="t('costCenter.text.selectedPoolCombinedCostCnyH')" :value="formatKnownAmount(poolOperatingSummary.hourlyExpenseCny, 'CNY', 6, true)" :note="amountCoverage(poolOperatingSummary.hourlyExpenseCny) + t('costCenter.text.currentProcurementAccrualSameWindowMeteredRateAverage')" :state="economicsDisplayState" accent="gold" />
             <MetricCell :label="connectionType === 'sub2api' ? t('costCenter.text.poolUserBilling', { value0: rangeLabel }) : t('costCenter.text.poolApiReferenceValue', { value0: rangeLabel })" :value="formatKnownAmount(oauthWindowOutputSummary, 'USD', 4)" :note="amountCoverage(oauthWindowOutputSummary) + t('costCenter.text.selectedWindowAndMatchedAccountIdsIncludingEvidenced')" :state="sourceStates.rangeStats.status" />
@@ -722,7 +722,7 @@
               <tbody>
                 <tr v-for="group in poolGroups" :key="group.plan">
                   <td><strong>{{ connectionType === 'cliproxy' ? t('costCenter.text.localCpaPlugin') : t('costCenter.text.currentPool2') }}</strong></td><td><strong>{{ group.planLabel }}</strong></td><td>{{ group.count }}</td><td>{{ group.productive }}</td>
-                  <td><small v-if="group.isUnattributed">{{ t('costCenter.text.unattributedRequestsAccountStatusesNotAggregated') }}</small><template v-else><div class="cost-status-ring" :style="{ background: group.statusRing }"><span></span></div><small>{{ t('costCenter.text.normal') }} {{ group.normal }} {{ t('costCenter.text.rateLimited') }} {{ group.limited }} {{ t('costCenter.text.errors') }} {{ group.errors }} {{ t('costCenter.text.windowHeadroom') }} {{ formatPercentOrDash(group.quotaRemaining) }}</small></template></td>
+                  <td><small v-if="group.isUnattributed">{{ t('costCenter.text.unattributedRequestsAccountStatusesNotAggregated') }}</small><template v-else><div class="cost-status-ring" :style="{ background: group.statusRing }"><span></span></div><small>{{ t('costCenter.text.normal') }} {{ formatInteger(group.normal) }} {{ t('costCenter.text.rateLimited') }} {{ formatInteger(group.limited) }} {{ t('costCenter.text.errors') }} {{ formatInteger(group.errors) }} {{ t('costCenter.text.windowHeadroom') }} {{ formatPercentOrDash(group.quotaRemaining) }}</small></template></td>
                   <td><strong>{{ formatAmount(group.expenseSummary, 'CNY', 4) }}</strong><small>{{ rangeLabel }} {{ t('costCenter.text.sameGroupProcurementMeteredCredits') }}</small></td>
                   <td><strong>{{ group.count ? formatAmount(group.averageExpenseSummary, 'CNY', 4) : t('costCenter.text.notApplicable') }}</strong><small>{{ group.count ? t('costCenter.text.sameGroupWindowExpenseWindowAccounts') : t('costCenter.text.noPerAccountAverageForRequestsLackingAccount') }}</small></td>
                   <td><strong :class="poolValueClass(group.outputSummary.total)">{{ formatAmount(group.outputSummary, 'USD', 4) }} / {{ formatUsd(group.dayForecastUsd, 4) }} / {{ formatUsd(group.monthForecastUsd, 4) }}</strong><small>{{ rangeLabel }} {{ connectionType === 'sub2api' ? t('costCenter.text.userBillingAmount') : t('costCenter.text.apiReferenceValue') }} {{ t('costCenter.text.todaySUsageProjectedToFullDayToday') }}</small></td>
@@ -1593,10 +1593,12 @@ import { useUnifiedCost, type SourceStatus, type CostUnit, type CockpitBatchMeta
 import { summarizeOperatingCosts, type OperatingAccount, type OperatingSummary } from '@/features/cost-center/costEngine'
 import { recordedAccountCosts, sumCompleteCosts } from '@/features/cost-center/recordedCosts'
 import type { CockpitPlatformAccountInput } from '@/features/cost-center/cockpitAdapter'
+import { assertCockpitSourceIdentity } from '@/api/cockpit/sourceIdentity'
 import { applyCockpitUsageLedger, cockpitOpsSummaryToTrend, cockpitOpsAccountsToRequestCounts, clipOpsBucketsToWindow, statsAccountCostId, cockpitSnapshotsToAccountUsage } from '@/features/cost-center/cockpitAdapter'
 import { getAuthFiles, getRoutingStrategy, getDebug, getConfig, getApiKeyUsage, type AuthFile, type ApiKeyUsageBucket } from '@/api/cliproxy/management'
+import { cliproxyAuthFilesToAccounts } from '@/features/cost-center/cliproxyManagementAdapter'
 import { getCliproxyUsageSnapshot, getCliproxyModelPrices, type CliproxyUsageSnapshot, type LitellmPricing } from '@/api/cliproxy/cpaData'
-import { getCockpitStats, getCockpitCodexAccounts, getCockpitGeminiAccounts, getCockpitAntigravityAccounts, getCockpitLocalAccess, getCockpitPlatformAccounts, getCockpitModelProviders, getCockpitApiLog, getCockpitQuotaHistories, getCockpitApiKeyNames, getCockpitAccountGroups, getCockpitCodexAccountGroups, readCostLedger, writeCostLedger, type CockpitStats, type CockpitCodexAccount, type CockpitGeminiAccount, type CockpitAntigravityAccount, type CockpitLocalAccess, type CockpitPlatformAccount, type CockpitModelProvider, type CockpitQuotaHistoryFile, type CockpitModelUsage, type CockpitOpsRouteAgg, type CockpitRequestLogSummary, type CockpitApiKeyStat, type CockpitUsageStats } from '@/api/cockpit'
+import { getCockpitSourceIdentity, getCockpitStats, getCockpitCodexAccounts, getCockpitGeminiAccounts, getCockpitAntigravityAccounts, getCockpitLocalAccess, getCockpitPlatformAccounts, getCockpitModelProviders, getCockpitApiLog, getCockpitQuotaHistories, getCockpitApiKeyNames, getCockpitAccountGroups, getCockpitCodexAccountGroups, readCostLedger, writeCostLedger, type CockpitStats, type CockpitCodexAccount, type CockpitGeminiAccount, type CockpitAntigravityAccount, type CockpitLocalAccess, type CockpitPlatformAccount, type CockpitModelProvider, type CockpitQuotaHistoryFile, type CockpitModelUsage, type CockpitOpsRouteAgg, type CockpitRequestLogSummary, type CockpitApiKeyStat, type CockpitUsageStats } from '@/api/cockpit'
 // 本地持久账本(二期 Rust T11–T13)。此前无任何调用点 → 账本从未落盘。
 import { describeLedgerIngest, ledgerAllUnavailableReason, ledgerIngestOnce, ledgerSourceDelivered, type LedgerIngestResult } from '@/api/ledger'
 import { MAX_COCKPIT_LOG_LINES, cockpitSplitCostUsd, cockpitRequestLogToApiKeyStats, cockpitGroupNameByAccountId, cockpitWindowCoverage, cockpitCoverageNote, cockpitSnapshotWindowNote, cockpitWindowLabelForRange, cockpitWindowForRange } from '@/features/cost-center/cockpitAdapter'
@@ -1690,16 +1692,28 @@ const quotaAccountGroups = ref<AccountGroups | null>(null)
  * 与配额同批拉「当前账号」+「模型分组」。
  * 两个源各自失败各自吞掉 —— 它们只是两个附加列,不该拖垮成本主链路。
  */
+let cockpitMetaRequest = 0
 async function loadCockpitAccountMeta(): Promise<void> {
-  const [accounts, groups, accountGroups] = await Promise.all([
-    getQuotaCurrentAccounts().catch(() => [] as CurrentAccountEntry[]),
-    getQuotaModelGroups().catch(() => null),
-    getQuotaAccountGroups().catch(() => null),
-  ])
-  quotaCurrentAccounts.value = accounts
-  quotaModelGroups.value = groups
-  quotaAccountGroups.value = accountGroups
+  const request = ++cockpitMetaRequest
+  const sourceInstanceId = data.cockpitSourceInstanceId.value
+  try {
+    await assertCockpitSourceIdentity(sourceInstanceId)
+    const [accounts, groups, accountGroups] = await Promise.all([
+      getQuotaCurrentAccounts().catch(() => [] as CurrentAccountEntry[]),
+      getQuotaModelGroups().catch(() => null),
+      getQuotaAccountGroups().catch(() => null),
+    ])
+    await assertCockpitSourceIdentity(sourceInstanceId)
+    if (request !== cockpitMetaRequest || sourceInstanceId !== data.cockpitSourceInstanceId.value || connectionType.value !== null) return
+    quotaCurrentAccounts.value = accounts
+    quotaModelGroups.value = groups
+    quotaAccountGroups.value = accountGroups
+  } catch {
+    if (request !== cockpitMetaRequest) return
+    quotaCurrentAccounts.value = []; quotaModelGroups.value = null; quotaAccountGroups.value = null
+  }
 }
+
 const {
   activeChannels: quotaActiveChannels,
   snapshotsByChannel: quotaSnapshotsByChannel,
@@ -1817,12 +1831,17 @@ function priceStatusClass(status: PriceReconcileStatus): string {
 let facetsRequest = 0
 async function loadRequestLogFacets(bounds: { start: Date; end: Date }): Promise<void> {
   const request = ++facetsRequest
+  const sourceInstanceId = data.cockpitSourceInstanceId.value
   facetsLoaded.value = false
   facets.value = null
-  const result = await getRequestLogFacets(bounds.start.getTime(), bounds.end.getTime())
-  if (request !== facetsRequest || connectionType.value !== null) return
-  facets.value = result
-  facetsLoaded.value = true
+  try {
+    await assertCockpitSourceIdentity(sourceInstanceId)
+    const result = await getRequestLogFacets(bounds.start.getTime(), bounds.end.getTime())
+    await assertCockpitSourceIdentity(sourceInstanceId)
+    if (request !== facetsRequest || sourceInstanceId !== data.cockpitSourceInstanceId.value || connectionType.value !== null) return
+    facets.value = result
+  } catch { /* No facets from an unverified source may be published. */ }
+  finally { if (request === facetsRequest) facetsLoaded.value = true }
 }
 
 // ── P0-25 多源对账(账本读取层) ──────────────────────────────────────────────
@@ -1847,16 +1866,27 @@ const reconcileVerdictLabel = computed(() =>
 const mergedUsage = ref<MergedUsageResult | null>(null)
 
 /** 读一次多源对账 + 源清单 + 合并口径用量(全量窗口:对账要看全部重叠历史,不能被 7d/30d 截断)。 */
+let reconcileRequest = 0
 async function loadLedgerReconcile(): Promise<void> {
-  const [result, sources, merged] = await Promise.all([
-    reconcileLedgerSources(null),
-    listLedgerSources(),
-    mergedLedgerUsage(null),
-  ])
-  reconcile.value = result
-  ledgerSources.value = sources
-  mergedUsage.value = merged
-  reconcileLoaded.value = true
+  const request = ++reconcileRequest
+  const sourceInstanceId = data.cockpitSourceInstanceId.value
+  try {
+    await assertCockpitSourceIdentity(sourceInstanceId)
+    const [result, sources, merged] = await Promise.all([
+      reconcileLedgerSources(null),
+      listLedgerSources(),
+      mergedLedgerUsage(null),
+    ])
+    await assertCockpitSourceIdentity(sourceInstanceId)
+    if (request !== reconcileRequest || sourceInstanceId !== data.cockpitSourceInstanceId.value || connectionType.value !== null) return
+    reconcile.value = result
+    ledgerSources.value = sources
+    mergedUsage.value = merged
+    reconcileLoaded.value = true
+  } catch {
+    if (request !== reconcileRequest) return
+    reconcile.value = null; ledgerSources.value = []; mergedUsage.value = null; reconcileLoaded.value = false
+  }
 }
 
 // ── P0-15 合并口径用量(账本读取层,已拍板:按天 × 模型取大) ──────────────────
@@ -2000,6 +2030,7 @@ const unified = useUnifiedCost(
   computed(() => cockpitCumulativeTotalUsd.value),
   computed(() => cockpitCumulativeCostBasis.value),
   computed(() => cockpitCumulativeAccountBasis.value),
+  computed(() => data.cockpitSourceInstanceId.value),
 )
 
 /** 三端汇总分项格子的 note:无值时只给状态原因;有值时附口径标签。
@@ -2111,6 +2142,7 @@ function injectCliproxyManagementKey() {
 // loadCliproxyOverview 已合并到 reload 的 cliproxy 分支(单次并行请求,消除重复 getAuthFiles/getDebug/getRoutingStrategy)
 
 // ==================== cockpit 专属面板数据(5 类本地 JSON 一次性加载) ====================
+const cockpitOverviewSourceInstanceId = ref('unavailable')
 const cockpitStats = ref<CockpitStats | null>(null)
 const cockpitCodexAccounts = ref<CockpitCodexAccount[]>([])
 const cockpitGeminiAccounts = ref<CockpitGeminiAccount[]>([])
@@ -2214,9 +2246,29 @@ async function handleImportFile(event: Event) {
   }
 }
 
+function clearCockpitViewData() {
+  cockpitOverviewSourceInstanceId.value = 'unavailable'
+  cockpitStats.value = null
+  cockpitCodexAccounts.value = []; cockpitGeminiAccounts.value = []; cockpitAntigravityAccounts.value = []
+  cockpitClaudeAccounts.value = []; cockpitCursorAccounts.value = []; cockpitKiroAccounts.value = []
+  cockpitLocalAccess.value = null; cockpitModelProviders.value = []; cockpitGroupNameMap.value = new Map()
+  cockpitQuotaHistories.value = []; cockpitApiLog.value = null; cockpitLogWindowRange.value = null
+  cockpitCumulativeAccountCost.value = null; cockpitCumulativeAccountBasis.value = null
+  cockpitCumulativeModelCost.value = null; cockpitCumulativeModelBasis.value = null; cockpitCumulativeApiKey.value = null
+  cockpitCumulativeTotalUsd.value = null; cockpitCumulativeCostBasis.value = null
+  cockpitDataSourceRange.value = { startMs: null, endMs: null }
+  channelQuota.reset(); quotaCurrentAccounts.value = []; quotaModelGroups.value = null; quotaAccountGroups.value = null
+  facetsRequest += 1; facets.value = null; facetsLoaded.value = false
+  cockpitMetaRequest += 1; reconcileRequest += 1
+  reconcile.value = null; ledgerSources.value = []; mergedUsage.value = null; reconcileLoaded.value = false
+  ledgerIngestState.value = null
+  modelWindowGeneration += 1; selectedAccount.value = null; selectedAccountIds.value = new Set()
+}
+
 async function loadCockpitOverview(): Promise<CockpitBatchMetadata | undefined> {
   if (connectionType.value !== null) return
   try {
+    const { sourceInstanceId } = await getCockpitSourceIdentity()
     const [stats, codex, gemini, antigravity, localAccess, claude, cursor, kiro, providers, codexGroups, accountGroups] = await Promise.all([
       getCockpitStats(),
       getCockpitCodexAccounts(),
@@ -2231,6 +2283,12 @@ async function loadCockpitOverview(): Promise<CockpitBatchMetadata | undefined> 
       getCockpitCodexAccountGroups(),
       getCockpitAccountGroups(),
     ])
+    await assertCockpitSourceIdentity(sourceInstanceId)
+    if (cockpitOverviewSourceInstanceId.value !== sourceInstanceId) {
+      clearCockpitViewData()
+      data.clearCockpitSourceData(t('costCenter.integration.cockpitSourceReloading'))
+    }
+    cockpitOverviewSourceInstanceId.value = sourceInstanceId
     cockpitStats.value = stats
     cockpitCodexAccounts.value = codex
     cockpitGeminiAccounts.value = gemini
@@ -2240,10 +2298,12 @@ async function loadCockpitOverview(): Promise<CockpitBatchMetadata | undefined> 
     cockpitCursorAccounts.value = cursor
     cockpitKiroAccounts.value = kiro
     cockpitModelProviders.value = providers
-    cockpitGroupNameMap.value = cockpitGroupNameByAccountId(codexGroups, accountGroups)
-    return { stats: stats ?? undefined, accounts: codex, localAccess: localAccess ?? undefined }
+    cockpitGroupNameMap.value = cockpitGroupNameByAccountId(codexGroups, accountGroups, sourceInstanceId)
+    return { sourceInstanceId, stats: stats ?? undefined, accounts: codex, localAccess: localAccess ?? undefined }
   } catch (e) {
-    console.warn('[cockpit] overview load failed', errMsg(e, ''))
+    clearCockpitViewData()
+    data.clearCockpitSourceData(t('costCenter.integration.cockpitSourceReadFailed', { detail: errMsg(e, '') }))
+    throw e
   }
 }
 
@@ -2294,7 +2354,7 @@ const costSourceKind = computed<'sub2api' | 'cliproxy' | 'cockpit'>(() => {
   if (connectionType.value === 'cliproxy') return 'cliproxy'
   return 'cockpit'
 })
-const financeInstanceId = computed(() => connectionType.value === 'sub2api' ? connectionStore.active!.id : 'local')
+const financeInstanceId = computed(() => connectionType.value === 'sub2api' ? connectionStore.active!.id : connectionType.value === 'cliproxy' ? data.cliproxySourceInstanceId.value : data.cockpitSourceInstanceId.value)
 const operatingScope = computed(() => ({ source: costSourceKind.value, instanceId: financeInstanceId.value }))
 const operatingUsageReady = computed(() => {
   const scope = data.rangeAccountStatsScope.value
@@ -2511,16 +2571,16 @@ function accountOriginLabel(account: Account): string {
 function isCurrentAccount(account: Account): boolean {
   return account.extra?.cockpit_historical !== true && (connectionType.value !== 'cliproxy' || account.extra?.cliproxy_identity_source === 'management')
 }
-const currentAccounts = computed(() => accounts.value.filter(isCurrentAccount))
+const currentAccounts = computed(() => connectionType.value === 'cliproxy'
+  ? data.cliproxyLocalAccountLink.value ? cliproxyAuthFilesToAccounts(data.cliproxyAuthFiles.value, []) : []
+  : accounts.value.filter(isCurrentAccount))
 const currentAccountsReady = computed(() => (hasMeasuredData(sourceStates.value.accounts) || connectionType.value === 'cliproxy' && sourceStates.value.accounts.status === 'stale' && data.cliproxyManagementSnapshotAt.value != null)
-  && (connectionType.value !== 'cliproxy' || data.cliproxyLocalAccountLink.value && cliproxyOverview.value?.authFileCount != null))
+  && (connectionType.value !== 'cliproxy' || data.cliproxyLocalAccountLink.value && cliproxyOverview.value?.authFileCount != null && currentAccounts.value.length === data.cliproxyAuthFiles.value.length))
 const activeAccounts = computed(() => currentAccounts.value.filter((account) => currentAccountState(account).state === 'normal'))
 const currentAccountHealth = computed(() => {
   if (!currentAccountsReady.value) return null
   const counts = { normal: 0, limited: 0, error: 0, inactive: 0 }
-  for (const row of accountLedgers.value) {
-    if (!row.isHistorical && isCurrentAccount(row.account)) counts[currentAccountState(row.account).state] += 1
-  }
+  for (const account of currentAccounts.value) counts[currentAccountState(account).state] += 1
   return counts
 })
 const currentAccountHealthReason = computed(() => {
@@ -3342,7 +3402,7 @@ function rankingValue(row: { score: number; today: AccountWindowUsage | null; wi
   return row.score
 }
 
-const cockpitStatsByCostId = computed(() => new Map((cockpitStats.value?.accounts ?? []).map(account => [statsAccountCostId(account), account])))
+const cockpitStatsByCostId = computed(() => new Map((cockpitStats.value?.accounts ?? []).map(account => [statsAccountCostId(account, data.cockpitSourceInstanceId.value), account])))
 function cockpitAvgLatency(accountId: CostAccountId): number | null {
   if (connectionType.value === 'cliproxy') return data.cliproxyLatencyMap.value[String(accountId)] ?? null
   if (connectionType.value !== null) return null
@@ -3501,11 +3561,17 @@ function procurementStrongClass(basis: ProcurementBasis): string {
 }
 
 const accountDisplayUsage = computed(() => connectionType.value === null
-  ? cockpitSnapshotsToAccountUsage(channelQuota.allSnapshots.value, accounts.value, accountUsage.value)
+  ? cockpitSnapshotsToAccountUsage(channelQuota.sourceInstanceId.value === data.cockpitSourceInstanceId.value ? channelQuota.allSnapshots.value : [], accounts.value, accountUsage.value, Date.now(), data.cockpitSourceInstanceId.value)
   : accountUsage.value)
 function accountQuotaWindows(usage: AccountUsageInfo | undefined) {
   if (!usage) return []
   const periods: Array<{ key: string; label: string; reading: QuotaWindowReading | null | undefined }> = []
+  if (usage.primary_window || usage.secondary_window) {
+    periods.push(
+      { key: 'primary', label: t('costCenter.integration.quotaPrimaryWindow'), reading: usage.primary_window },
+      { key: 'secondary', label: t('costCenter.integration.quotaSecondaryWindow'), reading: usage.secondary_window },
+    )
+  }
   if (usage.five_hour || usage.seven_day || usage.seven_day_sonnet) {
     periods.push({ key: '5h', label: '5h', reading: usage.five_hour }, { key: '7d', label: '7d', reading: usage.seven_day })
   }
@@ -3518,7 +3584,7 @@ const upstreamRows = computed(() => {
   const rows = accountLedgers.value
     // 默认隐藏 cockpit 历史孤儿(已移除账号的 stats 残留):它们无套餐/无配额/无今日用量,
     // 混在主表会让状态、评分、用量窗口、成本列全部显示为 0 或默认值,掩盖真实号池。
-    .filter((row) => showHistoricalAccounts.value || !row.isHistorical)
+    .filter((row) => showHistoricalAccounts.value || !row.isHistorical || row.account.extra?.cliproxy_identity_source === 'usage_only')
     .filter((row) => matchesUpstreamProvider(row.account, platformFilter.value))
     .filter((row) => !query || [row.account.name, row.account.notes, row.account.platform, accountOriginLabel(row.account), ...costAccountGroupNames(row.account)].some((value) => String(value || '').toLowerCase().includes(query)))
     .map((row) => {
@@ -3661,17 +3727,18 @@ const currentPoolStartedAtLabel = computed(() => {
   })
 })
 const oauthActiveCount = computed<number | null>(() => operatingUsageReady.value ? poolOperatingRows.value.filter(row => !row.isUnattributedUsage && (operatingUsageForId(row.accountId)?.requests ?? 0) > 0).length : null)
-const oauthNormalCount = computed(() => oauthAccounts.value.filter((row) => currentAccountState(row.account).state === 'normal').length)
-const oauthLimitedCount = computed(() => oauthAccounts.value.filter((row) => currentAccountState(row.account).limited === 1).length)
-const oauthErrorCount = computed(() => oauthAccounts.value.filter((row) => currentAccountState(row.account).error === 1).length)
+const poolCurrentAccounts = computed(() => currentAccounts.value.filter(account => matchesAccountPoolProvider(account, poolPlatform.value)))
+const oauthNormalCount = computed(() => currentAccountsReady.value ? poolCurrentAccounts.value.filter(account => currentAccountState(account).state === 'normal').length : null)
+const oauthLimitedCount = computed(() => currentAccountsReady.value ? poolCurrentAccounts.value.filter(account => currentAccountState(account).limited === 1).length : null)
+const oauthErrorCount = computed(() => currentAccountsReady.value ? poolCurrentAccounts.value.filter(account => currentAccountState(account).error === 1).length : null)
 /** cliproxy 号池健康度:基于 auth-files 真实 status(disabled/inactive, unavailable/error, active/normal)。 */
 const cliproxyHealthSummary = computed(() => {
-    const rows = oauthAccounts.value
+    const rows = poolCurrentAccounts.value
     return {
-      total: rows.length,
-      normal: rows.filter((row) => currentAccountState(row.account).state === 'normal').length,
-      inactive: rows.filter((row) => currentAccountState(row.account).state === 'inactive').length,
-      error: rows.filter((row) => currentAccountState(row.account).error === 1).length,
+      total: currentAccountsReady.value ? rows.length : null,
+      normal: currentAccountsReady.value ? rows.filter(account => currentAccountState(account).state === 'normal').length : null,
+      inactive: currentAccountsReady.value ? rows.filter(account => currentAccountState(account).state === 'inactive').length : null,
+      error: currentAccountsReady.value ? rows.filter(account => currentAccountState(account).error === 1).length : null,
     }
 })
 /** 真实推理档位行(排除"未记录档位"那一行 —— 它不是一个档位)。 */
@@ -3727,10 +3794,10 @@ const poolGroups = computed(() => {
   }
   return [...groups].map(([plan, rows]) => {
     const ids = new Set(rows.map(row => row.accountId))
-    const current = accountLedgers.value.filter(row => !row.isHistorical && ids.has(String(row.account.id)))
-    const normal = current.filter(row => currentAccountState(row.account).state === 'normal').length
-    const limited = current.filter(row => currentAccountState(row.account).limited === 1).length
-    const errors = current.filter(row => currentAccountState(row.account).error === 1).length
+    const current = currentAccounts.value.filter(account => connectionType.value === 'cliproxy' ? classifyUpstreamProvider(account) === plan : ids.has(String(account.id)))
+    const normal = currentAccountsReady.value ? current.filter(account => currentAccountState(account).state === 'normal').length : null
+    const limited = currentAccountsReady.value ? current.filter(account => currentAccountState(account).limited === 1).length : null
+    const errors = currentAccountsReady.value ? current.filter(account => currentAccountState(account).error === 1).length : null
     const summary = summarizeOperatingRows(rows)
     const today = hasMeasuredData(sourceStates.value.todayStats) ? summarizeKnownAmounts(rows.map(row => {
       const usage = data.todayStats.value[row.accountId]
@@ -3742,14 +3809,14 @@ const poolGroups = computed(() => {
         : connectionType.value === 'cliproxy' ? providerLabels[plan as UpstreamProviderKey]
           : plan === 'unknown' ? t('costCenter.text.unidentifiedPlan') : plan[0].toUpperCase() + plan.slice(1),
       count: summary.accountCount, isUnattributed: plan === 'unattributed_usage', productive: operatingUsageReady.value ? rows.filter(row => !row.isUnattributedUsage && (operatingUsageForId(row.accountId)?.requests ?? 0) > 0).length : null,
-      normal, limited, errors, quotaRemaining: averageQuotaRemaining(current.map(row => row.usage)),
+      normal, limited, errors, quotaRemaining: averageQuotaRemaining(accountLedgers.value.filter(row => ids.has(String(row.account.id))).map(row => row.usage)),
       expenseSummary: summary.expenseCny, hourlySummary: summary.hourlyExpenseCny,
       averageExpenseSummary: scaleSummary(summary.expenseCny, summary.accountCount ? 1 / summary.accountCount : null),
       outputSummary: operatingOutput(summary), sourceCostSummary: sourceCostSummary(rows),
       requests: operatingUsageReady.value ? rows.reduce((sum, row) => sum + (operatingUsageForId(row.accountId)?.requests ?? 0), 0) : null,
       tokens: !operatingUsageReady.value ? null : summarizeKnownAmounts(rows.map(row => operatingUsageForId(row.accountId)?.tokens ?? (operatingUsageComplete.value ? 0 : null))).total,
       dayForecastUsd, monthForecastUsd: dayForecastUsd == null ? null : dayForecastUsd * new Date(now.value.getFullYear(), now.value.getMonth() + 1, 0).getDate(),
-      statusRing: statusRingGradient(normal, limited, errors),
+      statusRing: normal == null || limited == null || errors == null || normal + limited + errors === 0 ? 'conic-gradient(#303830 0 100%)' : statusRingGradient(normal, limited, errors),
     }
   })
 })
@@ -3917,7 +3984,7 @@ async function reload(background = false) {
         getApiKeyUsage().catch(() => ({} as Record<string, Record<string, ApiKeyUsageBucket>>)),
         getCliproxyUsageSnapshot().catch((failure): CliproxyUsageSnapshot => {
           cpaReadError = { detail: errMsg(failure, '') }
-          return { available: false, events: [], readStartMs: null, readEndMs: null }
+          return { available: false, events: [], readStartMs: null, readEndMs: null, sourceInstanceId: 'unavailable', managementLinkAllowed: false }
         }),
         getCliproxyModelPrices().catch(() => ({} as Record<string, LitellmPricing>)),
         getDebug().catch(() => null),
@@ -3943,7 +4010,7 @@ async function reload(background = false) {
       exchangeRate.value = await loadUsdCnyExchangeRate()
       // 两个窗口分开传:range=顶部主窗口(trend/ops/账号/采购),modelCostRange=模型区独立窗口
       // (models 表 + modelRoutes 路由明细表)。cliproxy 没有接口,这两张表由 store 本地按窗口过滤。
-      data.loadFromCliproxy(authFiles, config, cliproxyOverview.value?.version ?? null, events, prices, keyUsage, range.value, modelCostRange.value, exchangeRate.value.rate, batchAnchor, usageSnapshot.available, authFilesFailed ? () => cliproxyAuthFileError.value : null)
+      data.loadFromCliproxy(authFiles, config, cliproxyOverview.value?.version ?? null, events, prices, keyUsage, range.value, modelCostRange.value, exchangeRate.value.rate, batchAnchor, usageSnapshot.available, authFilesFailed ? () => cliproxyAuthFileError.value : null, usageSnapshot)
       if (authFilesFailed && data.cliproxyManagementSnapshotAt.value && cliproxyOverview.value) cliproxyOverview.value.authFileCount = data.cliproxyAuthFiles.value.length
       if (!usageSnapshot.available) {
         for (const key of ['dashboard', 'todayStats', 'rangeStats', 'models', 'ops', 'modelRoutes', 'modelAudit', 'economics'] as const) {
@@ -3952,22 +4019,21 @@ async function reload(background = false) {
       }
       await data.mergeLocalCostProfiles() // cliproxy 同样支持本地 cost_profile 回填
     } else if (connectionType.value === null) {
+      try {
       // cockpit 复用 sub2api 同套深色模板:先装本地数据进 store(驱动 modelCostRows/upstreamRows/financialTrend 等 computed),
       // 再读本地访问配置(api tab 用) + 配额历史(accountUsage) + 路由日志(modelRoutes)。
       // range 切换时 loadFromCockpit 按 range 取对应时序窗口。
       // 汇率:cockpit 分支不走通用 reload,需独立请求网络实时汇率(与 cliproxy 同理)
       exchangeRate.value = await loadUsdCnyExchangeRate()
       cockpitMetadata = await loadCockpitOverview()
-      // 用量台账(cockpit 移除 API 会清数据、重加从 0 计数——成本端不能丢):
-      // 快照当前用量(含孤儿) + 回填被清零的回归账号 + 注入 stats 已消失的账号,
-      // 再持久化合并结果。台账读失败(旧版宿主/非桌面)返 null → 跳过合并,主流程不受影响。
-      if (cockpitStats.value) {
-        const ledger = await readCostLedger()
-        // Ledger merging replaces row.usage and appends accounts; keep the raw batch for Unified.
-        cockpitStats.value = { ...cockpitStats.value, accounts: cockpitStats.value.accounts.map(account => ({ ...account })) }
-        const mergedLedger = applyCockpitUsageLedger(cockpitStats.value, ledger?.accounts ?? null)
-        await writeCostLedger(mergedLedger)
-      }
+      if (!cockpitMetadata) throw new Error('Cockpit source metadata is unavailable')
+      const sourceInstanceId = cockpitMetadata.sourceInstanceId
+      // An unreadable saved ledger is not a first-use empty ledger. Preserve the file and skip its write.
+      let savedLedger: Awaited<ReturnType<typeof readCostLedger>> = null
+      let ledgerReadable = false
+      let ledgerReadFailure: string | null = null
+      try { savedLedger = await readCostLedger(); ledgerReadable = true }
+      catch (reason) { ledgerReadFailure = errMsg(reason, '') }
       // 并行读配额历史 + apikey 渠道信息(名+baseUrl)。
       // 当天路由日志(实测 40MB+)不再无条件读:只有 Rust 聚合缺项(分钟级窗口/聚合失败)
       // 需要回退时才读,避免每次切窗口都往 WebView 塞进几十 MB 字符串。
@@ -4035,7 +4101,7 @@ async function reload(background = false) {
             : null
           if (summary?.buckets.length) {
             multiDayOps = clipOpsBucketsToWindow(cockpitOpsSummaryToTrend(summary, bucketHours), range.value)
-            multiDayAccountRequests = cockpitOpsAccountsToRequestCounts(summary.accounts ?? [])
+            multiDayAccountRequests = cockpitOpsAccountsToRequestCounts(summary.accounts ?? [], sourceInstanceId)
             cockpitLogWindowRange.value = summary.min_date && summary.max_date
               ? { min: summary.min_date, max: summary.max_date }
               : null
@@ -4115,10 +4181,18 @@ async function reload(background = false) {
             cockpitDataSourceRange.value = { startMs: null, endMs: null }
           }
         }
-        await data.loadFromCockpit(cockpitStats.value, cockpitLocalAccess.value, range.value, quotaHistories, apiLog, apiKeyInfoMap, new Map(cockpitCodexAccounts.value.map((a) => [a.id, a])), platformInputs, multiDayOps, multiDayAccountRequests, multiDayRoutes, requestLog, todayRequestLog, cockpitGroupNameMap.value, cockpitWindowTtft, costQueryWindow)
+        await assertCockpitSourceIdentity(sourceInstanceId)
+        if (ledgerReadable) {
+          // Preserve raw same-batch metadata for Unified; ledger history only augments the account archive.
+          cockpitStats.value = { ...cockpitStats.value, accounts: cockpitStats.value.accounts.map(account => ({ ...account })) }
+          const mergedLedger = applyCockpitUsageLedger(cockpitStats.value, savedLedger?.accounts ?? null)
+          await writeCostLedger(mergedLedger, sourceInstanceId)
+        }
+        await data.loadFromCockpit(cockpitStats.value, cockpitLocalAccess.value, range.value, quotaHistories, apiLog, apiKeyInfoMap, new Map(cockpitCodexAccounts.value.map((a) => [a.id, a])), platformInputs, multiDayOps, multiDayAccountRequests, multiDayRoutes, requestLog, todayRequestLog, cockpitGroupNameMap.value, cockpitWindowTtft, costQueryWindow, sourceInstanceId)
         if (modelWindowDetached.value && modelCostRange.value !== range.value) await reloadModelWindow()
         // 装完 accounts 后回填本地 cost_profile(cockpit 无后端,手动配置存本地 JSON,reload 不丢)
         await data.mergeLocalCostProfiles()
+        if (ledgerReadFailure) error.value = t('costCenter.integration.cockpitUsageLedgerReadFailed', { detail: ledgerReadFailure })
         // ★ 账本持久化(2026-09-12):二期 Rust 的 ledger_ingest 此前**全仓零调用**,
         //   于是 cost_ledger.sqlite 从未落盘——cockpit 自己轮转/重建时历史就跟着丢了。
         //   这里在 cockpit 数据装好后**后台触发一次**(fire-and-forget,不阻塞首屏):
@@ -4126,7 +4200,9 @@ async function reload(background = false) {
         //   重复触发由 Rust `INGEST_LOCK` 让路 + 水位幂等兜底。
         //   2026-09-12 起一轮会顺序摄取**全部已知源**(codex_logs + codex_sessions),
         //   结果逐源返回,UI 不许合并成一句"成功"。
-        ledgerIngestOnce((result) => {
+        ledgerIngestOnce(async (result) => {
+          try { await assertCockpitSourceIdentity(sourceInstanceId) } catch { return }
+          if (data.cockpitSourceInstanceId.value !== sourceInstanceId || connectionType.value !== null) return
           ledgerIngestState.value = result
           const allDown = ledgerAllUnavailableReason(result)
           if (allDown) {
@@ -4164,7 +4240,15 @@ async function reload(background = false) {
         // 显式清空并把相关 sourceStates 置 unavailable。顺带收尾 loading:
         // 只有 loadFromCockpit 末尾会把它置回 false,跳过它必须自己置,否则 reload() 因 loading
         // 恒真而永久早退,页面卡在加载态。
-        data.clearCockpitSourceData(t('costCenter.text.cockpitNotInstalledOrCodexLocalAccessStats'))
+        await assertCockpitSourceIdentity(sourceInstanceId)
+        data.clearCockpitSourceData(t('costCenter.text.cockpitNotInstalledOrCodexLocalAccessStats'), sourceInstanceId)
+      }
+      } catch (reason) {
+        cockpitMetadata = undefined
+        clearCockpitViewData()
+        const detail = errMsg(reason, '')
+        data.clearCockpitSourceData(t('costCenter.integration.cockpitSourceReadFailed', { detail }))
+        error.value = t('costCenter.integration.cockpitSourceReadFailed', { detail })
       }
     }
     if (!reloadQueued) unifiedReadStarted = loadVisibleUnified(summaryWindow, cockpitMetadata)
@@ -4206,12 +4290,14 @@ async function reloadModelWindow() {
   const generation = ++modelWindowGeneration
   const modelRange = modelCostRange.value
   const source = connectionType.value
-  const current = () => generation === modelWindowGeneration && modelCostRange.value === modelRange && connectionType.value === source && modelRange !== range.value
+  const sourceInstanceId = data.cockpitSourceInstanceId.value
+  const current = () => generation === modelWindowGeneration && modelCostRange.value === modelRange && connectionType.value === source && data.cockpitSourceInstanceId.value === sourceInstanceId && modelRange !== range.value
   modelWindowReadFailed.value = false
   if (modelRange === range.value) { reload(); return }
   if (connectionType.value !== null) { reload(); return } // sub2api:接口按 modelCostRange 传窗口;cliproxy:store 按 modelRange 本地过滤
   if (!isTauriDesktop) { reload(); return }
   try {
+    await assertCockpitSourceIdentity(sourceInstanceId)
     const bucketHours = modelRange === '7d' || modelRange === '30d' ? 24 : 1
     const bounds = usageWindowBounds(modelRange)
     const [opsSummary, requestLog] = await Promise.all([
@@ -4224,10 +4310,16 @@ async function reloadModelWindow() {
       ),
       getCockpitRequestLogSummary(bucketHours, bounds.start.getTime(), bounds.end.getTime(), false),
     ])
+    await assertCockpitSourceIdentity(sourceInstanceId)
     if (!current()) return
     loadCockpitModelWindow(requestLog, opsSummary?.routes?.length ? opsSummary.routes : null, modelRange)
   } catch (e) {
     if (!current()) return
+    try { await assertCockpitSourceIdentity(sourceInstanceId) } catch (identityError) {
+      clearCockpitViewData()
+      data.clearCockpitSourceData(errMsg(identityError, ''))
+      return
+    }
     console.warn(t('costCenter.text.cockpitIndependentModelWindowFetchFailedFallingBack'), e)
     loadCockpitModelWindow(null, null, modelRange)
     const snapshot = cockpitStats.value && modelCostAccountId.value == null ? cockpitWindowForRange(cockpitStats.value, modelRange) : undefined

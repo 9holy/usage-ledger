@@ -715,6 +715,24 @@ pub fn ledger_db_path() -> Result<PathBuf, LedgerError> {
     Ok(path)
 }
 
+/// The historical legacy Cockpit store keeps its existing ledger. Each
+/// independent source gets its own usage/checkpoint database, while
+/// finance events and the monitor continue using their globally scoped tables.
+pub fn cockpit_ledger_db_path() -> Result<PathBuf, LedgerError> {
+    let identity = crate::cockpit_data_path::source_instance_id().map_err(LedgerError::Path)?;
+    cockpit_ledger_db_path_for_identity(&identity)
+}
+
+/// Use the identity captured with a source path; do not reselect its destination.
+pub fn cockpit_ledger_db_path_for_identity(identity: &str) -> Result<PathBuf, LedgerError> {
+    let base = ledger_db_path()?;
+    let directory = base.parent().ok_or_else(|| LedgerError::Path("账本路径缺少父目录".to_string()))?;
+    let scoped = crate::cockpit_data_path::local_state_dir_for_identity(directory, identity).map_err(LedgerError::Path)?;
+    let path = ledger_db_path_in(&scoped);
+    assert_not_cockpit_path(&path)?;
+    Ok(path)
+}
+
 /// 按优先级挑出第一个可创建的账本目录。
 fn resolve_app_data_dir() -> Result<PathBuf, LedgerError> {
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -737,22 +755,92 @@ fn resolve_app_data_dir() -> Result<PathBuf, LedgerError> {
             "无法定位用户数据目录(APPDATA/USERPROFILE/HOME 均未设置)".to_string(),
         ));
     }
+    let mut first_permitted = None;
+    let mut last_path_error = None;
     for candidate in &candidates {
+        // Validate before creating any directory: even a fallback candidate can
+        // be inside a custom Cockpit source selected through the environment.
+        if let Err(error) = assert_not_cockpit_path(&ledger_db_path_in(candidate)) {
+            last_path_error = Some(error);
+            continue;
+        }
+        first_permitted.get_or_insert_with(|| candidate.clone());
         if std::fs::create_dir_all(candidate).is_ok() {
             return Ok(candidate.clone());
         }
     }
     // 全都创建失败:返回首选候选,让随后的 open() 报出真实的 SQLite 错误。
-    Ok(candidates[0].clone())
+    first_permitted.ok_or_else(|| last_path_error.unwrap_or_else(|| LedgerError::Path(
+        "没有独立于 Cockpit 源数据的可用账本目录".to_string(),
+    )))
+}
+
+/// Resolve existing directory aliases without creating missing components. This
+/// also checks a future ledger path whose parent directories do not exist yet.
+pub(crate) fn resolved_path_for_ownership(path: &Path) -> Result<PathBuf, LedgerError> {
+    use std::path::Component;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(|error| LedgerError::Path(error.to_string()))?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::Prefix(_) | Component::RootDir => {
+                resolved.push(component.as_os_str());
+                continue;
+            }
+            Component::ParentDir => { resolved.pop(); }
+            other => resolved.push(other.as_os_str()),
+        }
+        match std::fs::canonicalize(&resolved) {
+            Ok(canonical) => resolved = canonical,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling alias is not evidence of an independent location.
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(LedgerError::Path(format!("无法确认账本路径链接的归属: {}", resolved.display())));
+                    }
+                    Err(metadata_error) if metadata_error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(LedgerError::Path(metadata_error.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+            Err(error) => return Err(LedgerError::Path(format!("无法确认账本路径归属: {error}"))),
+        }
+    }
+    Ok(resolved)
+}
+
+fn path_is_within(path: &Path, directory: &Path) -> bool {
+    let mut path_components = path.components();
+    directory.components().all(|directory_component| {
+        path_components.next().is_some_and(|path_component| {
+            if cfg!(windows) {
+                path_component.as_os_str().eq_ignore_ascii_case(directory_component.as_os_str())
+            } else {
+                path_component == directory_component
+            }
+        })
+    })
 }
 
 /// 防串味自检:账本绝不能落在 cockpit 数据目录里,也不能套用 cockpit 的库文件名。
 ///
 /// cockpit 目录由 cockpit 拥有并会自行清理,我们的账放那里等于把命交出去。
 pub fn assert_not_cockpit_path(path: &Path) -> Result<(), LedgerError> {
-    let under_cockpit = path
-        .components()
-        .any(|c| c.as_os_str().eq_ignore_ascii_case(".antigravity_cockpit"));
+    let resolved = resolved_path_for_ownership(path)?;
+    let reserved_directory = |candidate: &Path| candidate.components().any(|component| {
+        [".antigravity_cockpit", ".cockpit_tools", ".antigravity_cockpit_dev", ".cockpit_tools_dev"]
+            .iter().any(|name| component.as_os_str().eq_ignore_ascii_case(name))
+    });
+    let selected_source = crate::cockpit_data_path::data_dir().ok()
+        .map(|directory| resolved_path_for_ownership(&directory)).transpose()?;
+    let under_cockpit = reserved_directory(path) || reserved_directory(&resolved)
+        || selected_source.as_ref().is_some_and(|directory| path_is_within(&resolved, directory));
     if under_cockpit {
         return Err(LedgerError::Path(format!(
             "账本不得落在 cockpit 数据目录: {}",

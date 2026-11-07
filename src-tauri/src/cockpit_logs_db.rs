@@ -23,8 +23,12 @@
 
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+
+#[cfg(test)]
+#[path = "cockpit_logs_db_contract_tests.rs"]
+mod contract_tests;
 
 /// 长上下文档位阈值(单次请求 input_tokens 超过此值走长文本价)。
 /// 与 cockpit `CODEX_LOCAL_ACCESS_LONG_CONTEXT_THRESHOLD_TOKENS` 同值。
@@ -237,12 +241,9 @@ fn unavailable(reason: impl Into<String>, bucket_hours: i64) -> RequestLogSummar
     }
 }
 
-/// cockpit 数据目录(`%USERPROFILE%\.antigravity_cockpit`)。路径**只在这里拼**。
+/// 与 JSON、配额及用量监控共用同一 Cockpit 源目录选择规则。
 pub fn cockpit_data_dir() -> Result<PathBuf, String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "无法定位用户主目录(USERPROFILE/HOME 均未设置)".to_string())?;
-    Ok(PathBuf::from(home).join(".antigravity_cockpit"))
+    crate::cockpit_data_path::data_dir()
 }
 
 pub fn request_log_db_path() -> Result<PathBuf, String> {
@@ -292,6 +293,46 @@ fn finish(conn: Connection) -> Result<Connection, String> {
 /// 计价侧就只剩两条路——按单一档位猜(编造),或一律 ×1(有 priority 流量时少算 50%)。
 /// 进键后每格单档位,倍率可精确施加;代价只是(模型×账号×key)多出几个分组,量级可忽略。
 type GroupAggMap = HashMap<(String, String, String, String), (TokenSplit, Option<i64>, Option<i64>)>;
+
+// Values cross a JSON/JavaScript boundary. Reject malformed or unrepresentable
+// source counts instead of clamping them into a plausible zero or rounded total.
+const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+fn validate_count(name: &str, value: i64) -> Result<(), String> {
+    if !(0..=MAX_SAFE_INTEGER).contains(&value) {
+        return Err(format!("request_logs {name} 不是可精确表示的非负整数: {value}"));
+    }
+    Ok(())
+}
+
+fn validate_amount(name: &str, value: f64) -> Result<(), String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("request_logs {name} 不是有效非负数"));
+    }
+    Ok(())
+}
+
+fn validate_success(value: i64) -> Result<(), String> {
+    if value != 0 && value != 1 {
+        return Err(format!("request_logs success 必须为 0 或 1: {value}"));
+    }
+    Ok(())
+}
+
+fn validate_split_totals(split: &TokenSplit) -> Result<(), String> {
+    for (name, value) in [
+        ("requests", split.requests), ("success", split.success), ("error", split.error),
+        ("std_normal_input", split.std_normal_input), ("std_cached", split.std_cached),
+        ("std_output", split.std_output), ("long_normal_input", split.long_normal_input),
+        ("long_cached", split.long_cached), ("long_output", split.long_output),
+    ] {
+        validate_count(name, value)?;
+    }
+    let tokens = split.std_normal_input + split.std_cached + split.std_output
+        + split.long_normal_input + split.long_cached + split.long_output;
+    validate_count("total_tokens", tokens)?;
+    validate_amount("estimated_cost_usd sum", split.estimated_cost_usd)
+}
 
 /// 扫描窗口内的单请求用量,按 (时间桶 × 模型) 与 (模型 × 账号 × API Key) 两个维度分档聚合。
 ///
@@ -352,10 +393,10 @@ pub fn summarize(
                 row.get::<_, i64>(6)?,
                 row.get::<_, i64>(7)?,
                 row.get::<_, f64>(8)?,
-                row.get::<_, i64>(9).unwrap_or(0),
-                row.get::<_, String>(10).unwrap_or_default(),
-                row.get::<_, Option<i64>>(11).unwrap_or(None),
-                row.get::<_, String>(12).unwrap_or_default(),
+                row.get::<_, i64>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<i64>>(11)?,
+                row.get::<_, String>(12)?,
             ))
         })
         .map_err(|e| format!("遍历 request_logs 失败: {e}"))?;
@@ -367,11 +408,21 @@ pub fn summarize(
     let mut row_count = 0i64;
     let mut min_ts: Option<i64> = None;
     let mut max_ts: Option<i64> = None;
+    let mut totals = TokenSplit::default();
 
     for row in rows {
         let (model, account, api_key, ts, input, output, cached, success, estimated, latency, error_cat, status, service_tier) =
             row.map_err(|e| format!("读取 request_logs 行失败: {e}"))?;
-        row_count += 1;
+        for (name, value) in [("timestamp", ts), ("input_tokens", input), ("output_tokens", output), ("cached_tokens", cached), ("latency_ms", latency)] {
+            validate_count(name, value)?;
+        }
+        validate_success(success)?;
+        validate_amount("estimated_cost_usd", estimated)?;
+        // The previous sum and each new row are bounded before addition; their
+        // sum cannot overflow i64. The full-window guard also bounds each group.
+        totals.add(input, output, cached, success == 1, estimated, &error_cat, status);
+        validate_split_totals(&totals)?;
+        row_count = totals.requests;
         min_ts = Some(min_ts.map_or(ts, |m: i64| m.min(ts)));
         max_ts = Some(max_ts.map_or(ts, |m: i64| m.max(ts)));
 
@@ -481,7 +532,8 @@ pub fn summarize_cockpit_request_logs(
 pub struct PriceVariant {
     pub input_usd_per_million: f64,
     pub output_usd_per_million: f64,
-    pub cached_input_usd_per_million: f64,
+    /// NULL is the upstream's explicit "no cache price recorded", not free.
+    pub cached_input_usd_per_million: Option<f64>,
     /// 使用该组单价的请求数
     pub rows: i64,
     /// 该组里**长上下文**请求数(`input_tokens > 272_000`)。
@@ -669,7 +721,7 @@ pub fn facets(
         "SELECT model_id, success, \
          {}, {}, {}, {}, \
          {}, {}, {}, {}, \
-         {}, {}, {}, {} \
+         {}, {}, {}, {}, {} \
          FROM request_logs WHERE timestamp >= ?1 AND timestamp <= ?2",
         expr_or(&columns, "error_category", "''"),
         expr_or(&columns, "reasoning_tokens", "0"),
@@ -678,11 +730,12 @@ pub fn facets(
         expr_or(&columns, "request_kind", "''"),
         expr_or(&columns, "input_usd_per_million", "0"),
         expr_or(&columns, "output_usd_per_million", "0"),
-        expr_or(&columns, "cached_input_usd_per_million", "0"),
+        expr_or(&columns, "cached_input_usd_per_million", "NULL"),
         expr_or(&columns, "input_tokens", "0"),
         expr_or(&columns, "output_tokens", "0"),
         expr_or(&columns, "cached_tokens", "0"),
         expr_or(&columns, "estimated_cost_usd", "0"),
+        expr_or(&columns, "model_pricing_version", "NULL"),
     );
 
     let mut stmt = conn.prepare(&sql).map_err(|e| format!("查询 request_logs 失败: {e}"))?;
@@ -690,19 +743,20 @@ pub fn facets(
         .query_map(rusqlite::params![lo, hi], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, i64>(1).unwrap_or(0),
-                row.get::<_, String>(2).unwrap_or_default(),
-                row.get::<_, i64>(3).unwrap_or(0),
-                row.get::<_, String>(4).unwrap_or_default(),
-                row.get::<_, String>(5).unwrap_or_default(),
-                row.get::<_, String>(6).unwrap_or_default(),
-                row.get::<_, f64>(7).unwrap_or(0.0),
-                row.get::<_, f64>(8).unwrap_or(0.0),
-                row.get::<_, f64>(9).unwrap_or(0.0),
-                row.get::<_, i64>(10).unwrap_or(0),
-                row.get::<_, i64>(11).unwrap_or(0),
-                row.get::<_, i64>(12).unwrap_or(0),
-                row.get::<_, f64>(13).unwrap_or(0.0),
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, f64>(7)?,
+                row.get::<_, f64>(8)?,
+                row.get::<_, Option<f64>>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, f64>(13)?,
+                row.get::<_, Option<i64>>(14)?,
             ))
         })
         .map_err(|e| format!("遍历 request_logs 失败: {e}"))?;
@@ -713,33 +767,15 @@ pub fn facets(
     out.present_columns = columns.clone();
     out.missing_columns = missing_columns;
 
-    // 单价版本号单独查一次(它不在上面 14 列里,避免主循环变宽)
-    let pricing_expr = expr_or(&columns, "model_pricing_version", "NULL");
-    let has_pricing = !pricing_expr.eq_ignore_ascii_case("NULL");
-    let mut price_versions: HashMap<String, Vec<i64>> = HashMap::new();
-    if has_pricing {
-        let vsql = format!(
-            "SELECT model_id, {pricing_expr} FROM request_logs \
-             WHERE timestamp >= ?1 AND timestamp <= ?2 AND {pricing_expr} IS NOT NULL"
-        );
-        if let Ok(mut vstmt) = conn.prepare(&vsql) {
-            if let Ok(vrows) = vstmt.query_map(rusqlite::params![lo, hi], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            }) {
-                for v in vrows.flatten() {
-                    price_versions.entry(v.0).or_default().push(v.1);
-                }
-            }
-        }
-    }
-
-    // 模型 → (单价三元组 → 聚合)。单价三元组用 f64 位模式做键,避免 NaN/-0.0 串组。
+    // Version provenance belongs to the exact price group, in the same SQLite
+    // read snapshot. A model-wide version list falsely labels historical prices.
     #[derive(Default)]
     struct VariantAgg {
         rows: i64,
         cost: f64,
         long_context_rows: i64,
         standard_rows: i64,
+        pricing_versions: BTreeSet<i64>,
     }
     #[derive(Default)]
     struct ModelAgg {
@@ -749,17 +785,31 @@ pub fn facets(
         cached: i64,
         reasoning: i64,
         cost: f64,
-        variants: HashMap<(u64, u64, u64), VariantAgg>,
+        variants: HashMap<(u64, u64, Option<u64>), VariantAgg>,
     }
     let mut models: HashMap<String, ModelAgg> = HashMap::new();
+    let mut total_tokens = 0i64;
 
     for row in rows {
         let (
             model, success, error_cat, reasoning, effort, gateway, kind,
-            in_p, out_p, cached_p, input_tok, output_tok, cached_tok, cost,
+            in_p, out_p, cached_p, input_tok, output_tok, cached_tok, cost, pricing_version,
         ) = row.map_err(|e| format!("读取 request_logs 行失败: {e}"))?;
 
+        validate_success(success)?;
+        for (name, value) in [("input_tokens", input_tok), ("output_tokens", output_tok), ("cached_tokens", cached_tok), ("reasoning_tokens", reasoning)] {
+            validate_count(name, value)?;
+        }
+        for (name, value) in [("input_usd_per_million", in_p), ("output_usd_per_million", out_p), ("estimated_cost_usd", cost)] {
+            validate_amount(name, value)?;
+        }
+        if let Some(price) = cached_p { validate_amount("cached_input_usd_per_million", price)?; }
+        if let Some(version) = pricing_version { validate_count("model_pricing_version", version)?; }
+        total_tokens += input_tok + output_tok;
+        validate_count("total_tokens sum", total_tokens)?;
+
         out.row_count += 1;
+        validate_count("row_count", out.row_count)?;
         if success != 0 {
             out.success_rows += 1;
         } else {
@@ -774,6 +824,7 @@ pub fn facets(
         }
         if reasoning > 0 {
             out.reasoning_tokens += reasoning;
+            validate_count("reasoning_tokens sum", out.reasoning_tokens)?;
             out.reasoning_rows += 1;
         }
         for (raw, map) in [
@@ -793,11 +844,14 @@ pub fn facets(
         m.output += output_tok;
         m.cached += cached_tok;
         m.reasoning += reasoning;
-        m.cost += if cost.is_finite() { cost } else { 0.0 };
-        let key = (in_p.to_bits(), out_p.to_bits(), cached_p.to_bits());
+        m.cost += cost;
+        validate_count("cached_tokens sum", m.cached)?;
+        validate_amount("estimated_cost_usd sum", m.cost)?;
+        let key = (in_p.to_bits(), out_p.to_bits(), cached_p.map(f64::to_bits));
         let v = m.variants.entry(key).or_default();
         v.rows += 1;
-        v.cost += if cost.is_finite() { cost } else { 0.0 };
+        v.cost += cost;
+        if let Some(version) = pricing_version { v.pricing_versions.insert(version); }
         // 用长上下文档位给单价组"归位":两组单价里哪组是标准档、哪组是长文本档
         if input_tok > LONG_CONTEXT_THRESHOLD_TOKENS {
             v.long_context_rows += 1;
@@ -808,24 +862,18 @@ pub fn facets(
 
     let mut snapshots: Vec<ModelPriceSnapshot> = Vec::with_capacity(models.len());
     for (model, agg) in models {
-        let versions = {
-            let mut vs = price_versions.get(&model).cloned().unwrap_or_default();
-            vs.sort_unstable();
-            vs.dedup();
-            vs
-        };
         let mut variants: Vec<PriceVariant> = agg
             .variants
             .into_iter()
             .map(|((ib, ob, cb), v)| PriceVariant {
                 input_usd_per_million: f64::from_bits(ib),
                 output_usd_per_million: f64::from_bits(ob),
-                cached_input_usd_per_million: f64::from_bits(cb),
+                cached_input_usd_per_million: cb.map(f64::from_bits),
                 rows: v.rows,
                 long_context_rows: v.long_context_rows,
                 standard_rows: v.standard_rows,
                 estimated_cost_usd: v.cost,
-                pricing_versions: versions.clone(),
+                pricing_versions: v.pricing_versions.into_iter().collect(),
             })
             .collect();
         variants.sort_by_key(|v| std::cmp::Reverse(v.rows));
@@ -1508,7 +1556,8 @@ mod tests {
         assert_eq!(old.input_usd_per_million, 2.0);
         assert_eq!(new.rows, 1, "新价用了 1 次");
         assert_eq!(new.input_usd_per_million, 4.0);
-        assert_eq!(new.pricing_versions, vec![3, 4], "版本号去重升序");
+        assert_eq!(old.pricing_versions, vec![3], "旧价只标记实际使用过的版本");
+        assert_eq!(new.pricing_versions, vec![4], "新价不能带上仅属于旧价的版本");
         // 成本是原样搬运的求和,不是重算
         assert!(m_b.estimated_cost_usd > 0.0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1564,7 +1613,7 @@ mod tests {
         println!("推理档位: {:?}", f.reasoning_efforts);
         for s in f.price_snapshots.iter().take(5) {
             println!(
-                "  模型 {}: {} 行 / 单价组 {} / in={} cached={} out={} / cockpit成本 {}",
+                "  模型 {}: {} 行 / 单价组 {} / in={} cached={:?} out={} / cockpit成本 {}",
                 s.model, s.rows, s.variants.len(),
                 s.variants[0].input_usd_per_million,
                 s.variants[0].cached_input_usd_per_million,
@@ -1608,7 +1657,7 @@ mod tests {
         let (in_p, out_p, cached_p) = (
             v.input_usd_per_million,
             v.output_usd_per_million,
-            v.cached_input_usd_per_million,
+            v.cached_input_usd_per_million.expect("fixture records a cache price"),
         );
         // 用我方 TokenSplit 口径复算(cached = min(cached, input);normal = input - cached)
         let mut expect = 0.0f64;

@@ -29,6 +29,10 @@ use std::sync::{LazyLock, Mutex};
 
 use serde::Serialize;
 
+#[cfg(test)]
+#[path = "cockpit_quota_contract_tests.rs"]
+mod contract_tests;
+
 // ────────────────────────────── 渠道常量 ──────────────────────────────
 
 pub const CH_CODEX: &str = "codex";
@@ -171,6 +175,7 @@ pub const FIELD_SEMANTICS: &[(&str, PercentKind)] = &[
     ("remainingPercentage", PercentKind::Remaining),
     ("remainingPercent", PercentKind::Remaining),
     ("remaining_percent", PercentKind::Remaining),
+    ("percent_remaining", PercentKind::Remaining),
     ("remaining", PercentKind::Remaining),
     ("percentage", PercentKind::Remaining),
     ("usedPercent", PercentKind::Used),
@@ -441,36 +446,48 @@ fn index_file_path(root: &Path, channel: &str) -> PathBuf {
     root.join(format!("{}.json", accounts_dir_name(channel)))
 }
 
-/// 从**明文索引文件**抽 `<账号 id, 套餐>`。
-///
-/// 索引形如 `{ "accounts": [ { "id": "...", "email": "...", "plan_type": "..." } ] }`。
-/// 取值复用 [`plan_of`]（它已覆盖所有字段名变体与嵌套 `quota`），不另抄字段名表。
-///
-/// **文件不存在 / 读失败 / 解析失败 / 结构不符 → 静默返回空 map**：
-/// "这个渠道没装"是正常状态而不是错误 —— 与 [`load_dir_files`] 的既有约定一致。
-fn load_index_plans(root: &Path, channel: &str) -> HashMap<String, String> {
-    let mut out = HashMap::new();
+/// Account indices stay plaintext even when per-account detail files are encrypted.
+/// Preserve the current index membership and identity; directory leftovers are not
+/// evidence that a deleted account is still in the pool. Missing legacy indices
+/// may fall back to detail files, while malformed/present indices are errors.
+struct IndexAccount {
+    email: String,
+    display_name: String,
+    plan: Option<String>,
+}
+
+fn load_index_accounts(root: &Path, channel: &str) -> Result<Option<HashMap<String, IndexAccount>>, String> {
     let path = index_file_path(root, channel);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return out;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读取账号索引 {} 失败: {error}", path.display())),
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return out;
-    };
-    let Some(entries) = json.get("accounts").and_then(|v| v.as_array()) else {
-        return out;
-    };
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|error| format!("解析账号索引 {} 失败: {error}", path.display()))?;
+    let entries = json.get("accounts").and_then(|value| value.as_array())
+        .ok_or_else(|| format!("账号索引 {} 缺少 accounts 数组", path.display()))?;
+    let mut out = HashMap::new();
     for entry in entries {
-        let id = first_str(entry, &["id", "account_id", "accountId"]);
-        if id.is_empty() {
-            continue;
+        let id = entry.get("id").and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty() && id.trim() == *id
+                && *id != "." && *id != ".." && !id.contains(['/', '\\', '\0']))
+            .ok_or_else(|| format!("账号索引 {} 存在无效账号 ID", path.display()))?;
+        for field in ["email", "accountEmail", "emailAddress"] {
+            if entry.get(field).is_some_and(|value| !value.is_null() && !value.is_string()) {
+                return Err(format!("账号索引 {} 的 {field} 字段类型无效", path.display()));
+            }
         }
-        // 只收非空字符串（`plan_of` 内部已把空串视为没有）。
-        if let Some(plan) = plan_of(entry) {
-            out.insert(id, plan);
+        let account = IndexAccount {
+            email: first_str(entry, &["email", "accountEmail", "emailAddress"]),
+            display_name: first_str(entry, &["display_name", "displayName", "name"]),
+            plan: plan_of(entry),
+        };
+        if out.insert(id.to_string(), account).is_some() {
+            return Err(format!("账号索引 {} 包含重复账号 ID", path.display()));
         }
     }
-    out
+    Ok(Some(out))
 }
 
 /// 配额历史的一个采样点。
@@ -528,66 +545,61 @@ pub struct ChannelAccounts {
 }
 
 impl ChannelAccounts {
-    /// 列目录 + 批量读（`<id>` 可能是 uuid，只能列目录，不能走文件名白名单）。
+    /// Use a present plaintext index as the account membership authority. Detail
+    /// files remain read-only and may be encrypted; only observed fields are used.
     pub fn load(root: &Path, channel: &str) -> Result<Self, String> {
         let dir = root.join(accounts_dir_name(channel));
+        let index = load_index_accounts(root, channel)?;
         let mut accounts = Vec::new();
         if !dir.exists() {
-            return Ok(Self {
-                channel: channel.to_string(),
-                root: root.to_path_buf(),
-                dir,
-                accounts,
-            });
-        }
-        // ★ 先读**明文索引**（`<channel>_accounts.json`）拿套餐。逐账号详情文件是
-        // AES-256-GCM 密文（`secure_account_storage.rs:1-5`），`plan_of(&json)` 在密文
-        // 信封里永远找不到 `plan_type` / `plan_name` → 界面 Plan 列恒为 `—`。索引明文
-        // 且就在目录旁边，是唯一能拿到套餐的地方。
-        let index_plans = load_index_plans(root, channel);
-        let entries = std::fs::read_dir(&dir).map_err(|e| format!("列 {} 失败: {e}", dir.display()))?;
-        let mut names: Vec<String> = Vec::new();
-        for entry in entries.flatten() {
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            if name.ends_with(".tmp") || name.ends_with(".bak") || !name.ends_with(".json") {
-                continue;
+            if index.as_ref().is_some_and(|entries| !entries.is_empty()) {
+                return Err(format!("账号索引存在但详情目录缺失: {}", dir.display()));
             }
+            return Ok(Self { channel: channel.to_string(), root: root.to_path_buf(), dir, accounts });
+        }
+        let entries = std::fs::read_dir(&dir).map_err(|error| format!("列 {} 失败: {error}", dir.display()))?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("列 {} 条目失败: {error}", dir.display()))?;
+            let name = entry.file_name().into_string()
+                .map_err(|_| format!("账号目录 {} 包含无效文件名", dir.display()))?;
+            let Some(id) = name.strip_suffix(".json") else { continue; };
+            if index.as_ref().is_some_and(|entries| !entries.contains_key(id)) { continue; }
             names.push(name);
         }
         names.sort();
+        if let Some(index) = &index {
+            if index.keys().any(|id| !names.iter().any(|name| name == &format!("{id}.json"))) {
+                return Err(format!("账号索引包含缺失的详情文件: {}", dir.display()));
+            }
+        }
         for name in names {
             let path = dir.join(&name);
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let json: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let id = name.trim_end_matches(".json").to_string();
-            // 索引优先（明文、权威），详情兜底（详情仍是明文的老版本文件照样能用）。
-            let plan = index_plans.get(&id).cloned().or_else(|| plan_of(&json));
-            accounts.push(AccountSnapshot {
-                email: first_str(&json, &["email", "accountEmail", "emailAddress"]),
-                display_name: first_str(
-                    &json,
-                    &["display_name", "displayName", "name", "plan_name", "planName", "plan_type"],
-                ),
-                id,
-                json,
-                plan,
-            });
+            let content = std::fs::read_to_string(&path)
+                .map_err(|error| format!("读取账号详情 {} 失败: {error}", path.display()))?;
+            let json: serde_json::Value = serde_json::from_str(&content)
+                .map_err(|error| format!("解析账号详情 {} 失败: {error}", path.display()))?;
+            if !json.is_object() {
+                return Err(format!("账号详情 {} 不是对象", path.display()));
+            }
+            let id = name.strip_suffix(".json").expect("filtered JSON filename").to_string();
+            if json.get("id").is_some_and(|value| value.as_str() != Some(id.as_str())) {
+                return Err(format!("账号详情 ID 与文件名不一致: {}", path.display()));
+            }
+            let metadata = index.as_ref().and_then(|entries| entries.get(&id));
+            let detail_email = first_str(&json, &["email", "accountEmail", "emailAddress"]);
+            if metadata.is_some_and(|entry| !entry.email.is_empty() && !detail_email.is_empty()
+                && entry.email != detail_email) {
+                return Err(format!("账号索引与详情的邮箱身份不一致: {}", path.display()));
+            }
+            let email = metadata.map(|entry| entry.email.clone()).filter(|value| !value.is_empty())
+                .unwrap_or(detail_email);
+            let display_name = metadata.map(|entry| entry.display_name.clone()).filter(|value| !value.is_empty())
+                .unwrap_or_else(|| first_str(&json, &["display_name", "displayName", "name", "plan_name", "planName", "plan_type"]));
+            let plan = metadata.and_then(|entry| entry.plan.clone()).or_else(|| plan_of(&json));
+            accounts.push(AccountSnapshot { id, email, display_name, json, plan });
         }
-        Ok(Self {
-            channel: channel.to_string(),
-            root: root.to_path_buf(),
-            dir,
-            accounts,
-        })
+        Ok(Self { channel: channel.to_string(), root: root.to_path_buf(), dir, accounts })
     }
 }
 
@@ -649,11 +661,10 @@ fn load_dir_files(root: &Path, subdir: &str) -> Result<Vec<DirFile>, String> {
     }
     let entries = std::fs::read_dir(&dir).map_err(|e| format!("列 {subdir} 失败: {e}"))?;
     let mut names: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let name = match entry.file_name().into_string() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("列 {subdir} 条目失败: {error}"))?;
+        let name = entry.file_name().into_string()
+            .map_err(|_| format!("{subdir} 包含无效文件名"))?;
         if name.ends_with(".tmp") || name.ends_with(".bak") || !name.ends_with(".json") {
             continue;
         }
@@ -663,9 +674,11 @@ fn load_dir_files(root: &Path, subdir: &str) -> Result<Vec<DirFile>, String> {
     let mut out = Vec::new();
     for name in names {
         let path = dir.join(&name);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            out.push(DirFile { name, content });
-        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
+        serde_json::from_str::<serde_json::Value>(&content)
+            .map_err(|error| format!("解析 {} 失败: {error}", path.display()))?;
+        out.push(DirFile { name, content });
     }
     Ok(out)
 }
@@ -825,7 +838,9 @@ fn pick_percent(obj: &serde_json::Value) -> Option<(String, f64, PercentKind)> {
         "remainingPercentage",
         "remainingPercent",
         "remaining_percent",
-        "remaining",
+        "percent_remaining",
+        // Bare `remaining` is an absolute count in upstream Copilot/Grok data.
+        // Without a proven denominator it cannot be interpreted as a percent.
         "percentage",
         "percentRemaining",
     ];
@@ -888,9 +903,9 @@ fn classify_window_kind_from_bucket(bucket_id: Option<&str>) -> QuotaWindowKind 
 }
 
 /// `remainingFraction` 在 antigravity 桌面缓存里是 **0..1 的小数**，其余渠道是 0..100。
-/// 这里按字段名 + 量级判定：字段名含 `Fraction` 且 |v| <= 1 → 乘 100。
+/// 按源字段单位换算；超出 0..1 的 fraction 由 normalize_percent 拒绝，不能改猜成百分数。
 fn scale_percent(raw: f64, field: &str) -> f64 {
-    if field.to_ascii_lowercase().contains("fraction") && raw.abs() <= 1.0 {
+    if field.to_ascii_lowercase().contains("fraction") {
         raw * 100.0
     } else {
         raw
@@ -924,7 +939,8 @@ fn zcode_entry(json: &serde_json::Value) -> Option<RawEntry> {
         display_name: String::new(),
         field: "quota_remaining".to_string(),
         raw_percent: (remaining / total) * 100.0,
-        reset_at_ms: first_ms(json, &["reset_at", "resetAt", "resetTime"]),
+        reset_at_ms: unix_seconds_ms(&json["quota_reset_at"])
+            .or_else(|| first_ms(json, &["reset_at", "resetAt", "resetTime"])),
         window_kind: QuotaWindowKind::Unknown,
     })
 }
@@ -1078,25 +1094,256 @@ fn entries_from_container(
     out
 }
 
+/// Current Codex quota stores remaining percentages in flat primary/secondary
+/// slots. Presence and duration are explicit; a missing slot's 100 is a sentinel.
+fn codex_native_entries(json: &serde_json::Value) -> Option<Vec<RawEntry>> {
+    let quota = json.get("quota")?;
+    if quota.get("hourly_percentage").is_none() && quota.get("weekly_percentage").is_none() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (prefix, slot) in [("hourly", "primary_window"), ("weekly", "secondary_window")] {
+        let presence = quota.get(format!("{prefix}_window_present")).and_then(|value| value.as_bool());
+        let raw_window_present = quota.get("raw_data").and_then(|value| value.get("rate_limit"))
+            .and_then(|value| value.get(slot)).is_some_and(|value| value.is_object());
+        if presence == Some(false) || (presence != Some(true) && !raw_window_present) { continue; }
+        let Some(raw_percent) = quota.get(format!("{prefix}_percentage")).and_then(|value| value.as_f64()) else { continue; };
+        let window_kind = match quota.get(format!("{prefix}_window_minutes")).and_then(|value| value.as_i64()) {
+            Some(300) => QuotaWindowKind::FiveHour,
+            Some(10080) => QuotaWindowKind::Weekly,
+            _ => QuotaWindowKind::Unknown,
+        };
+        out.push(RawEntry {
+            scope: "pool", model_id: slot.into(), display_name: String::new(),
+            field: "remainingPercentage".into(), raw_percent,
+            reset_at_ms: unix_seconds_ms(&quota[format!("{prefix}_reset_time")]), window_kind,
+        });
+    }
+    Some(out)
+}
+
+fn unix_seconds_ms(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().filter(|value| *value > 0)?.checked_mul(1000)
+        .filter(|value| *value <= 9_007_199_254_740_991)
+}
+
+fn used_ratio(used: Option<f64>, total: Option<f64>) -> Option<f64> {
+    let (used, total) = (used?, total?);
+    if !used.is_finite() || !total.is_finite() || total <= 0.0 { return None; }
+    Some(used / total * 100.0)
+}
+
+fn native_pool(id: &str, field: &str, percent: f64, reset_at_ms: Option<i64>) -> RawEntry {
+    RawEntry { scope: "pool", model_id: id.into(), display_name: String::new(),
+        field: field.into(), raw_percent: percent, reset_at_ms, window_kind: QuotaWindowKind::Unknown }
+}
+
+/// Prefer the producer's normalized fields to guessing units from arbitrary raw
+/// endpoint payloads. Absolute balances remain quota denominators, never costs.
+fn provider_native_entries(channel: &str, json: &serde_json::Value) -> Option<Vec<RawEntry>> {
+    if uses_desktop_cache(channel) {
+        if let Some(models) = json.get("quota").and_then(|quota| quota.get("models")).and_then(|models| models.as_array()) {
+            return Some(models.iter().filter_map(|model| {
+                let id = first_str(model, &["name"]);
+                if id.is_empty() { return None; }
+                Some(RawEntry {
+                    scope: "model", model_id: id, display_name: first_str(model, &["display_name"]),
+                    field: "percentage".into(), raw_percent: model.get("percentage")?.as_f64()?,
+                    reset_at_ms: model.get("reset_time").and_then(|value| value.as_str())
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok()).map(|value| value.timestamp_millis()),
+                    window_kind: QuotaWindowKind::Unknown,
+                })
+            }).collect());
+        }
+    }
+    if channel == CH_CURSOR {
+        let raw = json.get("cursor_usage_raw")?;
+        let plan = raw.get("individualUsage").or_else(|| raw.get("individual_usage"))
+            .and_then(|value| value.get("plan"))
+            .or_else(|| raw.get("planUsage")).or_else(|| raw.get("plan_usage"))?;
+        let total = first_num(plan, &["totalPercentUsed", "total_percent_used"])
+            .or_else(|| used_ratio(first_num(plan, &["used", "totalSpend", "total_spend"]), first_num(plan, &["limit"])));
+        return Some([
+            ("total_usage", total),
+            ("auto_composer", first_num(plan, &["autoPercentUsed", "auto_percent_used"])),
+            ("api_usage", first_num(plan, &["apiPercentUsed", "api_percent_used"])),
+        ].into_iter().filter_map(|(id, percent)| percent.map(|value| native_pool(id, "used_percent", value, None))).collect());
+    }
+    if channel == CH_CLAUDE { return claude_native_entries(json); }
+    if matches!(channel, CH_GITHUB_COPILOT | CH_WINDSURF) {
+        let snapshots = json.get("copilot_quota_snapshots")?.as_object()?;
+        let (key, premium) = if let Some(value) = snapshots.get("premium_models") {
+            ("premium_models", value)
+        } else { ("premium_interactions", snapshots.get("premium_interactions")?) };
+        let total = premium.get("entitlement").and_then(|value| value.as_f64());
+        // Unlimited / absent entitlement is not an observed finite 100% balance.
+        if premium.get("unlimited").and_then(|value| value.as_bool()) == Some(true)
+            || total.is_some_and(|value| value <= 0.0)
+            || (total.is_none() && premium.get("has_quota").and_then(|value| value.as_bool()) == Some(false)) {
+            return Some(Vec::new());
+        }
+        return Some(premium.get("percent_remaining").and_then(|value| value.as_f64())
+            .map(|value| vec![native_pool(key, "percent_remaining", value, None)]).unwrap_or_default());
+    }
+    if channel == CH_QODER {
+        let value = json.get("credits_usage_percent")?.as_f64()?;
+        return Some(vec![native_pool("credits", "used_percent", value, None)]);
+    }
+    if channel == CH_KIRO && ["credits_total", "credits_used", "bonus_total", "bonus_used"]
+        .iter().any(|field| json.get(*field).is_some_and(|value| !value.is_null())) {
+        let mut out = Vec::new();
+        for (total, used, id) in [("credits_total", "credits_used", "prompt_credits"), ("bonus_total", "bonus_used", "add_on_credits")] {
+            if let Some(percent) = used_ratio(json[used].as_f64(), json[total].as_f64()) {
+                let reset = if id == "prompt_credits" { unix_seconds_ms(&json["usage_reset_at"]) } else { None };
+                out.push(native_pool(id, "used_percent", percent, reset));
+            }
+        }
+        return Some(out);
+    }
+    if channel == CH_GROK {
+        let quota = json.get("quota")?;
+        if !["weeklyLimitPercent", "weeklyUsed", "weeklyTotal", "products"]
+            .iter().any(|field| quota.get(*field).is_some()) { return None; }
+        let mut out = Vec::new();
+        let reset = first_ms(quota, &["periodEnd"]);
+        let used = quota["weeklyLimitPercent"].as_f64()
+            .or_else(|| used_ratio(quota["weeklyUsed"].as_f64(), quota["weeklyTotal"].as_f64()));
+        if let Some(percent) = used { out.push(native_pool("credit_usage", "used_percent", percent, reset)); }
+        if quota["isUnifiedBillingUser"].as_bool() == Some(true) { return Some(out); }
+        if let Some(products) = quota["products"].as_array() {
+            for product in products {
+                let id = first_str(product, &["product"]);
+                if id.is_empty() { continue; }
+                let used = used_ratio(product["used"].as_f64(), product["total"].as_f64())
+                    .or_else(|| product["usagePercent"].as_f64())
+                    .or_else(|| {
+                        let (remaining, total) = (product["remaining"].as_f64()?, product["total"].as_f64()?);
+                        used_ratio(Some(total - remaining), Some(total))
+                    });
+                if let Some(percent) = used { out.push(native_pool(&id, "used_percent", percent, reset)); }
+            }
+        }
+        return Some(out);
+    }
+    None
+}
+
+fn claude_entry(id: &str, raw: f64, reset: Option<i64>, quota: Option<&serde_json::Value>, desktop: bool) -> RawEntry {
+    let percentage_field = format!("{id}_percentage");
+    let percent = quota.and_then(|quota| quota.get(&percentage_field)).and_then(|value| value.as_f64())
+        .unwrap_or_else(|| {
+            // Desktop organizationUsage accepts fractions below 1, while OAuth
+            // direct utilization is already a percentage. The value 1 means 1%.
+            if desktop && raw.is_finite() && (0.0..=100.0).contains(&raw) {
+                (if raw > 0.0 && raw < 1.0 { raw * 100.0 } else { raw }).round()
+            } else { raw }
+        });
+    let reset = quota.and_then(|quota| quota.get(format!("{id}_reset_time")))
+        .and_then(unix_seconds_ms).or(reset);
+    let mut entry = native_pool(id, "used_percent", percent, reset);
+    entry.window_kind = match id {
+        "five_hour" => QuotaWindowKind::FiveHour,
+        "seven_day" | "seven_day_sonnet" => QuotaWindowKind::Weekly,
+        _ => QuotaWindowKind::Unknown,
+    };
+    entry
+}
+
+fn claude_native_entries(json: &serde_json::Value) -> Option<Vec<RawEntry>> {
+    let quota = json.get("quota");
+    let flat = quota.is_some_and(|quota| quota.get("five_hour_percentage").is_some()
+        || quota.get("seven_day_percentage").is_some());
+    let raw = json.get("claude_usage_raw").filter(|value| value.is_object())
+        .or_else(|| quota.and_then(|quota| quota.get("raw_data")).filter(|value| value.is_object()));
+    let mut recognized = flat;
+    let mut out = Vec::new();
+    if let Some(raw) = raw {
+        let wrapped = raw.get("endpoints").and_then(|value| value.get("organizationUsage"));
+        let usage = wrapped.unwrap_or(raw);
+        let desktop = wrapped.is_some() || usage.get("limits").is_some_and(|value| value.is_array());
+        if let Some(limits) = usage.get("limits").and_then(|value| value.as_array()) {
+            recognized = true;
+            for limit in limits {
+                let kind = first_str(limit, &["kind"]).to_ascii_lowercase();
+                let group = first_str(limit, &["group"]).to_ascii_lowercase();
+                let product = limit.get("scope").and_then(|scope| scope.get("model").or_else(|| scope.get("surface")))
+                    .map(|value| first_str(value, &["display_name"])).unwrap_or_default().to_ascii_lowercase();
+                let id = if kind == "session" || group == "session" { "five_hour" }
+                    else if kind == "weekly" || group == "weekly" {
+                        if product.contains("sonnet") { "seven_day_sonnet" } else { "seven_day" }
+                    } else { continue; };
+                if out.iter().any(|entry: &RawEntry| entry.model_id == id) { continue; }
+                let Some(value) = first_num(limit, &["percent"]) else { continue; };
+                out.push(claude_entry(id, value, claude_reset_ms(&limit["resets_at"]), quota, desktop));
+            }
+        }
+        for (id, camel, aliases) in [
+            ("five_hour", "fiveHour", &["five_hour", "fiveHour"][..]),
+            ("seven_day", "sevenDay", &["seven_day", "sevenDay"][..]),
+            ("seven_day_sonnet", "sevenDaySonnet", &["seven_day_sonnet", "sevenDaySonnet", "seven_day_sonnet_4", "seven_day_model"][..]),
+        ] {
+            if out.iter().any(|entry| entry.model_id == id) { continue; }
+            let window = [Some(usage), usage.get("usage"), usage.get("limits")].into_iter().flatten()
+                .find_map(|container| aliases.iter().find_map(|alias| container.get(*alias)));
+            let scalar_keys = [format!("{id}_percentage"), format!("{camel}Percentage"), format!("{id}_utilization"),
+                format!("{camel}Utilization"), format!("{id}_percent_used"), format!("{camel}PercentUsed")];
+            let value = window.and_then(|window| first_num(window, &["utilization", "percentage", "percent_used", "percentUsed"]))
+                .or_else(|| first_num(usage, &scalar_keys.iter().map(String::as_str).collect::<Vec<_>>()));
+            if window.is_some() || value.is_some() { recognized = true; }
+            if let Some(value) = value {
+                let reset = window.and_then(|window| ["resets_at", "reset_at", "resetsAt", "resetAt"].iter()
+                    .find_map(|key| window.get(*key).and_then(claude_reset_ms)))
+                    .or_else(|| [format!("{id}_reset_time"), format!("{camel}ResetTime")].iter()
+                        .find_map(|key| usage.get(key).and_then(claude_reset_ms)));
+                out.push(claude_entry(id, value, reset, quota, desktop));
+            }
+        }
+        if let Some(extra) = usage.get("extra_usage").or_else(|| usage.get("extraUsage")) {
+            if extra.get("is_enabled").and_then(|value| value.as_bool()) == Some(true) {
+                recognized = true;
+                if let Some(value) = first_num(extra, &["utilization", "percentage", "percent_used", "percentUsed"]) {
+                    out.push(claude_entry("extra_usage", value, claude_reset_ms(&extra["resets_at"]), quota, desktop));
+                }
+            }
+        }
+    }
+    if flat {
+        let quota = quota.expect("flat quota");
+        for id in ["five_hour", "seven_day", "seven_day_sonnet", "extra_usage"] {
+            if out.iter().any(|entry| entry.model_id == id) { continue; }
+            let Some(value) = quota.get(format!("{id}_percentage")).and_then(|value| value.as_f64()) else { continue; };
+            let reset = unix_seconds_ms(&quota[format!("{id}_reset_time")]);
+            // Required scalar fields default to zero even for absent windows.
+            // Zero with no raw observation/reset cannot prove an available pool.
+            if value == 0.0 && reset.is_none() { continue; }
+            out.push(claude_entry(id, value, reset, Some(quota), false));
+        }
+    }
+    recognized.then_some(out)
+}
+
+fn snapshot_observed_at(channel: &str, json: &serde_json::Value) -> Option<i64> {
+    if uses_desktop_cache(channel) {
+        if let Some(value) = json.get("quota").and_then(|quota| quota.get("last_updated")) {
+            return unix_seconds_ms(value);
+        }
+    }
+    if json.get("usage_updated_at").is_some_and(|value| !value.is_null()) {
+        if matches!(channel, CH_CODEX | CH_GITHUB_COPILOT | CH_WINDSURF | CH_QODER | CH_KIRO | CH_CURSOR) {
+            return unix_seconds_ms(&json["usage_updated_at"]);
+        }
+        if matches!(channel, CH_GROK | CH_ZCODE | CH_CLAUDE) {
+            return first_ms(json, &["usage_updated_at"]);
+        }
+    }
+    first_ms(json, &["updatedAt", "updated_at", "updatedAtMs"])
+}
+
 /// 从账号 JSON 里按渠道字段表抽所有条目。
 fn extract_entries(channel: &str, json: &serde_json::Value) -> Vec<RawEntry> {
-    if channel == CH_CLAUDE {
-        if let Some(raw) = json.get("claude_usage_raw") {
-            let entries: Vec<_> = [
-                ("five_hour", QuotaWindowKind::FiveHour),
-                ("seven_day", QuotaWindowKind::Weekly),
-                ("seven_day_sonnet", QuotaWindowKind::Weekly),
-            ].into_iter().filter_map(|(key, window_kind)| {
-                let window = raw.get(key)?;
-                let used = window.get("utilization")?.as_f64()?;
-                Some(RawEntry {
-                    scope: "pool", model_id: key.into(), display_name: key.into(),
-                    field: "used_percent".into(), raw_percent: used,
-                    reset_at_ms: claude_reset_ms(&window["resets_at"]), window_kind,
-                })
-            }).collect();
-            if !entries.is_empty() { return entries; }
-        }
+    if let Some(entries) = provider_native_entries(channel, json) { return entries; }
+    if channel == CH_CODEX {
+        if let Some(entries) = codex_native_entries(json) { return entries; }
     }
     if channel == CH_ZCODE {
         if let Some(entry) = zcode_entry(json) {
@@ -1215,13 +1462,17 @@ struct DesktopEntry {
 }
 
 /// 解析桌面缓存文件：`{ email, updatedAt, payload: { models: { <id>: { quotaInfo } } } }`。
-fn parse_desktop_file(file: &DirFile) -> Option<DesktopEntry> {
-    let json: serde_json::Value = serde_json::from_str(&file.content).ok()?;
+fn parse_desktop_file(file: &DirFile) -> Result<DesktopEntry, String> {
+    let json: serde_json::Value = serde_json::from_str(&file.content)
+        .map_err(|error| format!("解析额度缓存 {} 失败: {error}", file.name))?;
     let email = first_str(&json, &["email"]);
     let payload = json.get("payload").unwrap_or(&json);
+    if email.is_empty() || !payload.is_object() {
+        return Err(format!("额度缓存 {} 缺少邮箱身份或 payload 对象", file.name));
+    }
     let entries = entries_from_container(payload, QuotaWindowKind::Unknown);
     let id = file.name.trim_end_matches(".json").to_string();
-    Some(DesktopEntry {
+    Ok(DesktopEntry {
         id: if id.is_empty() { email.clone() } else { id },
         email,
         updated_at_ms: first_ms(&json, &["updatedAt", "updated_at", "updatedAtMs"]),
@@ -1246,7 +1497,8 @@ impl QuotaProvider for SnapshotProvider {
             Some(cached_desktop_files(&ch.root, self.now_ms)?)
         } else { None };
         let desktop: Vec<DesktopEntry> = desktop_cache.as_ref().map(|cache|
-            cache.value.iter().filter_map(parse_desktop_file).collect()).unwrap_or_default();
+            cache.value.iter().map(parse_desktop_file).collect::<Result<Vec<_>, _>>())
+            .transpose()?.unwrap_or_default();
 
         // 桌面缓存是 Google 系配额的**权威来源**（cockpit 自己 60s 刷一次）。
         // 但账号文件可能整体加密 —— 实测 `accounts/` 与 `*_accounts/` 下只剩
@@ -1254,7 +1506,7 @@ impl QuotaProvider for SnapshotProvider {
         // 于是 `acct.email` 恒为 ""，路径 ② 的 `d.email == acct.email` 永远不成立，
         // 11 份自包含（自带 email + quota）的明文缓存被整批丢弃 —— UI 看到的就是一整面
         // "用量不可得"。所以只要桌面缓存非空，它就是该渠道配额的权威源。
-        let desktop_is_authoritative = !desktop.is_empty();
+        let desktop_is_authoritative = desktop.iter().any(|entry| !entry.entries.is_empty());
         // 记录哪些桌面缓存条目已被账号循环消费，路径 ④ 只补剩下的。
         let mut consumed: Vec<bool> = vec![false; desktop.len()];
 
@@ -1277,13 +1529,14 @@ impl QuotaProvider for SnapshotProvider {
             }
 
             // ② 桌面缓存命中（按 email 反关联，不算 sha256）
-            let hit = if !acct.email.is_empty() {
-                desktop
-                    .iter()
-                    .position(|d| !d.email.is_empty() && d.email == acct.email)
-            } else {
-                None
-            };
+            // A cache is keyed by email, not by account/workspace ID. It can
+            // identify an indexed account only when that email is unambiguous.
+            let hit = if !acct.email.is_empty()
+                && ch.accounts.iter().filter(|candidate| candidate.email == acct.email).count() == 1
+                && desktop.iter().filter(|entry| entry.email == acct.email).count() == 1
+            {
+                desktop.iter().position(|entry| !entry.email.is_empty() && !entry.entries.is_empty() && entry.email == acct.email)
+            } else { None };
             if let Some(idx) = hit {
                 consumed[idx] = true;
                 let d = &desktop[idx];
@@ -1327,15 +1580,15 @@ impl QuotaProvider for SnapshotProvider {
                 ));
                 continue;
             }
-            let claude_error = ch.channel == CH_CLAUDE && acct.json.get("quota_error").is_some_and(|v| !v.is_null());
-            let updated_at = if claude_error { None }
-                else if ch.channel == CH_CLAUDE {
-                    first_ms(&acct.json, &["usage_updated_at", "updatedAt", "updated_at", "updatedAtMs"])
-                } else { first_ms(&acct.json, &["updatedAt", "updated_at", "updatedAtMs"]) };
+            let native_codex = ch.channel == CH_CODEX && codex_native_entries(&acct.json).is_some();
+            let refresh_error = (ch.channel == CH_CLAUDE || native_codex)
+                && acct.json.get("quota_error").is_some_and(|value| !value.is_null());
+            let retained_error = !first_str(&acct.json, &["quota_query_last_error"]).is_empty();
+            let updated_at = if refresh_error { None } else { snapshot_observed_at(&ch.channel, &acct.json) };
             for entry in entries {
                 let mut row = self.build(ch, acct, &entry, updated_at, "AccountSnapshot", TTL_SNAPSHOT_MS)?;
-                if claude_error {
-                    row.source_error = Some("Claude quota refresh failed; retained snapshot time is unverified".into());
+                if refresh_error || retained_error {
+                    row.source_error = Some(format!("{} quota refresh failed; retained snapshot is not current", ch.channel));
                     row.stale = true;
                 }
                 out.push(row);
@@ -1543,12 +1796,9 @@ pub fn quota_history_series(
 
 // ────────────────────────────── 命令 ──────────────────────────────
 
-/// cockpit 数据根目录（`~/.antigravity_cockpit`）。
+/// 与请求数据库、JSON 客户端及监控共用同一只读数据根选择。
 pub fn cockpit_root() -> Result<PathBuf, String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .map_err(|_| "无法定位用户主目录(USERPROFILE/HOME 均未设置)".to_string())?;
-    Ok(PathBuf::from(home).join(".antigravity_cockpit"))
+    crate::cockpit_data_path::data_dir()
 }
 
 /// 命令 1：探测哪些渠道有账号（P1-13：没账号的渠道不占位）。
@@ -2937,7 +3187,7 @@ mod tests {
     /// **绝不读写真实的 `~/.antigravity_cockpit`**。
     ///
     /// 隔离手法与 `main.rs` 的 `read_cockpit_dir_accepts_whitelisted_subdir` 同源：
-    /// `cockpit_root()` 只认 `USERPROFILE` / `HOME` 两个变量（cockpit_quota.rs:1495-1500），
+    /// `cockpit_root()` 统一解析主目录、显式覆盖与 dev profile；用例清空后两项，
     /// 本仓库里**不存在** `COCKPIT_TOOLS_TEST_DATA_DIR` 之类的专用测试变量。
     ///
     /// 环境变量是进程级的：别的模块也会改这几个变量，因此这里用
@@ -2965,6 +3215,8 @@ mod tests {
         // "先还原 env，再放锁" —— 反过来会让并发用例看到还没还原的中间态。
         let _userprofile = crate::EnvGuard::set("USERPROFILE", &home);
         let _home = crate::EnvGuard::set("HOME", &home);
+        let _cockpit_override = crate::EnvGuard::remove("COCKPIT_TOOLS_DATA_DIR");
+        let _cockpit_profile = crate::EnvGuard::remove("COCKPIT_TOOLS_PROFILE");
 
         let out = f(&root);
 

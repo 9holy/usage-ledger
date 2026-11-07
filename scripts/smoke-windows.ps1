@@ -129,7 +129,8 @@ function Start-SmokeProcess([string]$Path, [string]$Arguments = '') {
   $start.WorkingDirectory = $smokeProfile
   foreach ($name in @($start.EnvironmentVariables.Keys)) {
     if ($name -match '^(MONITOR_|USAGE_MONITOR_|USAGE_LEDGER_|CODEX_MODE_LOG_|WEBVIEW2_)' -or
-        $name -in @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'GH_TOKEN', 'GITHUB_TOKEN')) {
+        $name -in @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'GH_TOKEN', 'GITHUB_TOKEN',
+          'COCKPIT_TOOLS_DATA_DIR', 'COCKPIT_TOOLS_PROFILE', 'CPA_TOKEN_USAGE_DIR', 'CPA_MODEL_PRICE_FILE')) {
       $start.EnvironmentVariables.Remove($name)
     }
   }

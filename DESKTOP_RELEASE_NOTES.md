@@ -1,16 +1,20 @@
 # Usage Ledger Desktop Release Notes
 
-## 0.2.37 — Accuracy and desktop security / 统计准确性与桌面安全
+## 0.2.38 — Source data contracts / 来源数据通道核验
 
-Current version: **0.2.37**. See the [bilingual release notes](docs/release/0.2.37.md), [English README](README.md), and [Chinese README](README.zh-CN.md). This release combines the three-round account attribution, usage statistics, ledger consistency, billing evidence, invalid-data handling, and desktop security fixes.
+Current version: **0.2.38**. See the [bilingual release notes](docs/release/0.2.38.md), [source audit](docs/data-channel-audit-2026-11-07.md), [English README](README.md), and [Chinese README](README.zh-CN.md).
 
-The main repository workflow publishes the Windows x64 and separate Mac Apple Silicon/Intel installers only after all required tests, builds, and package checks pass. Actual evidence is recorded in the release's `BUILD-INFO.json` and linked Actions run. Upgrade manually over the existing application and retain its data; no updater `.sig` files or `latest.json` feed are published. Signing and GUI validation limits are documented in the release notes.
+This patch verifies the Sub2API, CLIProxyAPI/CPA, Cockpit and usage-monitor input contracts against pinned upstream sources. It fixes omitted historical usage, quota semantics and failure states, source identity isolation, and invalid numeric results. Existing local costing formulas and default-instance financial facts are retained. The prior [v0.2.37 notes](docs/release/0.2.37.md) remain available.
 
-当前版本为 **0.2.37**，包含三轮账号归属、统计、账本一致性、计费证据、异常数据处理和桌面安全修复。主工作流仅在全部必要测试、构建和包验证成功后发布 Windows x64、M 芯片及 Intel Mac 安装包；实际结果见 `BUILD-INFO.json` 与关联 Actions 记录。手动覆盖升级并保留数据，本版不发布 `.sig` 自动更新签名或 `latest.json` 清单；签名与 GUI 验证边界见双语发布说明。
+The main workflow publishes Windows x64 and separate Mac Apple Silicon/Intel installers after all required checks, native tests, packaging, and startup verification pass. Actual evidence is in `BUILD-INFO.json` and its Actions run. Upgrade manually while retaining application data; this release provides no automatic-update feed. Signing and GUI/real-account validation limits remain documented in the release notes.
 
-The notes below preserve the v0.2.22 historical record and do not describe this release's update channel or repeated verification.
+当前版本为 **0.2.38**。本轮根据固定上游源码核对三端成本与用量监控的数据通道，修复历史用量遗漏、额度语义与错误状态、跨实例账目隔离及无效数值，保留自有成本公式与默认实例已有账目。完整字段和端点矩阵见[源码核验报告](docs/data-channel-audit-2026-11-07.md)。
 
-下文保留 0.2.22 历史技术记录，不代表本版启用其更新通道，也不表示已重复执行其中的验证。
+主工作流通过全部必要验证后发布 Windows x64、M 芯片和 Intel Mac 安装包；实际源码、摘要和构建证据见 `BUILD-INFO.json`。手动覆盖升级并保留数据。来源源码核对和合成回归不代表已对用户真实账号或提供方账单逐笔验收。
+
+The notes below preserve the v0.2.22 historical record and do not describe this release's update channel or verification results.
+
+下文保留 0.2.22 历史技术记录，不代表本版更新通道或验证结果。
 
 ## Historical Technical Notes: v0.2.22 / 历史技术记录
 

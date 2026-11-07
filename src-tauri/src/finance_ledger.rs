@@ -779,6 +779,26 @@ fn aggregate(target: &mut CurrencySummary, s: &CurrencySummary) {
         .zip(s.ongoing_hourly_expense)
         .map(|(a, b)| a + b);
 }
+
+fn validate_summary_numbers(summary: &CurrencySummary) -> Result<(), String> {
+    let values = [
+        Some(summary.cash_outlay),
+        Some(summary.refunds),
+        Some(summary.accrued_expense),
+        Some(summary.recognized_loss),
+        Some(summary.expense_credits),
+        Some(summary.termination_loss),
+        Some(summary.amortized_expense),
+        summary.net_expense,
+        summary.remaining_prepaid,
+        summary.ongoing_hourly_expense,
+    ];
+    if values.iter().flatten().any(|value| !value.is_finite()) {
+        return Err("Finance totals exceed the supported numeric range".into());
+    }
+    Ok(())
+}
+
 pub fn query(conn: &Connection, q: FinanceQuery) -> Result<FinanceSnapshot, String> {
     valid_scope(&q.source, &q.instance_id)?;
     if let Some(id) = &q.account_id {
@@ -933,17 +953,10 @@ pub fn query(conn: &Connection, q: FinanceQuery) -> Result<FinanceSnapshot, Stri
         if s.unresolved_count == 0 {
             s.net_expense = Some(s.accrued_expense + s.recognized_loss - s.expense_credits);
         }
-        let values = [
-            Some(s.cash_outlay),
-            Some(s.refunds),
-            Some(s.accrued_expense),
-            Some(s.recognized_loss),
-            Some(s.expense_credits),
-            s.net_expense,
-            s.remaining_prepaid,
-            s.ongoing_hourly_expense,
-        ];
-        if values.iter().flatten().any(|v| !v.is_finite()) {
+        validate_summary_numbers(s)?;
+        if [account.lifetime_accrued_expense, account.lifetime_recognized_loss, account.lifetime_expense_credits]
+            .iter().any(|value| !value.is_finite())
+        {
             return Err("Finance totals exceed the supported numeric range".into());
         }
         account.coverage_intervals.sort_by_key(|v| v.start_ms);
@@ -969,6 +982,11 @@ pub fn query(conn: &Connection, q: FinanceQuery) -> Result<FinanceSnapshot, Stri
                 ..Default::default()
             });
         aggregate(bucket, s);
+    }
+    // Each account can be finite while their shared currency sum overflows.
+    // Reject that result explicitly instead of serializing Infinity as null.
+    for currency in currencies.values() {
+        validate_summary_numbers(currency)?;
     }
     summary.has_entered_facts = accounts.values().any(|v| v.totals.has_entered_facts);
     summary.currencies = currencies.into_values().collect();
@@ -1140,6 +1158,38 @@ mod tests {
     }
     fn near(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-7, "{a} != {b}");
+    }
+    #[test]
+    fn data_channel_audit_currency_sum_overflow_is_an_error_not_json_null() {
+        let mut c = db();
+        for n in 1..=2 {
+            let mut fact = event(n, "purchase", 1e308, 0);
+            fact.account_id = format!("account-{n}");
+            save(&mut c, fact).unwrap();
+        }
+        assert!(query(&c, window(0, DAY)).is_err(), "individually finite accounts can overflow a shared currency total");
+    }
+    #[test]
+    fn data_channel_audit_lifetime_sum_overflow_is_not_hidden_by_current_window() {
+        let mut c = db();
+        for n in 1..=2 {
+            let mut fact = event(n, "purchase", 1e308, 0);
+            fact.coverage_start_ms = Some(0);
+            fact.coverage_end_ms = Some(DAY);
+            save(&mut c, fact).unwrap();
+        }
+        assert!(query(&c, window(2 * DAY, 3 * DAY)).is_err(), "zero current-window expense must not mask an unrepresentable lifetime fact");
+    }
+    #[test]
+    fn data_channel_audit_native_currencies_remain_separate() {
+        let mut c = db();
+        save(&mut c, event(1, "purchase", 1e308, 0)).unwrap();
+        let mut usd = event(2, "purchase", 1e308, 0);
+        usd.currency = "USD".into();
+        save(&mut c, usd).unwrap();
+        let result = query(&c, window(0, DAY)).unwrap();
+        assert_eq!(result.summary.currencies.len(), 2);
+        assert!(result.summary.currencies.iter().all(|currency| currency.cash_outlay == 1e308));
     }
     #[test]
     fn termination_and_its_refund_do_not_repeat_purchase_or_resume_accrual() {

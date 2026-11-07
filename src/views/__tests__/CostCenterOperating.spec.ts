@@ -55,6 +55,8 @@ beforeEach(async () => {
   vi.useFakeTimers(); vi.setSystemTime(end); vi.clearAllMocks()
   vi.mocked(invoke).mockImplementation(async command => {
     if (['quota_list_channels', 'quota_current_accounts', 'quota_snapshots', 'quota_history'].includes(command)) return [] as never
+    if (command === 'get_cockpit_source_identity') return { sourceInstanceId: 'local' } as never
+    if (command === 'read_cost_ledger') return 'null' as never
     if (command === 'read_cost_profiles') return '{}' as never
     return null as never
   })
@@ -218,7 +220,7 @@ describe('CostCenter operating integration', () => {
     state.activePanel = 'unified'; await flushPromises()
     expect(shared.unifiedLoad.mock.calls.at(-1)).toHaveLength(2)
     await state.reload(); await flushPromises()
-    expect(shared.unifiedLoad).toHaveBeenLastCalledWith('1h', expect.any(Object), { stats, accounts: [], localAccess: undefined })
+    expect(shared.unifiedLoad).toHaveBeenLastCalledWith('1h', expect.any(Object), { sourceInstanceId: 'local', stats, accounts: [], localAccess: undefined })
     vi.spyOn(cockpitApi, 'getCockpitGeminiAccounts').mockRejectedValueOnce(new Error('fixture metadata failure'))
     await state.reload(); await flushPromises()
     expect(shared.unifiedLoad.mock.calls.at(-1)).toHaveLength(2)
@@ -243,7 +245,35 @@ describe('CostCenter operating integration', () => {
     expect(cockpitApi.writeCostLedger).toHaveBeenLastCalledWith(expect.arrayContaining([
       expect.objectContaining({ email: 'current@example.invalid', usage: expect.objectContaining({ estimatedCostUsd: 2 }) }),
       expect.objectContaining({ email: 'removed@example.invalid', usage: expect.objectContaining({ estimatedCostUsd: 3 }) }),
-    ]))
+    ]), 'local')
+  })
+
+  it('preserves the saved usage ledger after a read failure while keeping current source facts visible', async () => {
+    const { state } = await openCockpitModelFixture()
+    vi.mocked(cockpitApi.writeCostLedger).mockClear()
+    vi.mocked(cockpitApi.readCostLedger).mockRejectedValueOnce(new Error('fixture ledger read denied'))
+    await state.reload(); await flushPromises()
+    expect(cockpitApi.writeCostLedger).not.toHaveBeenCalled()
+    expect(shared.data.cockpitSourceInstanceId.value).toBe('local')
+    expect(shared.data.opsOverview.value?.request_count_total).toBe(1)
+    expect(shared.data.error.value).toContain('保留原文件并跳过写回')
+    expect(shared.data.error.value).toContain('fixture ledger read denied')
+  })
+
+  it('rejects a mixed-root primary batch before any saved-ledger write', async () => {
+    const { state, logs } = await openCockpitModelFixture()
+    vi.mocked(cockpitApi.writeCostLedger).mockClear()
+    let instance = 'local'
+    vi.spyOn(cockpitApi, 'getCockpitSourceIdentity').mockImplementation(async () => ({ sourceInstanceId: instance }))
+    logs.mockImplementationOnce(async () => {
+      instance = 'cockpit:changed-root'
+      return modelLog('wrong-root-model', start.getTime(), end.getTime())
+    })
+    await state.reload(); await flushPromises()
+    expect(cockpitApi.writeCostLedger).not.toHaveBeenCalled()
+    expect(shared.data.cockpitSourceInstanceId.value).toBe('unavailable')
+    expect(shared.data.accounts.value).toEqual([])
+    expect(shared.data.sourceStates.value.rangeStats.status).toBe('unavailable')
   })
 
   it('keeps Unified duplicate-email raw rows separate when an empty ledger merges the primary rows', async () => {
@@ -264,7 +294,7 @@ describe('CostCenter operating integration', () => {
     expect(state.cockpitStats.accounts.map((row: cockpitApi.CockpitStats['accounts'][number]) => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 2]])
     expect(cockpitApi.writeCostLedger).toHaveBeenLastCalledWith([
       expect.objectContaining({ email: 'same@example.invalid', usage: expect.objectContaining({ estimatedCostUsd: 2 }) }),
-    ])
+    ], 'local')
   })
 
   it('updates current import and fullscreen failure prefixes without rerunning operations or translating raw details', async () => {
@@ -554,6 +584,8 @@ describe('CostCenter operating integration', () => {
     const managed = { ...account(1, 'oauth', 'anthropic'), id: 'cockpit:raw-a', extra: { cockpit_account_id: 'raw-a' } }
     shared.data.accounts.value = [managed]
     const snapshot: QuotaSnapshot = { channel: 'claude_manager', accountId: 'raw-a', email: null, modelId: 'seven_day_sonnet', displayName: 'raw model pool', percent: 80, remainingFraction: .8, usedFraction: .2, percentKind: 'remaining', unavailableReason: null, scope: 'model', windowKind: 'weekly', windowStartedAtMs: null, resetAtMs: null, source: 'snapshot', fetchedAtMs: end.getTime(), updatedAtMs: null, stale: false, rawKind: 'fixture', plan: null }
+    shared.data.cockpitSourceInstanceId.value = 'local'
+    ;(view.vm as any).channelQuota.sourceInstanceId.value = 'local'
     ;(view.vm as any).channelQuota.snapshotsByChannel.value = { claude_manager: [snapshot] }
     ;(view.vm as any).activePanel = 'upstreams'; await flushPromises()
     expect(view.get('[data-usage-window="5h"] strong').text()).toBe('—')
@@ -606,6 +638,8 @@ describe('CostCenter operating integration', () => {
     const managed = account(1, 'apikey'); managed.extra = { cliproxy_identity_source: 'management', cliproxy_usage_linked: false }
     const historic = account(2, 'oauth'); historic.extra = { cliproxy_identity_source: 'usage_only', cliproxy_auth_type_known: false }
     Object.assign(managed, { priority: null }); Object.assign(historic, { priority: null })
+    const currentFile = { id: 'managed-file.json', name: 'managed-file.json', auth_index: 'managed-slot', provider: 'codex', account_type: 'apikey', status: 'active', disabled: false, email: 'current@example.invalid', source: 'file', success: 0, failed: 0 }
+    shared.data.cliproxyAuthFiles.value = [currentFile]
     shared.data.accounts.value = [managed, historic]
     shared.data.rangeAccountStatsScope.value = { source: 'cliproxy', instanceId: 'local' }
     shared.data.rangeAccountStats.value = { '1': usage({ user_cost: null }), '2': usage({ user_cost: null }) }
@@ -624,12 +658,14 @@ describe('CostCenter operating integration', () => {
     ;(view.vm as any).cliproxyOverview = { version: null, authFileCount: null, routingStrategy: null, debug: null }; await flushPromises()
     expect((view.vm as any).currentAccountHealth).toBeNull()
     ;(view.vm as any).cliproxyOverview = { version: null, authFileCount: 0, routingStrategy: null, debug: null }
+    shared.data.cliproxyAuthFiles.value = []
     shared.data.accounts.value = [historic]; await flushPromises()
     expect((view.vm as any).currentAccountHealth).toEqual({ normal: 0, limited: 0, error: 0, inactive: 0 })
     shared.data.cliproxyLocalAccountLink.value = false; await flushPromises()
     expect((view.vm as any).currentAccountHealth).toBeNull()
     expect((view.vm as any).currentAccountHealthReason).toContain('未关联本机凭证')
     shared.data.cliproxyLocalAccountLink.value = true
+    shared.data.cliproxyAuthFiles.value = [currentFile]
     shared.data.accounts.value = [managed, historic]
     ;(view.vm as any).cliproxyOverview = { version: null, authFileCount: 1, routingStrategy: null, debug: null }; await flushPromises()
     expect((view.vm as any).accountLedgers.find((row: { account: Account }) => row.account.id === 2).billingMode).toBe('unknown')
@@ -667,10 +703,11 @@ describe('CostCenter operating integration', () => {
     expect(view.get<HTMLInputElement>('.cost-ranking-bar__historical input').element.checked).toBe(true)
     const usageRow = view.findAll('.cost-data-table tbody tr').find(row => row.text().includes('Account 2'))!
     expect(usageRow.text()).toContain('用量身份')
-    expect(usageRow.text()).toContain('未匹配当前管理账号')
+    expect(usageRow.text()).toContain('认证槽历史归属未核实')
     expect(usageRow.text()).not.toContain('已移出当前池')
     await view.get('.cost-ranking-bar__historical input').setValue(false)
-    expect((view.vm as any).upstreamRows).toHaveLength(1)
+    // A native auth slot is not proof of a deleted owner; historical slot rows remain reviewable.
+    expect((view.vm as any).upstreamRows).toHaveLength(2)
     await view.get('.cost-ranking-bar__historical input').setValue(true)
     shared.data.accounts.value[0].priority = 0; await flushPromises()
     expect(view.get('.cost-data-table thead').text()).toContain('优先级')

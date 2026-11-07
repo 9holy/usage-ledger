@@ -1,23 +1,10 @@
 /**
- * cliproxy 独立 7d 配额窗口:seven_day 必须读 `secondary_*`,不得拿 `primary` 顶替。
- *
- * 缺陷(2026-09-17):`cliproxyEventsToAccountUsage` 把同一个 `progress` 同时赋给
- * `five_hour` 与 `seven_day` —— 界面上「7d」那一格显示的其实是 5h 窗口的数。
- * 而源(CPA `usage.db.usage_events`)本来就单独采了 secondary 窗口:
- * Rust 侧 SELECT 已取回(`src-tauri/src/main.rs:682`)、TS 类型已声明(`cpaData.ts:43-47`),
- * 只有 adapter 0 处引用 ⇒ 数据躺在内存里没被用,还被审计误判成「源不支持」。
- *
- * 实测(直读插件 usage.db 7700 行,只读连接):
- *   primary_reset_at − requested_at ≈ 4.69h  ⇒ primary = 5h 窗口
- *   secondary_reset_at − requested_at ≈ 6.78d ⇒ secondary = 独立 7d 窗口
- *   同一条 event 上两者可以差很远(实测 5h=100% / 7d=35%)
- *
- * 空值契约(本文件的重点):
- *   - `secondary_reset_at` 为空 ⇒ 源没报这个窗口 ⇒ `seven_day = null`(渲染「无数据」),
- *     **不得落 0** —— 实测 207 行 `secondary_used_percent=0` 且 reset 为空,全部集中在
- *     15 个从未出现过 reset 的 auth_index,那是缺省编码而不是"用了 0%"。
- *   - `secondary_used_percent=0` 且 reset 非空 ⇒ 是真 0,照实显示 0%。
- *   - 5h 窗口与 7d 窗口各自取最近一条**成功**记录(两者可能来自不同 event)。
+ * CPA primary and secondary quota slots are independent.
+ * The older test inferred fixed 5h/7d durations from reset minus request time.
+ * Upstream source now explicitly permits arbitrary durations and null slots;
+ * usage_events does not preserve duration metadata. The assertions below retain
+ * the original values, resets, true-zero, missing-value, failure and history cases,
+ * but bind them to opaque slots instead of inventing fixed durations.
  */
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -27,10 +14,10 @@ import { quotaWindowState } from '../quotaWindowState'
 import { formatUtilization } from '../honestValues'
 import type { CliproxyUsageEvent } from '@/api/cliproxy/cpaData'
 
-/** 固定的 7d 重置时刻(unix 秒),避免用 Date.now() 让断言漂移。 */
-const SEC_7D = 1_800_000_000
-/** 固定的 5h 重置时刻(unix 秒)。 */
-const SEC_5H = 1_790_000_000
+/** 固定的 secondary 重置时刻(unix 秒),避免用 Date.now() 让断言漂移。 */
+const SECONDARY_RESET_SECONDS = 1_800_000_000
+/** 固定的 primary 重置时刻(unix 秒)。 */
+const PRIMARY_RESET_SECONDS = 1_790_000_000
 
 function makeEvent(authIndex: string, requestedAtMs: number, overrides: Partial<CliproxyUsageEvent> = {}): CliproxyUsageEvent {
   return {
@@ -70,89 +57,89 @@ function makeEvent(authIndex: string, requestedAtMs: number, overrides: Partial<
   }
 }
 
-/** 账号 id 由 auth_index 经 FNV 哈希派生(不是数字解析),用例必须用同一函数推导 key。 */
+/** 账号 id 保留完整原生 auth_index,用例使用相同的来源命名空间函数。 */
 const idOf = (authIndex: string): string => String(authIndexToAccountId(authIndex))
 
-describe('cliproxyEventsToAccountUsage · 7d 配额读 secondary,不复用 primary', () => {
-  it('同一账号 5h 与 7d 数值不同时,seven_day 取 secondary 而非 primary', () => {
+describe('cliproxyEventsToAccountUsage · secondary 配额读 secondary,不复用 primary', () => {
+  it('同一账号 primary 与 secondary 数值不同时,secondary_window 取 secondary 而非 primary', () => {
     const usage = cliproxyEventsToAccountUsage([
       makeEvent('acct-a', 1_000, {
         primary_used_percent: 100,
-        primary_reset_at: SEC_5H,
+        primary_reset_at: PRIMARY_RESET_SECONDS,
         secondary_used_percent: 35,
-        secondary_reset_at: SEC_7D,
+        secondary_reset_at: SECONDARY_RESET_SECONDS,
       }),
     ])[idOf('acct-a')]
 
-    expect(usage.five_hour?.utilization).toBe(100)
-    expect(usage.seven_day?.utilization).toBe(35)
+    expect(usage.primary_window?.utilization).toBe(100)
+    expect(usage.secondary_window?.utilization).toBe(35)
     // 回退到"primary 复用"时下面这条会拿到 100
-    expect(usage.seven_day?.utilization).not.toBe(usage.five_hour?.utilization)
+    expect(usage.secondary_window?.utilization).not.toBe(usage.primary_window?.utilization)
   })
 
-  it('seven_day 的重置时间来自 secondary_reset_at(不是 primary_reset_at)', () => {
+  it('secondary_window 的重置时间来自 secondary_reset_at(不是 primary_reset_at)', () => {
     const usage = cliproxyEventsToAccountUsage([
       makeEvent('acct-b', 1_000, {
         primary_used_percent: 62,
-        primary_reset_at: SEC_5H,
+        primary_reset_at: PRIMARY_RESET_SECONDS,
         secondary_used_percent: 24,
-        secondary_reset_at: SEC_7D,
+        secondary_reset_at: SECONDARY_RESET_SECONDS,
       }),
     ])[idOf('acct-b')]
 
-    expect(usage.five_hour?.resets_at).toBe(new Date(SEC_5H * 1000).toISOString())
-    expect(usage.seven_day?.resets_at).toBe(new Date(SEC_7D * 1000).toISOString())
-    expect(usage.seven_day?.remaining_seconds).toBeGreaterThan(0)
+    expect(usage.primary_window?.resets_at).toBe(new Date(PRIMARY_RESET_SECONDS * 1000).toISOString())
+    expect(usage.secondary_window?.resets_at).toBe(new Date(SECONDARY_RESET_SECONDS * 1000).toISOString())
+    expect(usage.secondary_window?.remaining_seconds).toBeGreaterThan(0)
   })
 })
 
 describe('cliproxyEventsToAccountUsage · 源没报 7d 窗口时不得落 0', () => {
-  it('secondary_used_percent=0 且 secondary_reset_at=null ⇒ seven_day 为 null(实测的缺省编码)', () => {
+  it('secondary_used_percent=0 且 secondary_reset_at=null ⇒ secondary_window 为 null(实测的缺省编码)', () => {
     const usage = cliproxyEventsToAccountUsage([
       makeEvent('acct-c', 1_000, {
         primary_used_percent: 100,
-        primary_reset_at: SEC_5H,
+        primary_reset_at: PRIMARY_RESET_SECONDS,
         secondary_used_percent: 0,
         secondary_reset_at: null,
       }),
     ])[idOf('acct-c')]
 
-    expect(usage.seven_day).toBeNull()
-    // 5h 窗口是真的,不能因为 7d 缺失被一起丢掉
-    expect(usage.five_hour?.utilization).toBe(100)
+    expect(usage.secondary_window).toBeNull()
+    // primary 窗口是真的,不能因为 7d 缺失被一起丢掉
+    expect(usage.primary_window?.utilization).toBe(100)
   })
 
-  it('secondary_* 全为 null ⇒ seven_day 为 null,5h 仍可用', () => {
+  it('secondary_* 全为 null ⇒ secondary_window 为 null,primary 仍可用', () => {
     const usage = cliproxyEventsToAccountUsage([
-      makeEvent('acct-d', 1_000, { primary_used_percent: 48, primary_reset_at: SEC_5H }),
+      makeEvent('acct-d', 1_000, { primary_used_percent: 48, primary_reset_at: PRIMARY_RESET_SECONDS }),
     ])[idOf('acct-d')]
 
-    expect(usage.seven_day).toBeNull()
-    expect(usage.five_hour?.utilization).toBe(48)
+    expect(usage.secondary_window).toBeNull()
+    expect(usage.primary_window?.utilization).toBe(48)
   })
 
   it('secondary_used_percent=0 但 reset 有值 ⇒ 是真 0,照实显示 0%', () => {
     const usage = cliproxyEventsToAccountUsage([
       makeEvent('acct-e', 1_000, {
         primary_used_percent: 1,
-        primary_reset_at: SEC_5H,
+        primary_reset_at: PRIMARY_RESET_SECONDS,
         secondary_used_percent: 0,
-        secondary_reset_at: SEC_7D,
+        secondary_reset_at: SECONDARY_RESET_SECONDS,
       }),
     ])[idOf('acct-e')]
 
-    expect(usage.seven_day?.utilization).toBe(0)
-    expect(usage.seven_day?.resets_at).toBe(new Date(SEC_7D * 1000).toISOString())
+    expect(usage.secondary_window?.utilization).toBe(0)
+    expect(usage.secondary_window?.resets_at).toBe(new Date(SECONDARY_RESET_SECONDS * 1000).toISOString())
   })
 
   it('只有 7d、没有 5h 的账号也要出现在结果里(不被整块丢掉)', () => {
     const usage = cliproxyEventsToAccountUsage([
-      makeEvent('acct-f', 1_000, { secondary_used_percent: 12, secondary_reset_at: SEC_7D }),
+      makeEvent('acct-f', 1_000, { secondary_used_percent: 12, secondary_reset_at: SECONDARY_RESET_SECONDS }),
     ])[idOf('acct-f')]
 
     expect(usage).toBeDefined()
-    expect(usage.five_hour).toBeNull()
-    expect(usage.seven_day?.utilization).toBe(12)
+    expect(usage.primary_window).toBeNull()
+    expect(usage.secondary_window?.utilization).toBe(12)
     expect(usage.updated_at).toBe(new Date(1_000).toISOString())
   })
 
@@ -165,44 +152,44 @@ describe('cliproxyEventsToAccountUsage · 源没报 7d 窗口时不得落 0', ()
 describe('cliproxyEventsToAccountUsage · 两个窗口各自取最近一条成功记录', () => {
   it('7d 来自较早的 event、5h 来自较晚的 event 时互不覆盖', () => {
     const usage = cliproxyEventsToAccountUsage([
-      makeEvent('acct-h', 1_000, { primary_used_percent: 10, primary_reset_at: SEC_5H, secondary_used_percent: 80, secondary_reset_at: SEC_7D }),
-      makeEvent('acct-h', 2_000, { primary_used_percent: 20, primary_reset_at: SEC_5H }),
+      makeEvent('acct-h', 1_000, { primary_used_percent: 10, primary_reset_at: PRIMARY_RESET_SECONDS, secondary_used_percent: 80, secondary_reset_at: SECONDARY_RESET_SECONDS }),
+      makeEvent('acct-h', 2_000, { primary_used_percent: 20, primary_reset_at: PRIMARY_RESET_SECONDS }),
     ])[idOf('acct-h')]
 
-    expect(usage.five_hour?.utilization).toBe(20)
-    expect(usage.seven_day?.utilization).toBe(80)
+    expect(usage.primary_window?.utilization).toBe(20)
+    expect(usage.secondary_window?.utilization).toBe(80)
     // 更新时间取两条里较新的那条
     expect(usage.updated_at).toBe(new Date(2_000).toISOString())
   })
 
   it('失败请求上的窗口快照不得被采信', () => {
     const usage = cliproxyEventsToAccountUsage([
-      makeEvent('acct-i', 1_000, { primary_used_percent: 30, primary_reset_at: SEC_5H, secondary_used_percent: 40, secondary_reset_at: SEC_7D }),
-      makeEvent('acct-i', 5_000, { failed: true, status_code: 429, primary_used_percent: 99, primary_reset_at: SEC_5H, secondary_used_percent: 99, secondary_reset_at: SEC_7D }),
+      makeEvent('acct-i', 1_000, { primary_used_percent: 30, primary_reset_at: PRIMARY_RESET_SECONDS, secondary_used_percent: 40, secondary_reset_at: SECONDARY_RESET_SECONDS }),
+      makeEvent('acct-i', 5_000, { failed: true, status_code: 429, primary_used_percent: 99, primary_reset_at: PRIMARY_RESET_SECONDS, secondary_used_percent: 99, secondary_reset_at: SECONDARY_RESET_SECONDS }),
     ])[idOf('acct-i')]
 
-    expect(usage.five_hour?.utilization).toBe(30)
-    expect(usage.seven_day?.utilization).toBe(40)
+    expect(usage.primary_window?.utilization).toBe(30)
+    expect(usage.secondary_window?.utilization).toBe(40)
   })
 
   it('同一窗口取最新一条成功记录(不取最早)', () => {
     const usage = cliproxyEventsToAccountUsage([
-      makeEvent('acct-j', 1_000, { secondary_used_percent: 5, secondary_reset_at: SEC_7D }),
-      makeEvent('acct-j', 9_000, { secondary_used_percent: 70, secondary_reset_at: SEC_7D }),
+      makeEvent('acct-j', 1_000, { secondary_used_percent: 5, secondary_reset_at: SECONDARY_RESET_SECONDS }),
+      makeEvent('acct-j', 9_000, { secondary_used_percent: 70, secondary_reset_at: SECONDARY_RESET_SECONDS }),
     ])[idOf('acct-j')]
 
-    expect(usage.seven_day?.utilization).toBe(70)
+    expect(usage.secondary_window?.utilization).toBe(70)
   })
 })
 
 describe('cliproxyEventsToAccountUsage · 不编造 token 级数据', () => {
-  it('seven_day 只含 utilization/resets_at/remaining_seconds,不塞 token 字段', () => {
+  it('secondary_window 只含 utilization/resets_at/remaining_seconds,不塞 token 字段', () => {
     const usage = cliproxyEventsToAccountUsage([
       makeEvent('acct-k', 1_000, {
         primary_used_percent: 10,
-        primary_reset_at: SEC_5H,
+        primary_reset_at: PRIMARY_RESET_SECONDS,
         secondary_used_percent: 15,
-        secondary_reset_at: SEC_7D,
+        secondary_reset_at: SECONDARY_RESET_SECONDS,
         // 源侧 token 级字段恒 NULL,即使传进来也不得被当成可用值渲染
         secondary_used_tokens: null,
         secondary_remaining_tokens: null,
@@ -210,9 +197,9 @@ describe('cliproxyEventsToAccountUsage · 不编造 token 级数据', () => {
       }),
     ])[idOf('acct-k')]
 
-    expect(usage.seven_day).toEqual({
+    expect(usage.secondary_window).toEqual({
       utilization: 15,
-      resets_at: new Date(SEC_7D * 1000).toISOString(),
+      resets_at: new Date(SECONDARY_RESET_SECONDS * 1000).toISOString(),
       remaining_seconds: expect.any(Number),
       recorded_at: new Date(1_000).toISOString(),
       snapshot_source: 'recorded',

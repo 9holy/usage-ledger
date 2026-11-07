@@ -28,6 +28,7 @@ vi.mock('@/stores/connection', () => ({
   errMsg: (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback),
 }))
 vi.mock('@/api/cockpit', () => ({
+  getCockpitSourceIdentity: vi.fn(),
   getCockpitStats: vi.fn(),
   getCockpitCodexAccounts: vi.fn(),
   getCockpitConnectionState: vi.fn(),
@@ -42,7 +43,7 @@ vi.mock('@/api/cliproxy/cpaData', async (original) => ({
 }))
 vi.mock('../unifiedSourceReader', async (original) => ({ ...await original<typeof import('../unifiedSourceReader')>(), readSub2apiWindow: vi.fn() }))
 
-import { getCockpitStats, getCockpitCodexAccounts, getCockpitConnectionState, getCockpitRequestLogSummary, getCockpitLocalAccess } from '@/api/cockpit'
+import { getCockpitSourceIdentity, getCockpitStats, getCockpitCodexAccounts, getCockpitConnectionState, getCockpitRequestLogSummary, getCockpitLocalAccess } from '@/api/cockpit'
 import { getCliproxyUsageEvents, getCliproxyModelPrices, getCliproxyUsageSnapshot } from '@/api/cliproxy/cpaData'
 import { readSub2apiWindow, windowCostReading } from '../unifiedSourceReader'
 import { usageWindowBounds } from '../usageWindow'
@@ -89,6 +90,7 @@ function stats() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(getCockpitSourceIdentity).mockResolvedValue({ sourceInstanceId: 'local' })
   vi.useFakeTimers()
   vi.setSystemTime(new Date('2026-10-16T12:00:00Z'))
   activeConnection.connections = [{ id: 'saved-sub', type: 'sub2api', lastUsed: 1 }]
@@ -119,7 +121,7 @@ describe('same-window independent source summaries', () => {
     paidFixtures()
     const unified = useUnifiedCost(ref(null), ref(0.7))
     unified.selectedSources.value = new Set(['cockpit'])
-    const batch = { stats: stats(), accounts: [], localAccess: { modelPricings: [{ modelId: 'fixture-model', inputUsdPerMillion: 2, outputUsdPerMillion: 4, cachedInputUsdPerMillion: 0 }] } as never }
+    const batch = { sourceInstanceId: 'local', stats: stats(), accounts: [], localAccess: { modelPricings: [{ modelId: 'fixture-model', inputUsdPerMillion: 2, outputUsdPerMillion: 4, cachedInputUsdPerMillion: 0 }] } as never }
     await unified.loadUnified('1h', undefined, batch)
     expect(getCockpitStats).not.toHaveBeenCalled()
     expect(getCockpitCodexAccounts).not.toHaveBeenCalled()
@@ -141,7 +143,7 @@ describe('same-window independent source summaries', () => {
     vi.mocked(getCockpitCodexAccounts).mockRejectedValueOnce(new Error('fixture account read failed'))
     const unified = useUnifiedCost(ref(null))
     unified.selectedSources.value = new Set(['cockpit'])
-    await unified.loadUnified('1h', undefined, { stats: stats() })
+    await unified.loadUnified('1h', undefined, { sourceInstanceId: 'local', stats: stats() })
     expect(getCockpitStats).not.toHaveBeenCalled()
     expect(getCockpitCodexAccounts).toHaveBeenCalledOnce()
     expect(getCockpitLocalAccess).toHaveBeenCalledOnce()
@@ -157,8 +159,8 @@ describe('same-window independent source summaries', () => {
     let complete!: (value: Awaited<ReturnType<typeof getCockpitRequestLogSummary>>) => void
     vi.mocked(getCockpitRequestLogSummary).mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
     const oldStats = stats(), newStats = { ...(stats() as object), updatedAt: Date.now(), accounts: [] } as never
-    const previous = unified.loadUnified('1h', undefined, { stats: oldStats, accounts: [] })
-    await unified.loadUnified('5m', undefined, { stats: newStats, accounts: [] })
+    const previous = unified.loadUnified('1h', undefined, { sourceInstanceId: 'local', stats: oldStats, accounts: [] })
+    await unified.loadUnified('5m', undefined, { sourceInstanceId: 'local', stats: newStats, accounts: [] })
     const latest = unified.sourceReadings.value.cockpit
     complete({ available: false, rowCount: 0, groups: [] } as never)
     await previous
@@ -324,6 +326,7 @@ describe('useUnifiedCost · 逐账号:下界与哨兵 0 必须与实测金额区
       ref<number | null>(totalUsd),
       ref<CostBasisKind | null>(null),
       ref<Record<string, CostBasisKind> | null>(accountBasis),
+      ref('local'),
     )
   }
 

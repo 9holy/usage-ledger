@@ -1,6 +1,73 @@
 use rusqlite::{params, types::ValueRef, Connection, OpenFlags};
 use serde_json::{json, Map, Number, Value};
-use std::{path::Path, time::Duration};
+use std::{path::{Component, Path, PathBuf}, time::Duration};
+
+/// The plugin resolves relative overrides against its own process cwd. The desktop
+/// reader has no evidence of that cwd, so it must not silently choose its own.
+pub fn absolute_override(value: &str, variable: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value.trim());
+    if !path.is_absolute() {
+        return Err(format!("{variable} must be an absolute path; the CPA producer working directory is unknown"));
+    }
+    // Match filepath.Clean: remove lexical '.'/'..' before reading, without creating files.
+    let mut clean = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => { clean.pop(); }
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    Ok(clean)
+}
+
+pub fn plugin_data_dir(home: Option<&str>, override_dir: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(value) = override_dir.filter(|value| !value.trim().is_empty()) {
+        return absolute_override(value, "CPA_TOKEN_USAGE_DIR");
+    }
+    let home = home.filter(|value| !value.trim().is_empty()).ok_or("Cannot locate CPA user home directory")?;
+    Ok(absolute_override(home, "CPA user home")?.join(".cli-proxy-api").join("plugins").join("codex-token-usage"))
+}
+
+pub fn source_instance_id(directory: &Path, home: Option<&str>) -> Result<String, String> {
+    // Resolve existing parents even when the final directory does not exist.
+    // Raw-path fallback would change identity after creation, especially through
+    // parent aliases and Windows extended-length canonical paths. Broken aliases
+    // are read errors; they cannot establish an empty source or a default scope.
+    let identity = crate::ledger_db::resolved_path_for_ownership(directory)
+        .map_err(|error| error.to_string())?;
+    let identity_bytes = |path: &Path| {
+        if cfg!(windows) {
+            path.to_string_lossy().replace('\\', "/").to_ascii_lowercase().into_bytes()
+        } else {
+            path.as_os_str().as_encoded_bytes().to_vec()
+        }
+    };
+    let default = plugin_data_dir(home, None).ok()
+        .and_then(|path| crate::ledger_db::resolved_path_for_ownership(&path).ok());
+    if default.as_ref().is_some_and(|path| identity_bytes(path) == identity_bytes(&identity)) {
+        return Ok("local".into());
+    }
+    // Namespace only, not a security or ownership proof. Do not expose local paths to the UI.
+    Ok(format!("path-{:x}", md5::compute(identity_bytes(&identity))))
+}
+
+pub fn attach_source_identity(raw: &str, with_metadata: bool, instance: &str) -> Result<String, String> {
+    let mut value: Value = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    let events = if with_metadata {
+        let snapshot = value.as_object_mut().ok_or("Invalid CPA usage metadata")?;
+        snapshot.insert("sourceInstanceId".into(), Value::String(instance.into()));
+        snapshot.insert("managementLinkAllowed".into(), Value::Bool(instance == "local"));
+        snapshot.get_mut("events").and_then(Value::as_array_mut)
+    } else {
+        value.as_array_mut()
+    }.ok_or("Invalid CPA usage event array")?;
+    for event in events {
+        event.as_object_mut().ok_or("Invalid CPA usage event")?
+            .insert("source_instance_id".into(), Value::String(instance.into()));
+    }
+    Ok(value.to_string())
+}
 
 pub fn read_usage_events(
     path: &Path,
@@ -42,9 +109,13 @@ pub fn read_usage_events(
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|error| error.to_string())?;
         let mut response_tier_column = "NULL AS response_service_tier";
+        let mut id_column = "";
+        let mut id_order = "";
         for name in names {
-            if name.map_err(|error| error.to_string())? == "response_service_tier" {
-                response_tier_column = "response_service_tier";
+            match name.map_err(|error| error.to_string())?.as_str() {
+                "response_service_tier" => response_tier_column = "response_service_tier",
+                "id" => { id_column = ", id"; id_order = ", id DESC"; }
+                _ => {}
             }
         }
         let sql = format!(
@@ -54,8 +125,8 @@ pub fn read_usage_events(
              cache_creation_tokens, total_tokens, primary_used_percent, primary_reset_at, \
              primary_used_tokens, primary_remaining_tokens, primary_limit_tokens, \
              secondary_used_percent, secondary_reset_at, secondary_used_tokens, \
-             secondary_remaining_tokens, secondary_limit_tokens \
-             FROM usage_events WHERE requested_at >= ?1 AND requested_at < ?2 ORDER BY requested_at DESC"
+             secondary_remaining_tokens, secondary_limit_tokens{id_column} \
+             FROM usage_events WHERE requested_at >= ?1 AND requested_at < ?2 ORDER BY requested_at DESC{id_order}"
         );
         let end = end_ms.unwrap_or_else(crate::ledger_db::now_ms);
         let start = start_ms.unwrap_or_else(|| end - 30 * 86_400_000);
@@ -309,5 +380,21 @@ mod tests {
             read_usage_events(&path, false, Some(0), Some(2000)).unwrap(),
             "[]"
         );
+    }
+
+    #[test]
+    fn contract_audit_cpa_equal_second_records_preserve_durable_id_order() {
+        let fixture = Fixture::new();
+        let conn = fixture.database();
+        conn.execute_batch("ALTER TABLE usage_events ADD COLUMN id INTEGER;
+          INSERT INTO usage_events(id,requested_at,auth_index,primary_used_percent) VALUES(10,1,'same-slot',5),(11,1,'same-slot',25)").unwrap();
+        let report = fixture.read(true, 0, 2000);
+        let events = report["events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["id"], 11);
+        assert_eq!(events[0]["primary_used_percent"], 25);
+        assert_eq!(events[1]["id"], 10);
+        assert_eq!(events[1]["primary_used_percent"], 5);
+        assert!(!report.to_string().contains("api_key"));
     }
 }

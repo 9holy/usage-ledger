@@ -30,32 +30,50 @@ pub fn roots() -> Result<(Vec<SourceRoot>, Option<String>), String> {
     if let Some(p) = std::env::var_os("CODEX_HOME").filter(|path| !path.is_empty()) {
         codex.push(PathBuf::from(p));
     }
-    let instances = home.join(".antigravity_cockpit/codex_instances.json");
-    let mut registry_error = None;
-    if instances.exists() {
-        match File::open(&instances)
-            .map_err(|e| e.to_string())
-            .and_then(|f| {
-                serde_json::from_reader::<_, serde_json::Value>(f).map_err(|e| e.to_string())
-            }) {
-            Ok(value) => {
-                if let Some(items) = value.get("instances").and_then(|v| v.as_array()) {
-                    for item in items {
-                        if let Some(p) = item
-                            .get("user_data_dir")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.trim().is_empty())
-                        {
-                            codex.push(PathBuf::from(p));
+    let mut registry_errors = Vec::new();
+    match crate::cockpit_data_path::data_dir_from_home(&home) {
+        Ok(directory) => {
+            let instances = directory.join("codex_instances.json");
+            match File::open(&instances) {
+                Ok(file) => match serde_json::from_reader::<_, serde_json::Value>(file) {
+                    Ok(value) => match value.get("instances").and_then(|value| value.as_array()) {
+                        Some(items) => {
+                            for (index, item) in items.iter().enumerate() {
+                                // InstanceProfile uses serde(rename_all = "camelCase").
+                                // Retain the older reader's snake_case compatibility, but
+                                // never choose silently between two conflicting homes.
+                                let current = item.get("userDataDir");
+                                let legacy = item.get("user_data_dir");
+                                let selected = match (current, legacy) {
+                                    (Some(current), Some(legacy)) if current != legacy => {
+                                        registry_errors.push(format!("instance {index} has conflicting data directory fields"));
+                                        continue;
+                                    }
+                                    (Some(value), _) | (_, Some(value)) => value,
+                                    _ => {
+                                        registry_errors.push(format!("instance {index} has no data directory"));
+                                        continue;
+                                    }
+                                };
+                                match selected.as_str().map(str::trim).filter(|value| !value.is_empty()) {
+                                    Some(value) if Path::new(value).is_absolute() => codex.push(PathBuf::from(value)),
+                                    _ => registry_errors.push(format!("instance {index} requires an absolute data directory")),
+                                }
+                            }
                         }
-                    }
-                }
-            }
-            Err(e) => {
-                registry_error = Some(format!("Optional Codex instance registry unavailable: {e}"))
+                        None => registry_errors.push("instance registry requires an instances array".to_string()),
+                    },
+                    Err(error) => registry_errors.push(format!("invalid instance registry: {error}")),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => registry_errors.push(format!("instance registry could not be read: {error}")),
             }
         }
+        Err(error) => registry_errors.push(error),
     }
+    let registry_error = (!registry_errors.is_empty()).then(|| {
+        format!("Optional Codex instance registry incomplete: {}", registry_errors.join("; "))
+    });
     let mut result = Vec::new();
     for base in codex {
         for folder in ["sessions", "archived_sessions"] {

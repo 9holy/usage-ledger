@@ -1,5 +1,5 @@
 //! Read-only projection of official DeepSeek Harness v2–v4 session artifacts.
-//! Contract: deepseek-ai/deepseek-harness @ 22ddee3792402c3e70ec5f86a63c3e3e895a2f60.
+//! Contract rechecked: deepseek-ai/deepseek-harness @ fcc0ad462172522aaf5c93a7b2e01f6b9f0b0159.
 //! Retains accounting metadata only, never prompts, messages, credentials or tool output.
 use super::types::{SessionMeta, UsageRecord};
 use serde_json::Value;

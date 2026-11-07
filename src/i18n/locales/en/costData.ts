@@ -1,4 +1,8 @@
 export default {
+  cpaProviderUnverified: 'Upstream provider unverified',
+  cpaCurrentHealthUnavailable: 'Some files contain disk metadata only; current runtime health was not reported.',
+  cpaAuthenticationSlot: 'Authentication slot {slot}',
+  cpaSlotIdentityBoundary: 'Historical usage and entered costs belong to an authentication slot in this local source. If a credential file is reused, the source cannot prove the owner of earlier usage.',
   independentCalendarModelFallback: 'Request records could not be read. Model amounts for {range} use saved {snapshot} calendar totals, not exact totals for the selected period.',
   independentModelSourceUnavailable: 'Request records and saved model data for {range} could not be read; model totals are unavailable.',
   independentRouteLogFallback: 'Request records could not be read. Keeping call logs for {range}; prices or call details may be incomplete.',
@@ -322,6 +326,8 @@ export default {
   recordedLedgerAndStableIntervalForecastsLoaded: "Cost records and forecasts based on stable periods loaded",
   economicSamplingRefreshFailedKeepingTheLastSuccessfulSnapshot: "Cost refresh failed; keeping the last successfully loaded data",
   remoteEconomicsUnavailableLocallyDerivedFromCostProfilesLoaded: "Remote cost service could not be read; using cost settings, loaded account usage and available loss records. {p0}",
+  sub2apiUsageMissingAccountMetadata: "Some usage lacks account metadata or platform attribution. Confirmed usage and amounts are retained; procurement contains only known profile subtotals, while complete procurement, margin and payback remain unknown.",
+  sub2apiIncompleteEconomicsWindow: "The usage window is incomplete. Amounts include only loaded records matching the filter and cannot support a projection of the complete window.",
   failedToReadTheEconomicSamplingApi: "Could not read cost records",
   cockpitRequestStoreLoadedPerAccountUsageForUnknown: "Account usage for {p0} loaded from Cockpit request records; unpriced usage is not included in the amount{p1}",
   cockpitHasOnlyCumulativeCalendarSnapshotsTheseAreNot: "Cockpit only has saved calendar totals, not complete usage for the selected period",

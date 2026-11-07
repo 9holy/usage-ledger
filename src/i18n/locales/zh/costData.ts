@@ -1,4 +1,8 @@
 export default {
+  cpaProviderUnverified: '上游供应商未核实',
+  cpaCurrentHealthUnavailable: '部分认证文件只有磁盘元数据，未提供当前运行健康状态。',
+  cpaAuthenticationSlot: '认证槽 {slot}',
+  cpaSlotIdentityBoundary: '历史用量和已录入账目绑定本地来源的认证槽；同一认证文件更换账号后，源未提供足够信息核实历史实际归属。',
   independentCalendarModelFallback: '请求记录无法读取；{range} 的模型金额暂用{snapshot}日历累计数据，不是所选时段的精确合计。',
   independentModelSourceUnavailable: '{range} 的请求记录和已保存模型数据都无法读取，暂无模型合计。',
   independentRouteLogFallback: '请求记录无法读取，保留 {range} 的调用日志；价格或调用明细可能不全。',
@@ -322,6 +326,8 @@ export default {
   recordedLedgerAndStableIntervalForecastsLoaded: "已读取费用记录和稳定时段的预测结果",
   economicSamplingRefreshFailedKeepingTheLastSuccessfulSnapshot: "费用记录刷新失败，保留上次成功读取的数据",
   remoteEconomicsUnavailableLocallyDerivedFromCostProfilesLoaded: "远程费用服务无法读取，暂用成本设置、已读取的账号用量和可用损失记录计算。{p0}",
+  sub2apiUsageMissingAccountMetadata: "部分用量缺少账号档案或平台归属证据；已保留可确认的用量和金额，采购记录仅含已知小计，完整采购总额、毛利与回本结果未知。",
+  sub2apiIncompleteEconomicsWindow: "用量窗口未完整读取，金额只含已读取且符合筛选的记录，无法据此预测完整窗口。",
   failedToReadTheEconomicSamplingApi: "费用记录读取失败",
   cockpitRequestStoreLoadedPerAccountUsageForUnknown: "已从 Cockpit 请求库读取 {p0} 的账号用量，缺价格的部分尚未计入金额{p1}",
   cockpitHasOnlyCumulativeCalendarSnapshotsTheseAreNot: "Cockpit 只有按日历累计的数据，不是所选时段的完整用量",

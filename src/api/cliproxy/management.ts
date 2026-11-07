@@ -104,7 +104,7 @@ export interface ApiKeysResponse {
 export interface ApiKeyUsageBucket {
   success: number
   failed: number
-  recent_requests: number[]
+  recent_requests: Array<{ time: string; success: number; failed: number }>
 }
 
 export interface LogEntry {
@@ -316,7 +316,9 @@ export async function putConfigYaml(yaml: string): Promise<StatusOk> {
   return data
 }
 
-export async function getUsageQueue(count = 10): Promise<UsageQueueRecord[]> {
+/** Destructive FIFO consumption (upstream PopOldest), despite the GET method.
+ * Never use for display, polling, or read-only diagnostics: other consumers lose these records. */
+export async function consumeUsageQueue(count = 10): Promise<UsageQueueRecord[]> {
   const { data } = await cliproxyClient.get<UsageQueueRecord[]>('/usage-queue', { params: { count } })
   return data
 }
@@ -326,8 +328,11 @@ export async function getUsageQueue(count = 10): Promise<UsageQueueRecord[]> {
 /** 列出全部认证文件。实测响应:{"files":[...]} */
 export async function getAuthFiles(): Promise<AuthFile[]> {
   const { data } = await cliproxyClient.get<{ files?: AuthFile[] } | AuthFile[]>('/auth-files')
-  if (Array.isArray(data)) return data
-  return data?.files ?? []
+  const files = Array.isArray(data) ? data : data?.files
+  if (!Array.isArray(files) || files.some(file => !file || typeof file !== 'object' || Array.isArray(file))) {
+    throw new Error('Invalid CLIProxy auth-files response')
+  }
+  return files
 }
 
 /** 下载单个认证文件(仅 source=file 可下载),返 blob */

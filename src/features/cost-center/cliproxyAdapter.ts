@@ -3,14 +3,14 @@ import { costDataText } from './costDataText'
  * CPA Token Usage 插件数据 → useCostCenterData store 适配层
  *
  * 数据源(直读插件本地文件,非 cliproxy /v0/management):
- * - usage_events 表(完整历史用量 1629+ 行,30 天窗口,真实时序+ops)
- * - model_prices.cache(LiteLLM 3213 模型 per-token USD 官方定价)
+ * - usage_events 表(按查询窗口读取的已保存用量记录、时序与运行指标)
+ * - model_prices.cache(可选 LiteLLM per-token USD 参考定价)
  *
  * 调统一本地成本引擎 buildLocalEconomicsSnapshot(model.ts→costEngine.ts),
  * 让 cliproxy 复用 sub2api 同套深色成本控制台模板(accountLedgers/economics/KPI)。
  *
  * 数据边界(诚实标注):
- * - 成本 = usage_events token × model_prices.cache per-token 反算(LiteLLM 官方定价,估算非事实账单)
+ * - 成本 = usage_events token × model_prices.cache per-token 反算(参考定价与本项目自有规则,估算非事实账单)
  * - 账号 = auth_index 聚合(CPA 无账号实体,auth_index 是认证文件/key 标识),created_at 用最早 requested_at
  * - 时序 = requested_at 按桶聚合(真实时序,非单点快照)
  * - ops = latency_ms/ttft_ms/failed/status_code 真实(CPA 持续采集)
@@ -48,6 +48,16 @@ export function cliproxyAuthTypeToAccountType(authType: string | undefined): Acc
   return null
 }
 
+/** A protocol/route name is not an endpoint identity. Only declared built-in OAuth
+ * supplies provider evidence here; arbitrary API-key routes remain unverified. */
+export function cliproxyProviderEvidence(provider: string | undefined, executor: string | undefined, authType: string | undefined): 'official_oauth' | 'compatibility' | 'unverified' {
+  const source = (provider ?? '').trim().toLowerCase()
+  if ((executor ?? '').toLowerCase() === 'openaicompatexecutor' || /^openai-compatib/.test(source)) return 'compatibility'
+  const type = cliproxyAuthTypeToAccountType(authType)
+  return (type === 'oauth' || type === 'setup-token') && ['codex', 'openai', 'claude', 'anthropic', 'gemini', 'antigravity', 'xai', 'grok'].includes(source)
+    ? 'official_oauth' : 'unverified'
+}
+
 /**
  * 倍率兜底唯一入口。**实现已上移到 costMultiplier.ts**(架构设计 【F】7.1 / P0-16),
  * 这里 re-export 同名函数,保证既有 `import { resolveCostMultiplier } from './cliproxyAdapter'`
@@ -65,7 +75,7 @@ export function cliproxyUsageWindowBounds(range: CostCenterRange, queryNow = new
 export function isLocalCliproxyTarget(base: string): boolean {
   try {
     const url = new URL(base, 'http://127.0.0.1:8317')
-    return ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    return ['http:', 'https:'].includes(url.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
       && url.port === '8317' && ['/', '/v0/management', '/v0/management/'].includes(url.pathname)
   } catch {
     return false
@@ -73,8 +83,10 @@ export function isLocalCliproxyTarget(base: string): boolean {
 }
 
 /** Preserve the complete opaque runtime identity and isolate it from other sources. */
-export function authIndexToAccountId(authIndex: string): string {
-  return localCostAccountId('cliproxy', authIndex)
+export function authIndexToAccountId(authIndex: string, sourceInstanceId = 'local'): string {
+  if (sourceInstanceId === 'local') return localCostAccountId('cliproxy', authIndex)
+  if (!authIndex.trim() || !sourceInstanceId.trim()) throw new Error('A CPA identity requires its source and authentication slot')
+  return `cliproxy:instance:${encodeURIComponent(sourceInstanceId)}:${encodeURIComponent(authIndex)}`
 }
 
 /** cliproxy model → AccountPlatform(按真实模型商/厂商分类)。
@@ -165,7 +177,7 @@ export function pricedEventCostUsd(
     return noPriceNoEstimateCost(costDataText('cpaActualBillingModeIsUnknownStandardPricesOr'))
   }
   const tokens = cliproxyTokenBreakdown(event)
-  if (tokens.inputTokens == null || tokens.outputTokens == null || tokens.inputTokens < (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) return noPriceNoEstimateCost(costDataText('cpaInputCacheSemanticsAreIncompleteOrInconsistent'))
+  if (!tokens.accountingComplete || tokens.inputTokens == null || tokens.outputTokens == null || tokens.inputTokens < (tokens.cacheReadTokens ?? 0) + (tokens.cacheWriteTokens ?? 0)) return noPriceNoEstimateCost(costDataText('cpaInputCacheSemanticsAreIncompleteOrInconsistent'))
   const inputRate = priority
     ? pricing.input_cost_per_token_priority
     : pricing.input_cost_per_token
@@ -408,8 +420,10 @@ export function cliproxyEventsToAccounts(
 ): Account[] {
   const map = new Map<string, {
     authIndex: string
+    sourceInstanceId: string
     authType: string
     provider: string
+    providerEvidence: ReturnType<typeof cliproxyProviderEvidence>
     modelCounts: Map<string, number>
     alias: string
     earliestMs: number
@@ -421,13 +435,15 @@ export function cliproxyEventsToAccounts(
   }>()
   for (const ev of events) {
     if (!ev.auth_index?.trim()) continue
-    const key = ev.auth_index
+    const key = authIndexToAccountId(ev.auth_index, ev.source_instance_id)
     let acc = map.get(key)
     if (!acc) {
       acc = {
-        authIndex: key,
+        authIndex: ev.auth_index,
+        sourceInstanceId: ev.source_instance_id ?? 'local',
         authType: ev.auth_type,
         provider: ev.provider,
+        providerEvidence: cliproxyProviderEvidence(ev.provider, ev.executor_type, ev.auth_type),
         modelCounts: new Map(),
         alias: ev.alias,
         earliestMs: ev.requested_at,
@@ -439,6 +455,8 @@ export function cliproxyEventsToAccounts(
       }
       map.set(key, acc)
     }
+    if (acc.provider !== ev.provider || acc.providerEvidence !== cliproxyProviderEvidence(ev.provider, ev.executor_type, ev.auth_type)) acc.providerEvidence = 'unverified'
+    if (cliproxyAuthTypeToAccountType(acc.authType) !== cliproxyAuthTypeToAccountType(ev.auth_type)) acc.authType = ''
     acc.earliestMs = Math.min(acc.earliestMs, ev.requested_at)
     acc.latestMs = Math.max(acc.latestMs, ev.requested_at)
     acc.modelCounts.set(ev.model, (acc.modelCounts.get(ev.model) ?? 0) + 1)
@@ -449,13 +467,13 @@ export function cliproxyEventsToAccounts(
     else acc.successCount += 1
   }
   return [...map.values()].map((acc) => {
-    const id = authIndexToAccountId(acc.authIndex)
+    const id = authIndexToAccountId(acc.authIndex, acc.sourceInstanceId)
     // platform 按最常见 model 派生(同 auth_index 多 model 时取频次最高,避免首 event 降维)
     const topModel = [...acc.modelCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || ''
-    const platform = cliproxyProviderToPlatform(acc.provider, topModel, vendorMap)
+    const platform = acc.providerEvidence === 'official_oauth' ? cliproxyProviderToPlatform(acc.provider, '') : cliproxyProviderToPlatform(acc.provider, topModel, vendorMap)
     const sourceType = cliproxyAuthTypeToAccountType(acc.authType)
     const type: AccountType = sourceType ?? 'oauth'
-    const name = acc.alias || acc.authIndex
+    const name = costDataText('cpaAuthenticationSlot', { slot: acc.authIndex })
     // 健康度:status_code 401/402/403 = 账号封禁(用户确认)→ error;
     // 否则按失败率(>50% error / >20% inactive / active)
     const total = acc.successCount + acc.failureCount
@@ -477,6 +495,10 @@ export function cliproxyEventsToAccounts(
       credentials: undefined,
       extra: {
         cliproxy_identity_source: 'usage_only',
+        cliproxy_source_instance_id: acc.sourceInstanceId,
+        cliproxy_owner_verified: false,
+        cliproxy_provider_evidence: acc.providerEvidence,
+        cliproxy_created_at_known: false,
         cliproxy_status_basis: 'historical_requests',
         cliproxy_usage_linked: false,
         cliproxy_auth_type_known: sourceType != null,
@@ -524,7 +546,7 @@ export function cliproxyEventsToTodayStats(
   const map = new Map<string, { requests: number; tokens: number; costUsd: number; unpriced: number }>()
   for (const ev of events) {
     if (startMs != null && endMs != null && !(ev.requested_at >= startMs && ev.requested_at < endMs)) continue
-    const key = ev.auth_index?.trim() ? authIndexToAccountId(ev.auth_index) : UNATTRIBUTED_USAGE_ACCOUNT_ID
+    const key = ev.auth_index?.trim() ? authIndexToAccountId(ev.auth_index, ev.source_instance_id) : UNATTRIBUTED_USAGE_ACCOUNT_ID
     let acc = map.get(key)
     if (!acc) {
       acc = { requests: 0, tokens: 0, costUsd: 0, unpriced: 0 }
@@ -564,48 +586,40 @@ function usageProgressFrom(usedPercent: number, resetSec: number | null, nowSec:
   }
 }
 
-/** usage_events → Record<id, AccountUsageInfo>(配额窗口,5h / 7d 各自按 auth_index 取最近一条成功记录)。
- *
- *  窗口映射(2026-09-17 直读插件 usage.db 实测确认):
- *  - `primary_used_percent` / `primary_reset_at` = **5h 窗口**(实测 reset − requested_at ≈ 4.69h)
- *  - `secondary_used_percent` / `secondary_reset_at` = **独立 7d 窗口**(实测 ≈ 6.78d)
- *  同一条 event 上两者可以完全不同(实测 5h=100% 而 7d=35%),所以 seven_day 必须读 secondary,
- *  不得拿 primary 顶替 —— 那会把 5h 的数按 7d 的口径展示。
- *
- *  判据与空值契约(同一次实测,全表 7700 行):
- *  - 「源给了独立 7d 窗口」⇔ `secondary_reset_at` 非空。207 行 `secondary_used_percent=0` 且 reset 为空,
- *    全部集中在 15 个**从未出现过** reset 的 auth_index(同批记录 5h 覆盖 2–100%),
- *    ⇒ 那是"上游没报这个窗口"的缺省编码,不是"用了 0%";按 0 展示会变成假健康态。
- *    有 reset 的 1349 行里另有 20 行 pct=0,那才是真 0(同账号随后涨到 35%)。
- *  - 取不到时 `seven_day = null`,由渲染层显示「无数据」,**绝不落 0**。
- *  - `secondary_used_tokens` / `secondary_remaining_tokens` / `secondary_limit_tokens` 全表 0 行非空
- *    (`primary_limit_tokens` 同样全空),故 token 级窗口数据不可得,一律不填。
+/** Quota slots are opaque upstream names, not fixed durations.
+ * CPA usage_events stores percentages/resets but omits duration and presence metadata.
+ * Keep each slot's latest successful recorded value separately; reset minus request time
+ * is remaining time, so it cannot establish a five-hour or seven-day quota duration.
+ * Legacy secondary zero without a reset is not evidence that a secondary window exists.
  */
 export function cliproxyEventsToAccountUsage(events: CliproxyUsageEvent[], queryNow = new Date()): Record<string, AccountUsageInfo> {
-  type WindowSnapshot = { at: number; usedPercent: number; resetAt: number | null }
+  type WindowSnapshot = { at: number; id?: number; usedPercent: number; resetAt: number | null }
   const latestPrimary = new Map<string, WindowSnapshot>()
   const latestSecondary = new Map<string, WindowSnapshot>()
   const keepLatest = (map: Map<string, WindowSnapshot>, key: string, snapshot: WindowSnapshot) => {
     const prev = map.get(key)
-    if (!prev || snapshot.at > prev.at) map.set(key, snapshot)
+    if (!prev || snapshot.at > prev.at
+      || (snapshot.at === prev.at && snapshot.id != null && (prev.id == null || snapshot.id > prev.id))) map.set(key, snapshot)
   }
   for (const ev of events) {
     if (ev.failed) continue
     if (!ev.auth_index?.trim()) continue
-    const key = ev.auth_index
-    // 5h 窗口:源给了百分比即可用(实测 primary_reset_at 在有值行上恒非空)
+    const key = authIndexToAccountId(ev.auth_index, ev.source_instance_id)
+    // Primary slot: preserve a measured percentage even when the reset is unavailable.
     if (ev.primary_used_percent != null && Number.isFinite(ev.primary_used_percent) && ev.primary_used_percent >= 0) {
       keepLatest(latestPrimary, key, {
         at: ev.requested_at,
+        id: ev.id,
         usedPercent: ev.primary_used_percent,
         resetAt: ev.primary_reset_at,
       })
     }
-    // 7d 窗口:必须同时拿到百分比与重置时间,才算源真的报了独立 7d 窗口
+    // A nonzero percentage is evidence even without a reset; only legacy zero+null is ambiguous.
     if (ev.secondary_used_percent != null && Number.isFinite(ev.secondary_used_percent) && ev.secondary_used_percent >= 0
-      && quotaTimestamp(ev.secondary_reset_at == null ? null : ev.secondary_reset_at * 1000)) {
+      && (ev.secondary_used_percent > 0 || quotaTimestamp(ev.secondary_reset_at == null ? null : ev.secondary_reset_at * 1000))) {
       keepLatest(latestSecondary, key, {
         at: ev.requested_at,
+        id: ev.id,
         usedPercent: ev.secondary_used_percent,
         resetAt: ev.secondary_reset_at,
       })
@@ -619,11 +633,13 @@ export function cliproxyEventsToAccountUsage(events: CliproxyUsageEvent[], query
     const sec = latestSecondary.get(authIndex)
     // 两个窗口可能来自不同 event(各次请求上报的快照不同步),取较新的那条作为该账号的更新时间
     const stampMs = Math.max(pri?.at ?? 0, sec?.at ?? 0)
-    result[authIndexToAccountId(authIndex)] = {
-      source: 'active',
+    result[authIndex] = {
+      source: 'passive',
       updated_at: stampMs > 0 ? new Date(stampMs).toISOString() : null,
-      five_hour: pri ? usageProgressFrom(pri.usedPercent, pri.resetAt, nowSec, pri.at) : null,
-      seven_day: sec ? usageProgressFrom(sec.usedPercent, sec.resetAt, nowSec, sec.at) : null,
+      primary_window: pri ? usageProgressFrom(pri.usedPercent, pri.resetAt, nowSec, pri.at) : null,
+      secondary_window: sec ? usageProgressFrom(sec.usedPercent, sec.resetAt, nowSec, sec.at) : null,
+      five_hour: null,
+      seven_day: null,
       seven_day_sonnet: null,
     }
   }
@@ -692,7 +708,7 @@ export function cliproxyEventsToModelStats(
     m.output_tokens = m.output_tokens == null || normalized.outputTokens == null ? null : m.output_tokens + normalized.outputTokens
     m.cache_creation_tokens = (m.cache_creation_tokens ?? 0) + (normalized.cacheWriteTokens ?? 0)
     m.cache_read_tokens = (m.cache_read_tokens ?? 0) + (normalized.cacheReadTokens ?? 0)
-    m.total_tokens = m.input_tokens == null || m.output_tokens == null ? null : m.input_tokens + m.output_tokens
+    m.total_tokens = m.total_tokens == null || normalized.totalTokens == null ? null : m.total_tokens + normalized.totalTokens
     m._costUsd += costUsd
     // 任一分量算不出来 ⇒ 整模型标未知(取更差一侧);未知时不写哨兵 0,置 null。
     m._unpriced = m._unpriced || unpriced
@@ -752,7 +768,7 @@ export function cliproxyEventsToTrend(
     b.output_tokens = b.output_tokens == null || normalized.outputTokens == null ? null : b.output_tokens + normalized.outputTokens
     b.cache_creation_tokens += normalized.cacheWriteTokens ?? 0
     b.cache_read_tokens += normalized.cacheReadTokens ?? 0
-    b.total_tokens = b.input_tokens == null || b.output_tokens == null ? null : b.input_tokens + b.output_tokens
+    b.total_tokens = b.total_tokens == null || normalized.totalTokens == null ? null : b.total_tokens + normalized.totalTokens
     // 用带 basis 的计价函数,逐事件统计三种依据,决定这一桶是"断点"还是"下界"。
     const priced = pricedEventCostUsd(ev, resolveModelPricing(ev.model, prices))
     b.costUsd += priced.cost * multiplier
@@ -829,7 +845,7 @@ export function cliproxyEventsToOps(
       successTotal += 1
     }
     const normalized = cliproxyTokenBreakdown(ev)
-    const eventTotal = normalized.inputTokens == null || normalized.outputTokens == null ? null : normalized.inputTokens + normalized.outputTokens
+    const eventTotal = normalized.totalTokens ?? null
     tokenTotal = tokenTotal == null || eventTotal == null ? null : tokenTotal + eventTotal
     const idx = Math.min(bucketCount - 1, Math.floor((ev.requested_at - startMs) / bucketMs))
     const b = buckets[idx]
@@ -990,11 +1006,11 @@ export function cliproxyEventsToEconomics(
     failureCount: number
   }>()
   for (const ev of events) {
-    const key = ev.auth_index ? `auth:${ev.auth_index}` : UNATTRIBUTED_USAGE_ACCOUNT_ID
+    const key = ev.auth_index?.trim() ? authIndexToAccountId(ev.auth_index, ev.source_instance_id) : UNATTRIBUTED_USAGE_ACCOUNT_ID
     let acc = map.get(key)
     if (!acc) {
       acc = {
-        authIndex: ev.auth_index || '',
+        authIndex: ev.auth_index?.trim() ? ev.auth_index : '',
         provider: ev.provider,
         model: ev.model,
         authType: ev.auth_type,
@@ -1047,7 +1063,7 @@ export function cliproxyEventsToEconomics(
     window: range ? cliproxyUsageWindowBounds(range, queryNow) : undefined,
     impairmentComplete: false,
   })
-  const unassigned = costEvents.filter(event => !event.auth_index).length
+  const unassigned = costEvents.filter(event => !event.auth_index?.trim()).length
   if (snapshot && (priced.unpricedEvents || unassigned)) {
     snapshot.data_quality.status = 'partial'
     snapshot.projection.warning = [snapshot.projection.warning,

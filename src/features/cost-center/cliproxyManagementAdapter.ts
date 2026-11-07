@@ -15,7 +15,7 @@ import type { SourceAccount as Account } from './sourceTypes'
 import { cliproxyTokenBreakdown } from '@/api/cliproxy/cpaData'
 import type { AuthFile, CliproxyConfig } from '@/api/cliproxy/management'
 import type { CliproxyUsageEvent, LitellmPricing } from '@/api/cliproxy/cpaData'
-import { authIndexToAccountId, pricedEventCostUsd, resolveModelPricing, resolveCostMultiplier, cliproxyUsageWindowBounds, cliproxyAuthTypeToAccountType } from './cliproxyAdapter'
+import { authIndexToAccountId, pricedEventCostUsd, resolveModelPricing, resolveCostMultiplier, cliproxyUsageWindowBounds, cliproxyAuthTypeToAccountType, cliproxyEventsToAccounts, cliproxyProviderEvidence } from './cliproxyAdapter'
 import { isUnknownCostBasis } from './costBasis'
 import type { CostCenterRange } from './useCostCenterData'
 import { mergeRoutePriceEvidence, routeEvidenceFromQuote, type RoutePriceEvidence } from './modelRouteAnalysis'
@@ -32,68 +32,34 @@ function authFileProviderToPlatform(provider: string): AccountPlatform {
   return 'openai'
 }
 
-/** 按 auth_index 聚合 CPA events 成中间态(补 latency/tokens/健康度,auth-files 无这些)。 */
-interface EventAgg {
-  authIndex: string
-  authType: string
-  model: string
-  provider: string
-  earliestMs: number
-  latestMs: number
-  successCount: number
-  failureCount: number
-  latencyMs: number
-}
-
-function aggregateEventsByAuth(events: CliproxyUsageEvent[]): Map<string, EventAgg> {
-  const map = new Map<string, EventAgg>()
-  for (const ev of events) {
-    if (!ev.auth_index?.trim()) continue
-    const key = ev.auth_index
-    let acc = map.get(key)
-    if (!acc) {
-      acc = {
-        authIndex: key,
-        authType: ev.auth_type,
-        model: ev.model,
-        provider: ev.provider,
-        earliestMs: ev.requested_at,
-        latestMs: ev.requested_at,
-        successCount: 0,
-        failureCount: 0,
-        latencyMs: 0,
-      }
-      map.set(key, acc)
-    }
-    acc.earliestMs = Math.min(acc.earliestMs, ev.requested_at)
-    acc.latestMs = Math.max(acc.latestMs, ev.requested_at)
-    if (ev.failed) acc.failureCount += 1
-    else acc.successCount += 1
-    if (ev.latency_ms > 0) acc.latencyMs = ev.latency_ms // events DESC,最新有 latency 的即最新
-  }
-  return map
+/** Disk-only fallback files have no runtime state; their presence is not healthy/schedulable evidence. */
+export function hasCurrentCliproxyAuthState(file: AuthFile): boolean {
+  return typeof file.disabled === 'boolean' && ['active', 'disabled', 'error'].includes((file.status ?? '').toLowerCase())
 }
 
 /** auth-files + CPA events → Account[](真实实体:email/provider/status,CPA 补 latency/健康度)。
  *  id 与 CPA adapter 共享完整的 source/raw identity。
  *  scheduler_score 用 success/failed 派生 base_score(调用评分列)。 */
 export function cliproxyAuthFilesToAccounts(authFiles: AuthFile[], events: CliproxyUsageEvent[]): Account[] {
-  const eventMap = aggregateEventsByAuth(events)
-  return authFiles.filter(af => af.auth_index?.trim() || af.id?.trim() || af.name?.trim()).map((af) => {
+  const historicalSlots = new Map(cliproxyEventsToAccounts(events).map(account => [account.id, account]))
+  return authFiles.filter(af => (af.auth_index?.trim() || af.id?.trim() || af.name?.trim())
+    && (hasCurrentCliproxyAuthState(af) || !!af.auth_index?.trim() && historicalSlots.has(authIndexToAccountId(af.auth_index)))).map((af) => {
     const authIndex = af.auth_index?.trim() ? af.auth_index : null
     const id = authIndex != null
       ? authIndexToAccountId(authIndex)
       : `cliproxy:management-file:${encodeURIComponent(af.id?.trim() ? af.id : af.name)}`
-    const evAgg = authIndex ? eventMap.get(authIndex) : undefined
+    const historicalSlot = historicalSlots.get(id)
+    // A file-path-derived auth_index survives replacing the credentials in that file.
+    // Current email/owner/type/status therefore cannot reassign the historical slot.
+    if (historicalSlot) return { ...historicalSlot, extra: { ...historicalSlot.extra, cliproxy_management_slot_observed: true } }
     const platform = authFileProviderToPlatform(af.provider)
     const sourceType = cliproxyAuthTypeToAccountType(af.account_type)
-      ?? (!af.account_type?.trim() ? cliproxyAuthTypeToAccountType(evAgg?.authType) : null)
     const type: AccountType = sourceType ?? 'oauth'
     const name = af.email || af.name || af.auth_index || 'unknown'
     // 健康度:auth-files 真实 status/disabled/unavailable(不派生失败率,auth-files success/failed 实测全0)
     // disabled→inactive, unavailable/error→error, 否则 active
     const afStatus = (af.status || '').toLowerCase()
-    const status: 'active' | 'inactive' | 'error' = af.disabled
+    const status: 'active' | 'inactive' | 'error' = af.disabled || afStatus === 'disabled'
       ? 'inactive'
       : af.unavailable || afStatus === 'error'
         ? 'error'
@@ -101,7 +67,8 @@ export function cliproxyAuthFilesToAccounts(authFiles: AuthFile[], events: Clipr
     const errorMessage = af.status_message || (af.disabled ? costDataText('disabled') : af.unavailable ? costDataText('unavailable') : null)
     // CPA events 按 auth_index 关联补 latency/last_used(auth_index 不重叠时 evAgg=undefined,留 null)
     const createdAt = af.created_at || ''
-    const lastUsed = evAgg ? new Date(evAgg.latestMs).toISOString() : (af.last_refresh || null)
+    // auth.LastRefreshedAt describes credential refresh, not an observed request.
+    const lastUsed = null
     return {
       id,
       name,
@@ -112,7 +79,8 @@ export function cliproxyAuthFilesToAccounts(authFiles: AuthFile[], events: Clipr
       extra: {
         cliproxy_identity_source: 'management',
         cliproxy_status_basis: 'management_current',
-        cliproxy_usage_linked: !!evAgg,
+        cliproxy_provider_evidence: cliproxyProviderEvidence(af.provider, '', af.account_type),
+        cliproxy_usage_linked: false,
         cliproxy_auth_type_known: sourceType != null,
         cliproxy_created_at_known: !!createdAt,
       },
@@ -128,8 +96,8 @@ export function cliproxyAuthFilesToAccounts(authFiles: AuthFile[], events: Clipr
       expires_at: null,
       auto_pause_on_expired: false,
       created_at: createdAt,
-      updated_at: lastUsed || createdAt,
-      schedulable: !af.disabled && !af.unavailable,
+      updated_at: af.updated_at || af.modtime || createdAt,
+      schedulable: status === 'active',
       rate_limited_at: null,
       rate_limit_reset_at: null,
       overload_until: null,
@@ -228,7 +196,7 @@ export function cliproxyEventsToModelRoutes(
     const model = ev.model || 'unknown'
     const requestedModel = ev.alias || model
     const authIndex = ev.auth_index?.trim() ? ev.auth_index : ''
-    const key = JSON.stringify([model, requestedModel, authIndex, ev.provider])
+    const key = JSON.stringify([model, requestedModel, authIndex, ev.provider, ev.source_instance_id ?? 'local'])
     // 用带 basis 的计价函数:无匹配单价时 pricedEventCostUsd 返的是**哨兵 0**(basis 标"算不出"),
     // 而 eventCostUsd 只给 number,丢掉标注后 0 会被当实测成本写进路由明细的成本列。
     const priced = pricedEventCostUsd(ev, resolveModelPricing(model, prices))
@@ -236,9 +204,9 @@ export function cliproxyEventsToModelRoutes(
     const unpriced = isUnknownCostBasis(priced.basis.kind)
     let row = map.get(key)
     if (!row) {
-      const accountId = authIndex ? authIndexToAccountId(authIndex) : null
+      const accountId = authIndex ? authIndexToAccountId(authIndex, ev.source_instance_id) : null
       const account = accounts.find((a) => a.id === accountId)
-      const accountName = account?.name || (authIndex ? authIndex : costDataText('unattributedAccountUsage'))
+      const accountName = account?.name || (authIndex ? costDataText('cpaAuthenticationSlot', { slot: authIndex }) : costDataText('unattributedAccountUsage'))
       row = {
         model,
         requestedModel,
@@ -277,7 +245,7 @@ export function cliproxyEventsToModelRoutes(
     row.inputTokens = row.inputTokens == null || tokens.inputTokens == null ? null : row.inputTokens + tokens.inputTokens
     row.outputTokens = row.outputTokens == null || tokens.outputTokens == null ? null : row.outputTokens + tokens.outputTokens
     row.cacheReadTokens += tokens.cacheReadTokens ?? 0
-    row.totalTokens = row.inputTokens == null || row.outputTokens == null ? null : row.inputTokens + row.outputTokens
+    row.totalTokens = row.totalTokens == null || tokens.totalTokens == null ? null : row.totalTokens + tokens.totalTokens
     row._cost += cost
     // 任一分量算不出来 ⇒ 整行标未知(取更差一侧);未知时不写哨兵 0,置 null。
     row._unpriced = row._unpriced || unpriced

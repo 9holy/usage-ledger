@@ -12,6 +12,8 @@ import { costDataText } from './costDataText'
  */
 
 import { computed, ref } from 'vue'
+import { getCockpitSourceIdentity } from '@/api/cockpit'
+import { assertCockpitSourceIdentity } from '@/api/cockpit/sourceIdentity'
 import { errMsg } from '@/stores/connection'
 import {
   getQuotaChannels,
@@ -22,6 +24,8 @@ import {
 } from '@/api/cockpit/quota'
 
 export function useChannelQuota() {
+  const sourceInstanceId = ref('unavailable')
+  let sequence = 0
   /** 全部渠道探测结果（含无账号的，供"渠道能力"展示）。 */
   const channels = ref<QuotaChannelSummary[]>([])
   /** channel → 归一化后的配额快照。 */
@@ -48,42 +52,87 @@ export function useChannelQuota() {
   /** 过期条数（数据自身时间戳超 TTL）。 */
   const staleCount = computed(() => allSnapshots.value.filter((s) => s.stale).length)
 
+  function reset() {
+    sequence += 1
+    sourceInstanceId.value = 'unavailable'
+    channels.value = []
+    snapshotsByChannel.value = {}
+    loaded.value = false
+    loading.value = false
+    error.value = null
+    liveError.value = null
+    refreshingChannel.value = null
+  }
+
   async function load(): Promise<void> {
+    const request = ++sequence
     loading.value = true
     error.value = null
+    let observed: string | null = null
     try {
-      channels.value = await getQuotaChannels()
-      const withAccounts = channels.value.filter((c) => c.hasAccounts)
-      // 并行读各渠道快照；单渠道失败不影响其它（Rust 侧单渠道错误已被 getQuotaSnapshots 吞成 []）
+      observed = (await getCockpitSourceIdentity()).sourceInstanceId
+      if (request !== sequence) return
+      if (sourceInstanceId.value !== observed) {
+        channels.value = []; snapshotsByChannel.value = {}; loaded.value = false
+      }
+      const nextChannels = await getQuotaChannels()
+      const withAccounts = nextChannels.filter((c) => c.hasAccounts)
       const entries = await Promise.all(
         withAccounts.map(async (c) => [c.channel, await getQuotaSnapshots(c.channel)] as const),
       )
+      await assertCockpitSourceIdentity(observed)
+      if (request !== sequence) return
       const map: Record<string, QuotaSnapshot[]> = {}
       for (const [channel, snaps] of entries) map[channel] = snaps
+      sourceInstanceId.value = observed
+      channels.value = nextChannels
       snapshotsByChannel.value = map
       loaded.value = true
     } catch (e) {
+      if (request !== sequence) return
+      // Unknown/changed identity cannot preserve snapshots under the new source.
+      let sameSource = false
+      if (observed && observed === sourceInstanceId.value) {
+        try { await assertCockpitSourceIdentity(observed); sameSource = true } catch { /* no proven owner */ }
+      }
+      if (request !== sequence) return
+      if (!sameSource) { sourceInstanceId.value = 'unavailable'; channels.value = []; snapshotsByChannel.value = {}; loaded.value = false }
       error.value = errMsg(e, costDataText('failedToReadChannelQuota'))
     } finally {
-      loading.value = false
+      if (request === sequence) loading.value = false
     }
   }
 
-  /** 路径 A：用户主动触发的实时刷新。失败不阻塞，只回传降级原因。 */
+  /** Live refresh is limited to the already displayed physical source. */
   async function refresh(channel: string): Promise<void> {
+    const request = ++sequence
+    const expected = sourceInstanceId.value
     refreshingChannel.value = channel
     liveError.value = null
     try {
+      if (expected === 'unavailable') throw new Error('Cockpit quota source is unavailable; reload before refreshing')
+      await assertCockpitSourceIdentity(expected)
+      if (request !== sequence) return
       const result = await refreshQuotaSnapshots(channel)
-      if (!result) return
+      await assertCockpitSourceIdentity(expected)
+      if (request !== sequence || !result) return
       snapshotsByChannel.value = { ...snapshotsByChannel.value, [channel]: result.snapshots }
       liveError.value = result.liveError
+    } catch (e) {
+      if (request !== sequence) return
+      let sameSource = false
+      try { await assertCockpitSourceIdentity(expected); sameSource = true } catch { /* no proven owner */ }
+      if (request !== sequence) return
+      if (!sameSource) { sourceInstanceId.value = 'unavailable'; channels.value = []; snapshotsByChannel.value = {}; loaded.value = false }
+      liveError.value = errMsg(e, costDataText('failedToReadChannelQuota'))
     } finally {
-      refreshingChannel.value = null
+      if (request === sequence) refreshingChannel.value = null
     }
   }
 
   return {
+    sourceInstanceId,
+    reset,
     channels,
     activeChannels,
     snapshotsByChannel,
