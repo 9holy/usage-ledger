@@ -40,6 +40,11 @@ pub struct State<'a, T>(&'a T);
 impl<'a, T> State<'a, T> {
     pub fn inner(&self) -> &'a T { self.0 }
 }
+impl<T> std::ops::Deref for State<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T { self.0 }
+}
+pub use reqwest::Url;
 pub mod async_runtime { pub use tokio::task::spawn_blocking; }
 """
 

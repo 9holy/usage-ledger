@@ -3,7 +3,7 @@
   "version": "0.2.51",
   "repository": "9holy/usage-ledger",
   "freeze": "release-0.2.51",
-  "createdAt": "2026-11-16T23:01:27.436Z",
+  "createdAt": "2026-11-16T23:11:15.606Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.51",
@@ -673,8 +673,8 @@
     },
     {
       "path": "scripts/test-native-headless.py",
-      "bytes": 11041,
-      "sha256": "9e9699c2a01ee62881505a52fe5fc7fc9333171e80a2e2c87b7da1ae08824065"
+      "bytes": 11171,
+      "sha256": "6e9e9dc5df165a6e1409b226cf2530821b03fc2a1474e5912be916e59e420ac3"
     },
     {
       "path": "scripts/test-native.mjs",
