@@ -78,7 +78,7 @@ pub const FALLBACK_DIR_NAME: &str = "2api-console";
 /// (由 `latest_constant_matches_last_migration` 单测守住)。
 ///
 /// v1–v7 = 一期 7 张表;v8–v12 = 二期多源化(见 `docs/architecture/ledger-schema-v8.sql`)。
-pub const SCHEMA_VERSION_LATEST: u32 = 16;
+pub const SCHEMA_VERSION_LATEST: u32 = 17;
 
 /// 一期唯一已知源:cockpit 单请求用量库 `codex_local_access_logs.sqlite`。
 ///
@@ -520,6 +520,7 @@ pub const MIGRATIONS: &[(u32, &str, &str)] = &[
     (15, "models.dev 本地目录缓存", crate::model_catalog::MIGRATION_V15),
     (16, "复合水位边界与未封桶来源快照", "ALTER TABLE rollup_bucket_state ADD COLUMN max_source_keys TEXT;
         ALTER TABLE rollup_bucket_state ADD COLUMN provisional_snapshot TEXT;"),
+    (17, "整合本地成本档案与两种 v16 账本", crate::finance_ledger::MIGRATION_V16),
 ];
 
 /// 开库后立即生效的 PRAGMA(与 `docs/architecture/ledger-schema.sql` 头部一致)。
@@ -531,7 +532,7 @@ PRAGMA foreign_keys = ON;
 ";
 
 /// 账本表的名字(单测与自检用),包含财务事件与目录缓存。
-pub const LEDGER_TABLES: [&str; 10] = [
+pub const LEDGER_TABLES: [&str; 11] = [
     "schema_version",
     "usage_rollup",
     "account_identity",
@@ -542,6 +543,7 @@ pub const LEDGER_TABLES: [&str; 10] = [
     "price_book_version",
     "finance_events",
     "model_catalog_cache",
+    "local_cost_settings",
 ];
 
 // -----------------------------------------------------------------------------
@@ -710,7 +712,7 @@ pub fn ledger_db_path() -> Result<PathBuf, LedgerError> {
             return Ok(path);
         }
     }
-    let path = ledger_db_path_in(&resolve_app_data_dir()?);
+    let path = ledger_db_path_in(&match RUNTIME_DATA_DIR.get() { Some(dir) => dir.clone(), None => resolve_app_data_dir()? });
     assert_not_cockpit_path(&path)?;
     Ok(path)
 }
@@ -731,6 +733,12 @@ pub fn cockpit_ledger_db_path_for_identity(identity: &str) -> Result<PathBuf, Le
     let path = ledger_db_path_in(&scoped);
     assert_not_cockpit_path(&path)?;
     Ok(path)
+}
+
+static RUNTIME_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_runtime_data_dir(dir: PathBuf) -> Result<(), String> {
+    RUNTIME_DATA_DIR.set(dir).map_err(|_| "Application data directory was already configured".into())
 }
 
 /// 按优先级挑出第一个可创建的账本目录。
@@ -952,18 +960,14 @@ pub fn current_version(conn: &Connection) -> Result<u32, LedgerError> {
 /// - 已应用过的版本会被跳过(判据 = `max(PRAGMA user_version, MAX(schema_version.version))`),
 ///   重复调用是幂等的。
 /// - 库里版本**高于**代码已知最新版本时直接报错,不做任何猜测式降级迁移。
-pub fn migrate(conn: &mut Connection) -> Result<u32, LedgerError> {
-    // Serialize before reading the baseline: another opener may finish an
-    // upgrade while this connection waits. A deferred transaction after the
-    // reads would replay ALTER TABLE statements against that newer schema.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let user_version = current_version(&tx)?;
-    let has_versions: bool = tx.query_row(
+fn migration_baseline(conn: &Connection) -> Result<(u32, u32), LedgerError> {
+    let user_version = current_version(conn)?;
+    let has_versions: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version')",
         [], |row| row.get(0),
     )?;
     let applied_max: i64 = if has_versions {
-        tx.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| row.get(0))?
+        conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| row.get(0))?
     } else {
         0
     };
@@ -975,11 +979,32 @@ pub fn migrate(conn: &mut Connection) -> Result<u32, LedgerError> {
             supported: SCHEMA_VERSION_LATEST,
         });
     }
+    Ok((user_version, base))
+}
+
+pub fn migrate(conn: &mut Connection) -> Result<u32, LedgerError> {
+    if migration_baseline(conn)?.0 == SCHEMA_VERSION_LATEST { return Ok(0); }
+    // Re-read under the writer lock; another opener may have upgraded while we waited.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (user_version, base) = migration_baseline(&tx)?;
 
     let mut applied = 0u32;
     for (version, description, sql) in MIGRATIONS {
         if *version <= base {
             continue;
+        }
+        let mut sql = *sql;
+        if *version == 17 {
+            // The approved desktop and public release used different v16 schemas.
+            for column in ["max_source_keys", "provisional_snapshot"] {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('rollup_bucket_state') WHERE name=?1)",
+                    [column], |row| row.get(0),
+                )?;
+                if !exists { tx.execute_batch(&format!("ALTER TABLE rollup_bucket_state ADD COLUMN {column} TEXT"))?; }
+            }
+            let local: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_cost_settings')", [], |r| r.get(0))?;
+            if local { sql = ""; }
         }
         tx.execute_batch(sql)?;
         tx.execute(
@@ -1004,6 +1029,26 @@ pub fn migrate(conn: &mut Connection) -> Result<u32, LedgerError> {
 mod tests {
     use super::*;
     use rusqlite::types::Value;
+
+    #[test]
+    fn both_v16_schemas_upgrade_without_replacing_saved_usage_or_cost_settings() {
+        for local in [false, true] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            for (version, _, sql) in MIGRATIONS.iter().filter(|(version,_,_)| *version <= 15) {
+                conn.execute_batch(sql).unwrap();
+                conn.execute("INSERT INTO schema_version VALUES(?1,0,'fixture')", [version]).unwrap();
+            }
+            conn.execute_batch(if local { crate::finance_ledger::MIGRATION_V16 } else { MIGRATIONS[15].2 }).unwrap();
+            conn.execute("INSERT INTO schema_version VALUES(16,0,'original v16')", []).unwrap();
+            conn.pragma_update(None, "user_version", 16).unwrap();
+            if local { conn.execute("INSERT INTO local_cost_settings VALUES(1,'{\"saved\":true}')", []).unwrap(); }
+            assert_eq!(migrate(&mut conn).unwrap(), 1);
+            assert_eq!(migrate(&mut conn).unwrap(), 0);
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('rollup_bucket_state') WHERE name IN ('max_source_keys','provisional_snapshot')", [], |r| r.get::<_,i64>(0)).unwrap(), 2);
+            if local { assert_eq!(conn.query_row("SELECT data FROM local_cost_settings WHERE id=1", [], |r| r.get::<_,String>(0)).unwrap(), "{\"saved\":true}"); }
+            assert_eq!(conn.query_row("SELECT description FROM schema_version WHERE version=16", [], |r| r.get::<_,String>(0)).unwrap(), "original v16");
+        }
+    }
 
     /// 每个用例一个独占临时目录(带 pid + 纳秒,避免并行测试互相踩)。
     fn temp_dir(tag: &str) -> PathBuf {
@@ -1045,8 +1090,8 @@ mod tests {
         for w in MIGRATIONS.windows(2) {
             assert!(w[0].0 < w[1].0, "迁移版本号必须严格递增: {} vs {}", w[0].0, w[1].0);
         }
-        assert_eq!(MIGRATIONS.len(), 16, "用量、财务、目录缓存及复合水位增量迁移");
-        assert_eq!(LEDGER_TABLES.len(), 10, "用量、财务及目录缓存");
+        assert_eq!(MIGRATIONS.len(), 17, "用量、财务、目录缓存及本地成本增量迁移");
+        assert_eq!(LEDGER_TABLES.len(), 11, "用量、财务、目录缓存及本地成本设置");
         assert!(
             LEDGER_TABLES.contains(&"price_book_version"),
             "v11 新增的价目表必须在表清单里"

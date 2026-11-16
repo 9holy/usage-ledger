@@ -1032,13 +1032,13 @@ pub fn quote_input(input: &CatalogQuoteInput, catalog: &CatalogSnapshot) -> Cost
         Ok(cost) => cost,
         Err(error) => {
             let terra = input.model == "gpt-6.1-terra";
-            if input.aggregate || input.provider.is_some() && !(terra && input.provider.as_deref() == Some("openai")) {
+            let verified_openai=input.provider.as_deref()==Some("openai")&&(terra||openai(&input.model,"standard",false).is_some())&&matches!(error,"unknown_catalog_provider"|"unknown_model_for_provider");
+            if input.aggregate || input.provider.is_some() && !verified_openai {
                 return unknown(error);
             }
             if (terra || input.model == "codex-auto-review")
                 && error != "unknown_catalog_model"
-                && !(terra && input.provider.as_deref() == Some("openai")
-                    && matches!(error, "unknown_catalog_provider" | "unknown_model_for_provider"))
+                && !verified_openai
             {
                 return unknown(error);
             }

@@ -17,7 +17,7 @@ export const useAnnouncementStore = defineStore('announcements', () => {
   // Session-scoped dedup set — not reactive, used as plain lookup only
   let shownPopupIds = new Set<number>()
   let generation = 0
-  let popupTimer: ReturnType<typeof setTimeout> | null = null
+  let popupTimer:ReturnType<typeof setTimeout>|null=null
 
   // Getters
   const unreadCount = computed(() =>
@@ -128,9 +128,8 @@ export const useAnnouncementStore = defineStore('announcements', () => {
   }
 
   function reset() {
-    generation += 1
-    if (popupTimer) clearTimeout(popupTimer)
-    popupTimer = null
+    generation++
+    if(popupTimer){clearTimeout(popupTimer);popupTimer=null}
     announcements.value = []
     lastFetchTime.value = 0
     shownPopupIds = new Set()

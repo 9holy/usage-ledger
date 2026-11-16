@@ -1,4 +1,6 @@
 pub mod accounts;
+pub mod account_names;
+pub mod local_cost;
 mod analysis;
 mod billing;
 mod antigravity;
@@ -14,6 +16,9 @@ mod parser;
 pub(crate) mod pricing;
 mod quota;
 mod request_accounts;
+mod request_identity;
+pub mod upstream_accounts;
+mod current_rate;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -40,6 +45,16 @@ pub struct MonitorRuntime {
     inner: Arc<Mutex<RuntimeStatus>>,
 }
 
+fn retry_database_busy(mut operation:impl FnMut()->Result<(),String>)->Result<(),String>{
+    for delay in [250,500,750] {
+        match operation(){
+            Err(error) if matches!(error.as_str(),"database is locked"|"database table is locked")=>std::thread::sleep(std::time::Duration::from_millis(delay)),
+            result=>return result,
+        }
+    }
+    operation()
+}
+
 impl MonitorRuntime {
     fn status_snapshot(&self) -> Result<RuntimeStatus, String> {
         self.inner
@@ -59,19 +74,17 @@ impl MonitorRuntime {
         }
         if let Err(error) = crate::ledger_db::open_default()
             .map_err(|e| e.to_string())
-            .and_then(|conn| store::initialize(&conn))
+            .and_then(|conn| {store::initialize(&conn)?;account_names::collect(&conn,crate::ledger_db::now_ms())})
         {
             self.update_error(Some(error));
             return;
         }
         let runtime = self.clone();
         std::thread::spawn(move || {
-            if let Err(e) = collector::run(runtime.clone()) {
-                runtime.update_error(Some(e));
-            }
+            if let Err(error)=retry_database_busy(||collector::run(runtime.clone())){runtime.update_error(Some(error));}
         });
         let runtime = self.clone();
-        std::thread::spawn(move || antigravity_loop(runtime));
+        std::thread::spawn(move ||{let _=retry_database_busy(||antigravity_loop(runtime.clone()));});
     }
 }
 
@@ -162,10 +175,12 @@ pub async fn usage_monitor_snapshot(
     search: Option<String>,
     status: Option<String>,
     unpriced_only: Option<bool>,
+    billing_scope: Option<String>,
 ) -> Result<MonitorSnapshot, String> {
+    validate_period(&MonitorPeriod{billing_scope:billing_scope.clone(),..Default::default()})?;
     if tool
         .as_deref()
-        .is_some_and(|v| !matches!(v, "codex" | "claude" | "antigravity" | "deepseek-harness"))
+        .is_some_and(|v| !matches!(v, "codex" | "claude" | "antigravity" | "deepseek-harness" | "api"))
     {
         return Err("Unknown usage source".into());
     }
@@ -184,7 +199,7 @@ pub async fn usage_monitor_snapshot(
         let conn = connection()?;
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let now = crate::ledger_db::now_ms();
-        let mut sessions = store::sessions(&tx, None, now)?;
+        let mut sessions = store::sessions_scoped(&tx, None, now,billing_scope.as_deref())?;
         let (status_counts, tool_status_counts) = status_counts(&sessions, now);
         sessions.retain(|session| {
             tool.as_deref()
@@ -207,7 +222,7 @@ pub async fn usage_monitor_snapshot(
             .into_iter()
             .chain(state.antigravity)
             .collect();
-        let mut live = live::read(&tx, now, state.started_at_ms, state.collected_at_ms)?;
+        let mut live = live::read_scoped(&tx, now, state.started_at_ms, state.collected_at_ms,billing_scope.as_deref())?;
         live.unavailable_tools = ["codex", "claude", "antigravity", "deepseek-harness"]
             .into_iter()
             .filter(|tool| {
@@ -240,9 +255,10 @@ pub async fn usage_monitor_snapshot(
             .skip(offset.unwrap_or(0) as usize)
             .take(limit.unwrap_or(100).clamp(1, 200) as usize)
             .collect();
-        store::enrich_session_outputs(
+        store::enrich_session_outputs_scoped(
             &tx,
             &mut [&mut sessions, &mut active_sessions, &mut rate_sessions],
+            billing_scope.as_deref(),
         )?;
         let snapshot = MonitorSnapshot {
             status_counts,
@@ -267,7 +283,7 @@ pub async fn usage_monitor_snapshot(
     .map_err(|e| e.to_string())?
 }
 
-fn antigravity_loop(runtime: MonitorRuntime) {
+fn antigravity_loop(runtime: MonitorRuntime)->Result<(),String> {
     use rusqlite::OptionalExtension;
     let result = (|| -> Result<(), String> {
         let mut conn = crate::ledger_db::open_default().map_err(|error| error.to_string())?;
@@ -283,7 +299,7 @@ fn antigravity_loop(runtime: MonitorRuntime) {
             Some(s) => serde_json::from_str(&s).map_err(|e| e.to_string())?,
             None => serde_json::json!({}),
         };
-        let started = crate::ledger_db::now_ms();
+        let started = runtime.status_snapshot()?.started_at_ms;
         let mut coverage = live::CoverageWriter::new("language_server");
         loop {
             let now = crate::ledger_db::now_ms();
@@ -341,17 +357,18 @@ fn antigravity_loop(runtime: MonitorRuntime) {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     })();
-    if let Err(error) = result {
+    if let Err(error) = &result {
         if let Ok(mut shared) = runtime.inner.lock() {
             shared.antigravity = Some(SourceStatus {
                 tool: "antigravity".into(),
                 root: "Local language-server usage metadata".into(),
                 status: "error".into(),
-                error: Some(error),
+                error: Some(error.clone()),
                 ..Default::default()
             });
         }
     }
+    result
 }
 
 #[tauri::command]
@@ -366,8 +383,10 @@ pub async fn usage_monitor_session(
     turn_id: Option<String>,
     pricing_reason: Option<String>,
     include_descendants: Option<bool>,
+    billing_scope: Option<String>,
 ) -> Result<SessionDetail, String> {
     let period = MonitorPeriod {
+        billing_scope,
         start_ms,
         end_ms,
         model,
@@ -396,6 +415,9 @@ pub async fn usage_monitor_session(
 }
 
 fn validate_period(period: &MonitorPeriod) -> Result<(), String> {
+    if period.billing_scope.as_deref().is_some_and(|scope| !matches!(scope,"api"|"subscription"|"unknown")) {
+        return Err("Unknown usage billing scope".into());
+    }
     if period
         .start_ms
         .is_some_and(|start| start < 0 || start > 8_640_000_000_000_000)
@@ -439,16 +461,18 @@ pub async fn usage_monitor_analysis(
     offset: Option<u32>,
     limit: Option<u32>,
     pricing_reason: Option<String>,
+    billing_scope: Option<String>,
 ) -> Result<MonitorAnalysis, String> {
     if tool.as_deref().is_some_and(|value| {
         !matches!(
             value,
-            "codex" | "claude" | "antigravity" | "deepseek-harness"
+            "codex" | "claude" | "antigravity" | "deepseek-harness" | "api"
         )
     }) {
         return Err("Unknown usage source".into());
     }
     let period = MonitorPeriod {
+        billing_scope,
         start_ms,
         end_ms: Some(end_ms),
         model,
@@ -469,7 +493,7 @@ pub async fn usage_monitor_analysis(
     tauri::async_runtime::spawn_blocking(move || {
         let conn = connection()?;
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        let result = analysis::read(
+        let mut result = analysis::read(
             &tx,
             tool.as_deref(),
             &period,
@@ -480,6 +504,13 @@ pub async fn usage_monitor_analysis(
             limit.unwrap_or(100).clamp(1, 200) as usize,
             crate::ledger_db::now_ms(),
         )?;
+        match local_cost::read_settings(&tx).and_then(|settings| {
+            let expense = local_cost::api_expense_scoped(&tx, period.start_ms.unwrap_or(0), end_ms, &settings, tool.as_deref(), &period)?;
+            Ok((expense, settings.cny_per_usd))
+        }) {
+            Ok((expense, rate)) => { result.api_expense = Some(expense); result.cny_per_usd = Some(rate); }
+            Err(error) => result.cost_error = Some(error),
+        }
         tx.commit().map_err(|e| e.to_string())?;
         Ok(result)
     })

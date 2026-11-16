@@ -22,6 +22,7 @@ vi.mock('@/stores', () => ({
   useAdminSettingsStore: () => ({ customMenuItems: [] }),
 }))
 vi.mock('@/components/common/Toast.vue', () => ({ default: { template: '<div />' } }))
+vi.mock('@/api/monitorUpstreams', () => ({ startMonitorUpstreams: vi.fn(() => vi.fn()) }))
 vi.mock('@/components/common/NavigationProgress.vue', () => ({ default: { template: '<div />' } }))
 vi.mock('@/components/common/AnnouncementPopup.vue', () => ({ default: { template: '<div />' } }))
 vi.mock('@/components/admin/AdminComplianceDialog.vue', () => ({ default: { template: '<div />' } }))

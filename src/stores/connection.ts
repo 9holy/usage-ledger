@@ -62,7 +62,7 @@ export function errMsg(e: unknown, fallback: string): string {
   return fallback
 }
 
-function loadConnections(): ConnectionConfig[] {
+export function loadConnections(): ConnectionConfig[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return []

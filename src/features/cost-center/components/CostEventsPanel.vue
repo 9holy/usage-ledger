@@ -14,8 +14,8 @@
       <button type="button" class="finance-button" :disabled="saving" @click="openBatch()"><ListPlus :size="15" /> {{ t('costComponents.batchPurchase') }} </button>
     </header>
 
-    <p v-if="error" class="finance-error" role="alert">{{ error }}</p>
-    <p class="finance-status"> {{ t('costComponents.summaryPeriod') }} {{ when(startMs) }} {{ t('costComponents.to') }} {{ when(endMs) }} {{ t('costComponents.eventsOutsideThisWindowRemainInAll') }} </p>
+    <p v-if="error" class="finance-error" role="alert">{{ financeErrorText(error) }}</p>
+    <p class="finance-status"> {{ t('costComponents.summaryPeriod') }} {{ startMs === 0 ? t('costComponents.allHistory') : when(startMs) }} {{ t('costComponents.to') }} {{ when(endMs) }} {{ t('costComponents.eventsOutsideThisWindowRemainInAll') }} </p>
     <p v-if="loading" class="finance-status" role="status"> {{ t('costComponents.loadingFinancialEvents') }} </p>
     <div v-else-if="snapshot" class="finance-summary">
       <p v-if="!snapshot.summary.hasEnteredFacts" class="finance-status"> {{ t('costComponents.noValidFinancialFactsWereEnteredBy') }} </p>
@@ -37,7 +37,7 @@
     <FinanceBatchEditor v-if="batchOpen" :key="batchInitial?.batchId ?? 'new'" :scope="{ source, instanceId }" :accounts="accounts" :channels="snapshot?.purchaseChannels ?? []" :initial="batchInitial" @cancel="batchOpen = false" @saved="batchSaved" @busy="saving = $event" />
 
     <form v-if="editing" class="finance-form" :aria-label="t('costComponents.financialEventForm')" @submit.prevent="submit">
-      <label> {{ t('costComponents.account') }} <input v-model="form.accountId" :list="optionsId" :disabled="!!form.id || saving" required maxlength="512" /></label>
+      <label> {{ t('costComponents.account') }} <select v-if="restrictAccounts" v-model="form.accountId" :disabled="!!form.id || saving" required><option value="" disabled>{{ t('costComponents.account') }}</option><option v-for="account in accounts" :key="account.id" :value="account.id">{{ account.name }}</option></select><input v-else v-model="form.accountId" :list="optionsId" :disabled="!!form.id || saving" required maxlength="512" /></label>
       <datalist :id="optionsId"><option v-for="account in accounts" :key="account.id" :value="account.id">{{ account.name }}</option></datalist>
       <label> {{ t('costComponents.event') }} <select v-model="form.kind" :disabled="saving"><option v-for="(label, kind) in kindLabels" :key="kind" :value="kind">{{ label }}</option></select></label>
       <label> {{ t('costComponents.amount') }} <input v-model="form.amount" type="number" min="0" step="any" inputmode="decimal" :disabled="saving" required /></label>
@@ -51,7 +51,7 @@
         <label> {{ t('costComponents.plan') }} <input v-model="form.planLabel" maxlength="512" :disabled="saving" /></label>
       </template>
       <label v-else> {{ t('costComponents.relatedOriginalEvent') }} <select v-model="form.relatedEventId" :aria-label="t('costComponents.relatedOriginalEvent')" :disabled="saving || relatedLoading"><option value=""> {{ t('costComponents.unlinkedIncomplete') }} </option><option v-for="event in relatedOptions" :key="event.id" :value="event.id">{{ when(event.occurredAtMs) }} · {{ kindLabels[event.kind] }} · {{ event.amount }} {{ event.currency }} · {{ event.planLabel || event.id.slice(-8) }}</option></select></label>
-      <p v-if="relatedError" class="finance-warning">{{ relatedError }}</p>
+      <p v-if="relatedError" class="finance-warning">{{ financeErrorText(relatedError) }}</p>
       <label class="finance-note"> {{ t('costComponents.note') }} <input v-model="form.note" maxlength="1000" :disabled="saving" /></label>
       <div class="finance-form-actions">
         <button type="button" class="finance-button" :disabled="saving" @click="editing = false"><X :size="15" /> {{ t('costComponents.cancel') }} </button>
@@ -88,6 +88,7 @@
 import { useI18n } from 'vue-i18n'
 const { t } = useI18n()
 import { getLocale } from '@/i18n'
+import { financeErrorText } from '../financeErrorText'
 
 import { computed, getCurrentInstance, reactive, ref, watch } from 'vue'
 import { Ban, ChevronLeft, ChevronRight, ListPlus, Pencil, Plus, RefreshCw, Save, X } from '@lucide/vue'
@@ -96,12 +97,12 @@ import { getFinanceBatch, getFinanceLedger, getFinanceRelatedEvents, saveFinance
 import FinanceBatchEditor from './FinanceBatchEditor.vue'
 import { formatMoney } from '../model'
 
-const props = withDefaults(defineProps<{ source: FinanceSource; instanceId: string; startMs: number; endMs: number; accounts?: Array<{ id: string; name: string }> }>(), { accounts: () => [] })
+const props = withDefaults(defineProps<{ source: FinanceSource; instanceId: string; startMs: number; endMs: number; accounts?: Array<{ id: string; name: string }>; restrictAccounts?: boolean }>(), { accounts: () => [], restrictAccounts: false })
 const emit = defineEmits<{ changed: [] }>()
 const optionsId = `finance-accounts-${getCurrentInstance()!.uid}`
 const kindLabels = computed<Record<FinanceEventKind, string>>(() => ({ purchase: t('costComponents.purchase'), renewal: t('costComponents.renewal'), refund: t('costComponents.refunds'), termination_loss: t('costComponents.terminationLoss') }))
 const snapshot = ref<FinanceSnapshot | null>(null)
-const error = ref('')
+const error = ref<unknown>('')
 const loading = ref(false)
 const saving = ref(false)
 const editing = ref(false)
@@ -115,7 +116,7 @@ const batchOpen = ref(false)
 const batchInitial = ref<FinanceBatch | null>(null)
 const related = ref<FinanceEvent[]>([])
 const relatedLoading = ref(false)
-const relatedError = ref('')
+const relatedError = ref<unknown>('')
 let relatedSequence = 0
 const epochKeys = { occurredAt: 'occurredAtMs', coverageStart: 'coverageStartMs', coverageEnd: 'coverageEndMs' } as const
 const original = ref<({ event: Pick<FinanceEvent, (typeof epochKeys)[keyof typeof epochKeys]> } & Record<keyof typeof epochKeys, string>) | null>(null)
@@ -133,7 +134,6 @@ const money = (amount: number, currency: FinanceCurrency) => formatMoney(amount,
 const when = (value: number) => new Date(value).toLocaleString(getLocale(), { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 const accountName = (id: string) => props.accounts.find(account => account.id === id)?.name ?? id
 const localInput = (time: number) => { const date = new Date(time); return new Date(time - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 23) }
-const errorText = (failure: unknown) => failure instanceof Error ? failure.message : String(failure)
 
 function resolveTime(field: keyof typeof epochKeys): number | null {
   if (original.value && form[field] === original.value[field]) return original.value.event[epochKeys[field]] ?? null
@@ -150,7 +150,7 @@ async function reload() {
   try {
     const result = await getFinanceLedger({ source: props.source, instanceId: props.instanceId, accountId: accountFilter.value || null, startMs: props.startMs, endMs: props.endMs, purchaseChannel: channelFilter.value || null, planLabel: planFilter.value || null, listMode: listMode.value, offset: offset.value, limit: 100 })
     if (sequence === readSequence) snapshot.value = result
-  } catch (failure) { if (sequence === readSequence) error.value = errorText(failure) }
+  } catch (failure) { if (sequence === readSequence) error.value = failure }
   finally { if (sequence === readSequence) loading.value = false }
 }
 
@@ -169,7 +169,7 @@ async function openBatch(batchId?: string) {
   if (batchId) {
     saving.value = true
     try { const result = await getFinanceBatch({ source: props.source, instanceId: props.instanceId }, batchId); if (revision !== generation) return; batchInitial.value = result }
-    catch (failure) { if (revision === generation) error.value = errorText(failure); return }
+    catch (failure) { if (revision === generation) error.value = failure; return }
     finally { if (revision === generation) saving.value = false }
   }
   if (revision === generation) batchOpen.value = true
@@ -187,7 +187,7 @@ async function submit() {
     editing.value = false
     emit('changed')
     await reload()
-  } catch (failure) { if (revision === generation) error.value = errorText(failure) }
+  } catch (failure) { if (revision === generation) error.value = failure }
   finally { if (revision === generation) saving.value = false }
 }
 
@@ -195,18 +195,17 @@ async function confirmVoid() {
   const event = pendingVoid.value
   if (!event || saving.value) return
   const revision = generation
-  saving.value = true
+  saving.value = true; error.value = ''; pendingVoid.value = null
   try {
     const scope = { source: event.source, instanceId: event.instanceId }
     if (event.batchId) await voidFinanceBatch(scope, event.batchId)
     else await voidFinanceEvent(scope, event.id)
     if (revision !== generation) return
-    pendingVoid.value = null
     if (form.id === event.id) editing.value = false
     if (event.batchId === batchInitial.value?.batchId) batchOpen.value = false
     emit('changed')
     await reload()
-  } catch (failure) { if (revision === generation) error.value = errorText(failure) }
+  } catch (failure) { if (revision === generation) error.value = failure }
   finally { if (revision === generation) saving.value = false }
 }
 
@@ -218,10 +217,12 @@ watch(() => [editing.value, form.accountId, form.currency, isPurchase.value, pro
   if (!editing.value || isPurchase.value || !form.accountId.trim()) return
   relatedLoading.value = true
   try { const events = await getFinanceRelatedEvents({ source: props.source, instanceId: props.instanceId }, form.accountId.trim(), form.currency); if (sequence === relatedSequence) related.value = events }
-  catch (failure) { if (sequence === relatedSequence) relatedError.value = errorText(failure) }
+  catch (failure) { if (sequence === relatedSequence) relatedError.value = failure }
   finally { if (sequence === relatedSequence) relatedLoading.value = false }
 })
-defineExpose({ reload })
+function selectAccount(id: string) { accountFilter.value = id }
+function openEntry(id: string) { void openEditor(); form.accountId = id }
+defineExpose({ reload, selectAccount, openEntry })
 </script>
 
 <style scoped>

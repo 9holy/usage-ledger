@@ -8,6 +8,8 @@ import { i18n, initI18n } from '@/i18n'
 import { invoke } from '@tauri-apps/api/core'
 import desktopZh from '@/i18n/locales/zh/desktop'
 import desktopEn from '@/i18n/locales/en/desktop'
+import usageMonitorZh from '@/i18n/locales/zh/usageMonitor'
+import usageMonitorEn from '@/i18n/locales/en/usageMonitor'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue(undefined) }))
 
@@ -17,8 +19,8 @@ vi.mock('@/router', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
-  i18n.global.setLocaleMessage('zh', { desktop: desktopZh })
-  i18n.global.setLocaleMessage('en', { desktop: desktopEn })
+  i18n.global.setLocaleMessage('zh', { desktop: desktopZh, usageMonitor:usageMonitorZh })
+  i18n.global.setLocaleMessage('en', { desktop: desktopEn, usageMonitor:usageMonitorEn })
   i18n.global.locale.value = 'zh'
 })
 afterEach(() => { Reflect.deleteProperty(window, '__TAURI_INTERNALS__') })
@@ -32,14 +34,18 @@ it('keeps the cost workspace selected inside its detail routes and updates acces
   const wrapper = mount(ConsoleWorkspaceHeader, {
     global: { plugins: [createPinia(), router, i18n] }
   })
-  for (const path of ['/connect', '/admin/cost-center?panel=overview', '/cockpit/cost-center']) {
+  for (const path of ['/connect', '/local-cost', '/admin/cost-center?panel=overview', '/cockpit/cost-center']) {
     await router.push(path)
     expect(wrapper.get('.workspace-switch [aria-current="page"]').text()).toContain('成本工作台')
     expect(wrapper.findAll('.workspace-switch [aria-current="page"]')).toHaveLength(1)
+    expect(wrapper.find('.workspace-cost-action').exists()).toBe(false)
   }
   await router.push('/usage-monitor')
   expect(wrapper.get('.workspace-switch [aria-current="page"]').text()).toContain('全局用量监控')
   expect(wrapper.get('.workspace-brand').attributes('href')).toBe('/connect')
+  expect(wrapper.get('.workspace-cost-action').text()).toBe('成本管理')
+  await wrapper.get('.workspace-cost-action').trigger('click')
+  expect(wrapper.emitted('costs')).toHaveLength(1)
   wrapper.unmount()
 })
 
@@ -59,11 +65,12 @@ it('switches the live header language through the existing locale menu and prese
   await vi.waitFor(() => expect(wrapper.findAll('.workspace-locale button')).toHaveLength(1))
   await flushPromises()
   expect(wrapper.get('.workspace-brand strong').text()).toBe('Usage Ledger')
+  expect(wrapper.get('.workspace-cost-action').text()).toBe('Manage costs')
   expect(wrapper.get('.workspace-switch').attributes('aria-label')).toBe('Workspace navigation')
   expect(wrapper.get('.workspace-switch [aria-current="page"]').text()).toContain('Usage Monitor')
   expect(localStorage.getItem('sub2api_locale')).toBe('en')
   expect(document.documentElement.lang).toBe('en')
-  expect(document.title).toBe('Connections - Usage Ledger')
+  await vi.waitFor(() => expect(document.title).toBe('Connections - Usage Ledger'), { timeout: 5000 })
   expect(invoke).toHaveBeenLastCalledWith('set_desktop_locale', { locale: 'en' })
   await wrapper.get('.workspace-locale button').trigger('click')
   await wrapper.findAll('.workspace-locale button').find(button => button.text().includes('中文'))!.trigger('click')
@@ -72,7 +79,7 @@ it('switches the live header language through the existing locale menu and prese
   await flushPromises()
   expect(wrapper.get('.workspace-brand strong').text()).toBe('用量账本')
   expect(localStorage.getItem('sub2api_locale')).toBe('zh')
-  expect(document.title).toBe('连接 - 用量账本')
+  await vi.waitFor(() => expect(document.title).toBe('连接 - 用量账本'), { timeout: 5000 })
   expect(invoke).toHaveBeenLastCalledWith('set_desktop_locale', { locale: 'zh' })
   wrapper.unmount()
 })

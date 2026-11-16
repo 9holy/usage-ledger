@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::{
     borrow::Cow,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -193,6 +193,12 @@ fn apply(
     catalog: &crate::model_catalog::CatalogSnapshot,
 ) -> Result<(), String> {
     super::codex_quota_accounts::save_parsed(conn,path,&parsed)?;
+    for context in &parsed.identity_contexts {
+        super::request_identity::save_context(conn,&path.to_string_lossy(),context)?;
+    }
+    for link in &parsed.identity_links {
+        super::request_identity::save_link(conn,&path.to_string_lossy(),link)?;
+    }
     if let Some(session) = parsed.session {
         if !session.id.is_empty() {
             store::save_session(conn, &session)?;
@@ -221,7 +227,7 @@ fn backfill_account_quota_evidence(conn: &mut rusqlite::Connection, home: &Path,
             .map_err(|e|e.to_string())?;
         rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?
     };
-    let tx = conn.transaction().map_err(|e|e.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
     for (path,offset,signature) in files {
         if super::codex_quota_accounts::home(&path)!=Some(home) { continue; }
         let Some((reader,modified)) = mode_replay_source(&path,offset,&signature)? else {
@@ -536,6 +542,69 @@ fn saved_parser_state(json: &str, tool: &str) -> Result<(parser::ParserState, bo
     Ok((serde_json::from_value(saved).map_err(|error| format!("Stored parser state: {error}"))?, legacy))
 }
 
+#[derive(serde::Serialize,Deserialize)]
+struct IdentityReplay {offset:u64,limit:u64,signature:String,state:parser::ParserState}
+
+fn replay_claude_file(conn:&mut Connection,path:&Path,limit:u64,signature:&str)->Result<(),String>{
+    let progress_key=format!("claude_identity_replay:{:x}",md5::compute(path.to_string_lossy().as_bytes()));
+    let saved:Option<String>=conn.query_row("SELECT data FROM monitor_state WHERE key=?1",[&progress_key],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    let mut cursor=saved.map(|json|serde_json::from_str::<IdentityReplay>(&json)).transpose().map_err(|e|e.to_string())?
+        .filter(|value|value.signature==signature&&value.offset<=limit)
+        .unwrap_or_else(||IdentityReplay{offset:0,limit,signature:signature.into(),state:parser::ParserState::default()});
+    cursor.limit=limit;
+    let Some((reader,modified))=mode_replay_source(path,limit,signature)?else{return Err("Original identity log is missing; saved usage is retained".into())};
+    let mut reader=reader.take(limit);
+    std::io::copy(&mut reader.by_ref().take(cursor.offset),&mut std::io::sink()).map_err(|e|e.to_string())?;
+    let mut line=Vec::new();
+    while cursor.offset<limit {
+        let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+        for _ in 0..BATCH_LINES {
+            if cursor.offset==limit{break;}
+            line.clear();
+            reader.by_ref().take(MAX_LINE_BYTES).read_until(b'\n',&mut line).map_err(|e|e.to_string())?;
+            if !line.ends_with(b"\n"){return Err("Saved identity log has an incomplete or oversized record".into());}
+            let raw=std::str::from_utf8(&line).map_err(|_|"Saved identity log is not valid UTF-8")?;
+            let parsed=parser::parse_line(&mut cursor.state,"claude",path,raw,modified)?;
+            for context in &parsed.identity_contexts{super::request_identity::save_context(&tx,&path.to_string_lossy(),context)?;}
+            for usage in &parsed.usage{
+                if let Some(link)=parsed.identity_links.iter().find(|link|link.id==usage.id){
+                    super::request_identity::repair_link(&tx,&path.to_string_lossy(),link,usage)?;
+                }
+            }
+            cursor.offset+=line.len() as u64;
+        }
+        if cursor.offset==limit{
+            let current:String=tx.query_row("SELECT state FROM monitor_files WHERE path=?1",[path.to_string_lossy().as_ref()],|r|r.get(0)).map_err(|e|e.to_string())?;
+            let mut state:parser::ParserState=serde_json::from_str(&current).map_err(|e|e.to_string())?;
+            state.claude_owner=cursor.state.claude_owner.clone();
+            state.claude_request_ref=cursor.state.claude_request_ref.clone();
+            state.identity_replayed=true;
+            tx.execute("UPDATE monitor_files SET state=?2 WHERE path=?1",params![path.to_string_lossy(),serde_json::to_string(&state).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+            tx.execute("DELETE FROM monitor_state WHERE key=?1",[&progress_key]).map_err(|e|e.to_string())?;
+        }else{
+            tx.execute("INSERT INTO monitor_state VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET data=excluded.data",params![progress_key,serde_json::to_string(&cursor).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+        }
+        tx.commit().map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
+
+pub(super) fn replay_claude_identities(conn:&mut Connection)->Result<Vec<SourceStatus>,String>{
+    let files={let mut query=conn.prepare("SELECT path,offset,signature FROM monitor_files WHERE tool='claude' AND offset>0 AND COALESCE(json_extract(state,'$.identity_replayed'),0)=0").map_err(|e|e.to_string())?;
+        let rows=query.query_map([],|r|Ok((PathBuf::from(r.get::<_,String>(0)?),r.get::<_,u64>(1)?,r.get::<_,String>(2)?))).map_err(|e|e.to_string())?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?};
+    let mut issues=Vec::new();
+    for(path,limit,signature)in files{
+        if let Err(error)=replay_claude_file(conn,&path,limit,&signature){
+            issues.push(SourceStatus{tool:"claude".into(),root:path.to_string_lossy().into_owned(),status:"metadata".into(),error:Some(error),last_scan_ms:crate::ledger_db::now_ms(),..Default::default()});
+        }
+    }
+    conn.execute("INSERT INTO monitor_state VALUES('request_identity_replay_details',?1) ON CONFLICT(key) DO UPDATE SET data=excluded.data",[serde_json::to_string(&issues).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+    let summary=if issues.is_empty(){Vec::new()}else{vec![SourceStatus{tool:"claude".into(),root:"Saved Claude account information".into(),status:"metadata".into(),error:Some(format!("{} old logs are missing or unreadable; saved usage is retained",issues.len())),last_scan_ms:crate::ledger_db::now_ms(),..Default::default()}]};
+    conn.execute("INSERT INTO monitor_state VALUES('request_identity_replay_status',?1) ON CONFLICT(key) DO UPDATE SET data=excluded.data",[serde_json::to_string(&summary).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+    Ok(summary)
+}
+
 fn enqueue_legacy_mode_archives(
     conn: &Connection,
     pending: &mut VecDeque<(String, PathBuf)>,
@@ -558,9 +627,6 @@ fn enqueue_legacy_mode_archives(
     Ok(())
 }
 
-// A stable header cannot detect copy-truncate/rewrite when the file regrows
-// before the next poll. Persist a small digest at the committed byte boundary;
-// regular appends keep it unchanged and at most 4 KiB need to be reread.
 fn cursor_tail_digest(reader: &mut (impl Read + Seek), offset: u64) -> Result<String, String> {
     let length = offset.min(4096);
     reader.seek(SeekFrom::Start(offset - length)).map_err(|error| error.to_string())?;
@@ -569,14 +635,32 @@ fn cursor_tail_digest(reader: &mut (impl Read + Seek), offset: u64) -> Result<St
     Ok(format!("{:x}", md5::compute(tail)))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReadProgress {
+    Complete,
+    More,
+    Partial,
+}
+
+#[cfg(test)]
 pub fn ingest_file(
     conn: &mut Connection,
     tool: &str,
     path: &Path,
     live_after: i64,
 ) -> Result<bool, String> {
+    read_file_batch(conn,tool,path,live_after).map(|progress|progress==ReadProgress::More)
+}
+
+fn read_file_batch(
+    conn: &mut Connection,
+    tool: &str,
+    path: &Path,
+    live_after: i64,
+) -> Result<ReadProgress, String> {
     if tool == super::deepseek::TOOL {
-        return super::deepseek::ingest(conn, path, live_after);
+        return super::deepseek::ingest(conn, path, live_after)
+            .map(|more|if more {ReadProgress::More}else{ReadProgress::Complete});
     }
     // The cursor, replay markers and all derived usage belong to one serialized
     // write snapshot. Another collector may have committed while this one waited.
@@ -610,8 +694,8 @@ pub fn ingest_file(
                     }
                 }
             }
-            tx.commit().map_err(|error| error.to_string())?;
-            return Ok(false);
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(ReadProgress::Complete);
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -643,10 +727,12 @@ pub fn ingest_file(
     };
     if legacy_mode {
         let Some(upgraded) = upgrade_initial_mode_cursor(&tx, path, offset, &signature, state)? else {
-            return Ok(false);
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(ReadProgress::Complete);
         };
         state = upgraded;
     }
+    if tool=="claude"&&offset==0 {state.identity_replayed=true;}
     if tool == "codex" && offset > 0 && !state.quota_identity_loaded {
         match super::quota::account_from_header(path) {
             Ok(account) => state.quota_account_id = account,
@@ -666,11 +752,10 @@ pub fn ingest_file(
         if state.file_tail_digest.is_none() {
             state.file_tail_digest = Some(cursor_tail_digest(&mut reader, offset)?);
             tx.execute("UPDATE monitor_files SET state=?1 WHERE path=?2",
-                params![serde_json::to_string(&state).map_err(|error| error.to_string())?, key])
-                .map_err(|error| error.to_string())?;
+                params![serde_json::to_string(&state).map_err(|e| e.to_string())?, key]).map_err(|e| e.to_string())?;
         }
-        tx.commit().map_err(|error| error.to_string())?;
-        return Ok(false);
+        tx.commit().map_err(|e| e.to_string())?;
+        return Ok(ReadProgress::Complete);
     }
     let catalog = crate::model_catalog::snapshot();
     reader
@@ -738,7 +823,7 @@ pub fn ingest_file(
         tx.execute("DELETE FROM monitor_state WHERE key=?1", [&replay_key]).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(!partial && offset < meta.len())
+    Ok(if partial {ReadProgress::Partial}else if offset<meta.len(){ReadProgress::More}else{ReadProgress::Complete})
 }
 
 #[cfg(test)]
@@ -746,6 +831,101 @@ mod tests {
     use super::*;
     use super::super::types::{Totals, UsageRecord};
     use serde_json::{json, Value};
+
+    #[test]
+    fn live_file_notifications_promote_existing_background_work_without_duplicate_queue_entries() {
+        let cold=PathBuf::from("cold.jsonl");
+        let hot=PathBuf::from("hot.jsonl");
+        let other=PathBuf::from("other.jsonl");
+        let mut pending=VecDeque::from([("codex".into(),cold.clone()),("claude".into(),hot.clone())]);
+        let mut live=VecDeque::new();
+        let mut queued=HashSet::from([cold.clone(),hot.clone()]);
+        prioritize_changed_file(&mut pending,&mut live,&mut queued,"claude",hot.clone());
+        prioritize_changed_file(&mut pending,&mut live,&mut queued,"claude",hot.clone());
+        assert_eq!(pending.iter().map(|(_,p)|p.clone()).collect::<Vec<_>>(),vec![cold.clone()]);
+        assert_eq!(live.iter().map(|(_,p)|p.clone()).collect::<Vec<_>>(),vec![hot.clone()]);
+        assert_eq!(queued.len(),2);
+        prioritize_changed_file(&mut pending,&mut live,&mut queued,"codex",other.clone());
+        assert_eq!(live.into_iter().map(|(_,p)|p).collect::<Vec<_>>(),vec![hot,other]);
+        assert_eq!(queued.len(),3);
+    }
+
+    #[test]
+    fn repeated_codex_notifications_do_not_jump_a_waiting_claude_live_job() {
+        let (mut background,mut live,mut queued)=(VecDeque::new(),VecDeque::new(),HashSet::new());
+        let codex=PathBuf::from("codex.jsonl");
+        let claude=PathBuf::from("claude.jsonl");
+        prioritize_changed_file(&mut background,&mut live,&mut queued,"codex",codex.clone());
+        prioritize_changed_file(&mut background,&mut live,&mut queued,"claude",claude.clone());
+        assert_eq!(live.pop_front(),Some(("codex".into(),codex.clone())));
+        // A partial batch keeps its live priority, but rejoins behind other live sources.
+        live.push_back(("codex".into(),codex.clone()));
+        for _ in 0..128 {prioritize_changed_file(&mut background,&mut live,&mut queued,"codex",codex.clone());}
+        assert_eq!(live.pop_front(),Some(("claude".into(),claude)));
+        assert_eq!(live.pop_front(),Some(("codex".into(),codex)));
+        assert!(live.is_empty());
+    }
+
+    #[test]
+    fn unfinished_tail_retries_are_delayed_bounded_and_do_not_starve_other_files() {
+        let now=Instant::now();
+        let path=PathBuf::from("tail.jsonl");
+        let other=PathBuf::from("other.jsonl");
+        let mut partial=PartialReads::default();
+        let mut pending=VecDeque::from([("claude".into(),other.clone())]);
+        let mut live=VecDeque::new();
+        let mut queued=HashSet::from([other.clone()]);
+        partial.defer("codex".into(),path.clone(),now);
+        partial.queue_due(&mut pending,&mut live,&mut queued,now);
+        assert_eq!(pending.len(),1);
+        assert_eq!(partial.wait(now),Duration::from_millis(250));
+        assert!(partial.pending_for(Some("codex")));
+        assert!(!partial.pending_for(Some("claude")));
+        partial.queue_due(&mut pending,&mut live,&mut queued,now+Duration::from_millis(250));
+        partial.queue_due(&mut pending,&mut live,&mut queued,now+Duration::from_millis(250));
+        assert_eq!(live.pop_front(),Some(("codex".into(),path.clone())));
+        assert_eq!(pending.pop_front(),Some(("claude".into(),other)));
+        for _ in 0..3 {partial.defer("codex".into(),path.clone(),now);}
+        queued.remove(&path);
+        partial.queue_due(&mut pending,&mut live,&mut queued,now+Duration::from_secs(10));
+        assert!(pending.is_empty());
+        assert!(live.is_empty());
+        assert!(!partial.pending_for(None));
+        assert_eq!(partial.wait(now+Duration::from_secs(10)),Duration::from_secs(2));
+        partial.waiting.remove(&path);
+        partial.defer("codex".into(),path,now);
+        assert!(partial.pending_for(None));
+    }
+
+    #[test]
+    fn delayed_tail_completion_is_collected_without_a_second_notification_or_duplicate_usage() {
+        let mut fixture=ModeRepairFixture::new(false);
+        ingest_file(&mut fixture.conn,"codex",&fixture.path,i64::MAX).unwrap();
+        let before=fixture.totals();
+        let live_after=crate::ledger_db::now_ms()-1000;
+        let stamp=chrono::DateTime::<chrono::Utc>::from_timestamp_millis(live_after+1000).unwrap().to_rfc3339();
+        let row=json!({"type":"event_msg","timestamp":stamp,"payload":{
+            "type":"token_usage_record","thread_id":"thread","turn_id":"turn","response_id":"late",
+            "usage":{"input_tokens":1000,"cached_input_tokens":100,"output_tokens":25,"cache_write_input_tokens":0,"reasoning_output_tokens":0}}}).to_string();
+        let split=row.len()/2;
+        fs::write(&fixture.path,format!("{}{}",fixture.source,&row[..split])).unwrap();
+        assert_eq!(read_file_batch(&mut fixture.conn,"codex",&fixture.path,live_after).unwrap(),ReadProgress::Partial);
+        assert_eq!(fixture.totals().request_count,before.request_count);
+        assert_eq!(fixture.cursor().0,fixture.source.len() as u64);
+        let mut retries=PartialReads::default();
+        let now=Instant::now();
+        retries.defer("codex".into(),fixture.path.clone(),now);
+        fs::write(&fixture.path,format!("{}{row}\n",fixture.source)).unwrap();
+        let (mut pending,mut live,mut queued)=(VecDeque::new(),VecDeque::new(),HashSet::new());
+        retries.queue_due(&mut pending,&mut live,&mut queued,now+Duration::from_millis(250));
+        let (tool,path)=live.pop_front().unwrap();
+        assert_eq!(read_file_batch(&mut fixture.conn,&tool,&path,live_after).unwrap(),ReadProgress::Complete);
+        assert_eq!(fixture.totals().request_count,before.request_count+1);
+        assert_eq!(fixture.totals().output_tokens,before.output_tokens+25);
+        assert_eq!(read_file_batch(&mut fixture.conn,&tool,&path,live_after).unwrap(),ReadProgress::Complete);
+        assert_eq!(fixture.totals().request_count,before.request_count+1);
+        assert_eq!(fixture.conn.query_row("SELECT SUM(output_tokens) FROM monitor_observations WHERE id=?1",[super::super::parser::codex_request_id("thread","late")],|r|r.get::<_,i64>(0)).unwrap(),25);
+    }
 
     struct ModeRepairFixture {
         root: PathBuf,
@@ -1570,13 +1750,63 @@ mod tests {
     }
 }
 
+#[derive(Default)]
+struct PartialReads {
+    waiting: HashMap<PathBuf,(String,Instant,u8)>,
+}
+
+impl PartialReads {
+    fn defer(&mut self, tool: String, path: PathBuf, now: Instant) {
+        // Three short rereads cover a split write without spinning on an abandoned tail.
+        let (_,due,attempts)=self.waiting.entry(path).or_insert((tool,now,0));
+        *due=now+Duration::from_millis(250 << (*attempts).min(2));
+        *attempts=(*attempts+1).min(4);
+    }
+
+    fn queue_due(&self, pending: &mut VecDeque<(String,PathBuf)>, live: &mut VecDeque<(String,PathBuf)>, queued: &mut HashSet<PathBuf>, now: Instant) {
+        for (path,(tool,due,attempts)) in &self.waiting {
+            if *attempts<=3 && *due<=now && !queued.contains(path) {
+                prioritize_changed_file(pending,live,queued,tool,path.clone());
+            }
+        }
+    }
+
+    fn wait(&self, now: Instant) -> Duration {
+        self.waiting.values().filter(|(_,_,attempts)|*attempts<=3)
+            .map(|(_,due,_)|due.saturating_duration_since(now))
+            .fold(Duration::from_secs(2),|shortest,wait|shortest.min(wait))
+    }
+
+    fn pending_for(&self, tool: Option<&str>) -> bool {
+        self.waiting.values().any(|(source,_,attempts)|*attempts<=3 && tool.is_none_or(|tool|source==tool))
+    }
+}
+
+fn prioritize_changed_file(
+    pending: &mut VecDeque<(String, PathBuf)>,
+    live: &mut VecDeque<(String, PathBuf)>,
+    queued: &mut HashSet<PathBuf>,
+    tool: &str,
+    path: PathBuf,
+) {
+    if !queued.insert(path.clone()) {
+        if live.iter().any(|(_,waiting)|waiting==&path) { return; }
+        pending.retain(|(_, waiting)| waiting != &path);
+    }
+    live.push_back((tool.to_owned(), path));
+}
+
 pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
     let mut conn = crate::ledger_db::open_default().map_err(|e| e.to_string())?;
     store::initialize(&conn)?;
     store::backfill_unquoted(&mut conn)?;
     super::quota::bootstrap(&conn)?;
     super::billing::bootstrap(&mut conn)?;
-    let started = crate::ledger_db::now_ms();
+    let started = runtime.status_snapshot()?.started_at_ms;
+    let identity_issues=match replay_claude_identities(&mut conn){Ok(issues)=>issues,Err(error)=>{
+        eprintln!("Saved request identities unavailable: {error}");
+        vec![SourceStatus{tool:"claude".into(),root:"Saved request identities".into(),status:"metadata".into(),error:Some(error),last_scan_ms:started,..Default::default()}]
+    }};
     let (sender, receiver) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = sender.send(event);
@@ -1584,7 +1814,9 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let mut watched = HashSet::new();
     let mut pending = VecDeque::new();
+    let mut live_pending=VecDeque::new();
     let mut queued = HashSet::new();
+    let mut partial_reads=PartialReads::default();
     enqueue_legacy_mode_archives(&conn, &mut pending, &mut queued)?;
     let mut sources = Vec::<SourceRoot>::new();
     let mut discovery = Instant::now() - Duration::from_secs(30);
@@ -1603,8 +1835,10 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
             // The revision check is cheap; a new snapshot only revisits still-unquoted rows.
             store::backfill_unquoted(&mut conn)?;
             super::quota::collect_offline(&conn)?;
+            if let Err(error)=super::account_names::collect(&conn,crate::ledger_db::now_ms()){eprintln!("Saved account names unavailable: {error}");}
+            let proxy_pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='proxy_identity_pending')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
             match super::request_accounts::collect(&mut conn, crate::ledger_db::now_ms()) {
-                Ok(n) if n>0 => if let Err(error)=super::billing::seed_proxy_requests(&mut conn){eprintln!("API billing evidence unavailable: {error}");},
+                Ok(n) if n>0||proxy_pending => if let Err(error)=super::billing::seed_proxy_requests(&mut conn){eprintln!("API billing evidence unavailable: {error}");},
                 Err(error) => eprintln!("Request account evidence unavailable: {error}"),
                 _ => {},
             }
@@ -1728,13 +1962,17 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
             }
             discovery = Instant::now();
             super::live::prune(&conn, crate::ledger_db::now_ms())?;
+            if let Err(error)=super::upstream_accounts::recover_pending(&mut conn,started,crate::ledger_db::now_ms()){
+                statuses.push(SourceStatus{tool:"api".into(),root:"Saved upstream usage".into(),status:"partial".into(),error:Some(error),last_scan_ms:crate::ledger_db::now_ms(),..Default::default()});
+            }
         }
-        let timeout = if pending.is_empty() {
-            Duration::from_secs(2)
+        partial_reads.queue_due(&mut pending,&mut live_pending,&mut queued,Instant::now());
+        let timeout = if pending.is_empty() && live_pending.is_empty() {
+            partial_reads.wait(Instant::now())
         } else {
             Duration::ZERO
         };
-        if let Ok(event) = receiver.recv_timeout(timeout) {
+        for event in receiver.recv_timeout(timeout).into_iter().chain(receiver.try_iter().take(127)) {
             match event {
                 Ok(event) => {
                     for path in event.paths {
@@ -1744,9 +1982,9 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
                             }) && path.is_file()
                                 && (root.tool != "antigravity"
                                     || path.file_name().is_some_and(|s| s == "transcript.jsonl"))
-                                && queued.insert(path.clone())
                             {
-                                pending.push_front((root.tool.clone(), path));
+                                partial_reads.waiting.remove(&path);
+                                prioritize_changed_file(&mut pending,&mut live_pending,&mut queued,&root.tool,path);
                             }
                         }
                     }
@@ -1756,16 +1994,24 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
                 }
             }
         }
-        if let Some((tool, path)) = pending.pop_front() {
+        let was_live=!live_pending.is_empty();
+        if let Some((tool, path)) = live_pending.pop_front().or_else(||pending.pop_front()) {
             queued.remove(&path);
-            match ingest_file(&mut conn, &tool, &path, started) {
-                Ok(more) => {
+            match read_file_batch(&mut conn, &tool, &path, started) {
+                Ok(progress) => {
                     file_errors.remove(&path);
-                    if more && queued.insert(path.clone()) {
-                        pending.push_back((tool, path));
+                    if progress==ReadProgress::Partial {
+                        partial_reads.defer(tool,path,Instant::now());
+                    } else {
+                        partial_reads.waiting.remove(&path);
+                        if progress==ReadProgress::More && queued.insert(path.clone()) {
+                            if was_live { live_pending.push_back((tool,path)); }
+                            else { pending.push_back((tool, path)); }
+                        }
                     }
                 }
                 Err(e) => {
+                    partial_reads.waiting.remove(&path);
                     file_errors.insert(path, e);
                 }
             }
@@ -1795,7 +2041,7 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
                 });
             if failed {
                 coverage.observe(&conn, tool, crate::ledger_db::now_ms(), false)?;
-            } else if pending.iter().any(|(pending_tool, _)| pending_tool == tool) {
+            } else if pending.iter().chain(live_pending.iter()).any(|(pending_tool, _)| pending_tool == tool) || partial_reads.pending_for(Some(tool)) {
                 coverage.pause(&conn, tool)?;
             } else {
                 coverage.observe(&conn, tool, crate::ledger_db::now_ms(), true)?;
@@ -1803,9 +2049,10 @@ pub fn run(runtime: MonitorRuntime) -> Result<(), String> {
         }
         let mut state = runtime.inner.lock().map_err(|e| e.to_string())?;
         state.collected_at_ms = crate::ledger_db::now_ms();
-        state.collecting = !pending.is_empty();
+        state.collecting = !pending.is_empty() || !live_pending.is_empty() || partial_reads.pending_for(None);
         state.sources = statuses.clone();
         state.sources.extend(mode_statuses.iter().cloned());
+        state.sources.extend(identity_issues.iter().cloned());
         state.error = file_errors
             .iter()
             .next()

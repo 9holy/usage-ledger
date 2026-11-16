@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { connectionScopeKey } from './connectionScope'
 import adminComplianceAPI, { type AdminComplianceStatus } from '@/api/admin/compliance'
 import { getLocale } from '@/i18n'
+import { hasSub2apiBackend } from '@/api/url'
 
 const FALLBACK_ZH_PHRASE = '我已阅读、理解并同意 Sub2API 部署与运营合规承诺'
 const FALLBACK_EN_PHRASE = 'I have read, understood, and agree to the Sub2API Deployment and Operation Compliance Commitment'
@@ -25,39 +26,45 @@ export const useAdminComplianceStore = defineStore('adminCompliance', () => {
     return status.value?.ack_phrase_en || FALLBACK_EN_PHRASE
   })
 
-  async function fetchStatus(): Promise<AdminComplianceStatus> {
-    const requestedGeneration = generation
+  async function fetchStatus(): Promise<AdminComplianceStatus | null> {
+    if (!hasSub2apiBackend()) { reset(); return null }
+    const current = ++generation
     loading.value = true
     try {
       const nextStatus = await adminComplianceAPI.getStatus()
-      if (requestedGeneration !== generation) return nextStatus
+      if (current !== generation) return null
       status.value = nextStatus
       initialized.value = true
       forceVisible.value = nextStatus.required
       return nextStatus
+    } catch (error) {
+      if (current !== generation) return null
+      throw error
     } finally {
-      if (requestedGeneration === generation) loading.value = false
+      if (current === generation) loading.value = false
     }
   }
 
-  async function accept(phrase: string): Promise<AdminComplianceStatus> {
-    const requestedGeneration = generation
+  async function accept(phrase: string): Promise<AdminComplianceStatus | null> {
+    if (!hasSub2apiBackend()) { reset(); return null }
+    const current = ++generation
     submitting.value = true
     try {
       const nextStatus = await adminComplianceAPI.accept({
         phrase,
         language: currentLocale.value
       })
-      if (requestedGeneration !== generation) return nextStatus
+      if (current !== generation) return null
       status.value = nextStatus
       forceVisible.value = nextStatus.required
       return nextStatus
     } finally {
-      if (requestedGeneration === generation) submitting.value = false
+      if (current === generation) submitting.value = false
     }
   }
 
   function requireAcknowledgement(partialStatus?: Partial<AdminComplianceStatus>): void {
+    if (!hasSub2apiBackend()) { reset(); return }
     status.value = {
       required: true,
       version: partialStatus?.version || status.value?.version || 'v2026.06.10',
@@ -74,7 +81,7 @@ export const useAdminComplianceStore = defineStore('adminCompliance', () => {
   }
 
   function reset(): void {
-    generation += 1
+    generation++
     status.value = null
     loading.value = false
     submitting.value = false

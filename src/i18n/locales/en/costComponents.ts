@@ -1,5 +1,14 @@
 export default {
   costComponents: {
+    "financeLinkedBeforeVoid": "Handle or void the linked refunds and termination losses before voiding the original record.",
+    "financeLossExceedsBalance": "The termination loss cannot exceed the prepaid balance remaining at that time.",
+    "financeRefundExceedsLoss": "The refund cannot exceed the amount still unrefunded from this termination loss.",
+    "financeRefundExceedsPayment": "Total refunds cannot exceed the original purchase payment.",
+    "financeRelatedUnavailable": "The original record is missing or voided. Please select another record.",
+    "financeRelatedIdentityMismatch": "Select an original record for the same account and currency.",
+    "financeVoidedCannotEdit": "Voided records cannot be edited. Enter a new record instead.",
+    "financeOwnerCannotChange": "An existing record cannot move to another account. Void it and enter a new record.",
+    "financeBatchMismatch": "Edit the whole batch to check the allocated total and use the same currency, date and channel.",
     "adaptiveKicker": "TRENDS BY PERIOD",
     "adaptiveTitle": "Cost and request trends",
     "adaptiveDescription": "The chart adjusts the number of points to the selected period. Solid lines show recorded values; dashed lines show estimates from current settings. Gaps mean the data could not be confirmed.",

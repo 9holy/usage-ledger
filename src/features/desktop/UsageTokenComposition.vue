@@ -20,6 +20,7 @@ const props = defineProps<{
   outputTokens?: number | null
   cacheReadTokens?: number | null
   partial?: boolean
+  compact?: boolean
 }>()
 const valid = (n: unknown): n is number =>
   typeof n === 'number' && Number.isFinite(n) && n >= 0
@@ -44,7 +45,7 @@ const cachedPercent = computed(() =>
 )
 const count = (n: number | null | undefined) =>
   valid(n) ? n.toLocaleString(usageLocale()) : t('usageMonitor.text.notRecorded')
-const compact = (n: number | null | undefined) =>
+const compactCount = (n: number | null | undefined) =>
   valid(n)
     ? new Intl.NumberFormat(usageLocale(), {
         notation: 'compact',
@@ -119,7 +120,18 @@ const vessels = computed(() => [
 ])
 </script>
 <template>
+  <section v-if="props.compact" class="token-composition-compact" :aria-label="t('usageMonitor.text.exactTotalTokenComposition')">
+    <div class="compact-token-heading">
+      <span>{{ t('usageMonitor.delivery.tokenBreakdown') }} <small>{{ t('usageMonitor.text.shareOfTotal') }}</small></span>
+      <ul v-if="segments.length" class="compact-token-legend">
+        <li v-for="part in segments" :key="part.label" :title="count(part.tokens)+' Token'"><i :style="{background:part.color}" aria-hidden="true" />{{ part.label }} <strong>{{ usagePercentLabel(part.percent) }}</strong></li>
+      </ul>
+    </div>
+    <div v-if="segments.length" class="compact-token-track" aria-hidden="true"><i v-for="part in segments" :key="part.label" :data-tokens="part.tokens" :data-percent="part.percent" :style="{width:part.percent+'%',background:part.color}" /></div>
+    <p v-else class="compact-token-empty">{{ total===0?t('usageMonitor.text.noTokenUsageInTheSelectedPeriod'):t('usageMonitor.text.completeInputAndOutputRecordsNotYetAvailable') }}</p>
+  </section>
   <section
+    v-else
     class="token-composition"
     :class="{ 'has-token-data': segments.length }"
     :aria-label="t('usageMonitor.text.whereTokensAreUsed')"
@@ -134,7 +146,7 @@ const vessels = computed(() => [
         </div>
         <div class="token-total">
           <span>{{ t('usageMonitor.text.totalUsage') }}</span
-          ><strong :title="count(total)">{{ compact(total) }}</strong
+          ><strong :title="count(total)">{{ compactCount(total) }}</strong
           ><small>Token</small>
         </div>
       </header>
@@ -225,7 +237,7 @@ const vessels = computed(() => [
           <div class="input-label">
             <span>{{ t('usageMonitor.text.input') }}</span
             ><strong :title="count(inputTokens)">{{
-              compact(inputTokens)
+              compactCount(inputTokens)
             }}</strong>
           </div>
           <div class="cache-insight">
@@ -240,7 +252,7 @@ const vessels = computed(() => [
           <div class="token-readout cache" :title="count(cacheReadTokens)">
             <span>{{ partial ? t('usageMonitor.text.recordedCacheReads') : t('usageMonitor.text.cacheRead') }}</span
             ><strong>{{
-              validCache ? compact(cacheReadTokens) : t('usageMonitor.text.notRecorded')
+              validCache ? compactCount(cacheReadTokens) : t('usageMonitor.text.notRecorded')
             }}</strong
             ><em>Token</em
             ><small>{{
@@ -250,7 +262,7 @@ const vessels = computed(() => [
             }}</small>
           </div>
           <div class="token-readout fresh" :title="count(fresh)">
-            <span>{{ t('usageMonitor.text.otherInput') }}</span><strong>{{ compact(fresh) }}</strong
+            <span>{{ t('usageMonitor.text.otherInput') }}</span><strong>{{ compactCount(fresh) }}</strong
             ><em>Token</em
             ><small>{{
               cachedPercent == null
@@ -259,7 +271,7 @@ const vessels = computed(() => [
             }}</small>
           </div>
           <div class="token-readout output" :title="count(outputTokens)">
-            <span>{{ t('usageMonitor.text.output') }}</span><strong>{{ compact(outputTokens) }}</strong
+            <span>{{ t('usageMonitor.text.output') }}</span><strong>{{ compactCount(outputTokens) }}</strong
             ><em>Token</em
             ><small
               >{{ usagePercentLabel((outputTokens! / total!) * 100) }} {{ t('usageMonitor.text.shareOfTotal') }}</small
@@ -296,6 +308,10 @@ const vessels = computed(() => [
   </section>
 </template>
 <style scoped>
+.token-composition-compact{padding:10px 0 12px;min-width:0;border-bottom:1px solid var(--cost-line)}
+.compact-token-heading{display:flex;align-items:center;justify-content:space-between;gap:8px 20px;flex-wrap:wrap;color:var(--cost-muted);font-size:11px;line-height:1.5}.compact-token-heading small{font-size:inherit}
+.compact-token-legend{display:flex;gap:8px 22px;flex-wrap:wrap;list-style:none;margin:0;padding:0}.compact-token-legend li{display:flex;align-items:center;gap:6px}.compact-token-legend li>i{width:6px;height:6px;flex:0 0 6px}.compact-token-legend strong{font-weight:500;color:var(--cost-text);font-variant-numeric:tabular-nums}
+.compact-token-track{display:flex;width:100%;height:6px;overflow:hidden;margin-top:9px;background:var(--cost-panel-2)}.compact-token-track>i{height:100%;flex-shrink:0}.compact-token-empty{font-size:11px;color:var(--cost-muted);margin:6px 0 0}
 .token-composition {
   container-type: inline-size;
   min-width: 0;

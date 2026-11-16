@@ -3,6 +3,15 @@ import { describe, expect, it, vi } from 'vitest'
 import CostLineChart from '../CostLineChart.vue'
 
 describe('CostLineChart truthful states', () => {
+  it('renders isolated recorded points without connecting or replacing missing samples', () => {
+    const values = [1, 2, null, 40, null, 3]
+    const wrapper = shallowMount(CostLineChart, { props: { labels: ['a', 'b', 'c', 'd', 'e', 'f'], series: [{ label: 'Value', color: '#b9e55a', data: values }] } })
+    const dataset = (wrapper.vm as any).$.setupState.chartData.datasets[0]
+    expect(dataset.data).toEqual(values)
+    expect(dataset.spanGaps).toBe(false)
+    expect(dataset.pointRadius).toEqual([0, 0, 0, 3, 0, 3])
+    expect(dataset.pointBackgroundColor).toBe('#b9e55a')
+  })
   it('uses opt-in value-anchored gradients and peak markers while preserving real gaps', () => {
     const stops = [{ value: 0, color: '#79bdff' }, { value: 10, color: '#50d9b4' }, { value: 20, color: '#f4c467' }]
     const wrapper = shallowMount(CostLineChart, { props: { labels: ['a', 'b', 'c', 'd'], series: [{ label: '输出', color: '#f4c467', colorStops: stops, fill: true, data: [0, 10, null, 20] }], showValues: true } })

@@ -2,7 +2,9 @@
 
 # Usage Ledger
 
-**Version 0.2.39 · AI usage monitoring and cost workspace · English / 中文**
+**Version 0.2.51 · AI usage monitoring and cost workspace · English / 中文**
+
+Local account costs, procurement channels, expenses and API cost rules are integrated into Usage Monitor. See the [version guide](docs/release/0.2.51.md).
 
 Usage Ledger is a desktop app for understanding AI-tool activity and the cost of the accounts and services behind it. It combines a local usage monitor with a cost workspace for Sub2API, CLIProxyAPI, and Cockpit.
 
@@ -13,6 +15,8 @@ Use it to:
 - Track account quota cycles without mixing them with calendar-week totals.
 - Compare usage-based value with purchase costs, fees, refunds, and losses.
 - Find missing records or prices before treating a total as complete.
+- Keep collected usage, account names, quota cycles and saved output-rate history in the app ledger when external logs are cleared. See [local history and account details](docs/release/0.2.51.md).
+- View original USD usage amounts alongside CNY totals with [Usage Monitor graphics and costs](docs/release/0.2.51.md).
 
 Amounts calculated by Usage Ledger are estimates based on available usage, pricing, and your cost settings. They are not provider invoices or proof of payment.
 
@@ -20,17 +24,9 @@ Amounts calculated by Usage Ledger are estimates based on available usage, prici
 
 ## Get the App
 
-Version 0.2.39 completes the follow-up data-channel review: native quota fields and exact windows, connection-safe diagnostics, purchase-profile validation, duplicate-email history protection, and finance reads. Your own cost formulas are retained. See the [bilingual release notes](docs/release/0.2.39.md) and [source/interface audit](docs/data-channel-completion-2026-11-07.md).
+Download the latest verified installers from [GitHub Releases](https://github.com/9holy/usage-ledger/releases/latest): choose `windows_x64-setup.exe` for Windows, `macos_arm64.dmg` for Apple Silicon, or `macos_x64.dmg` for Intel. A new version appears after all three platform builds and startup checks pass.
 
-The [v0.2.39 release page](https://github.com/9holy/usage-ledger/releases/tag/v0.2.39) provides these downloads once the release checks and all three platform builds pass:
-
-- Windows x64 installer: [Usage-Ledger_0.2.39_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_windows_x64-setup.exe).
-- macOS Apple Silicon preview: [Usage-Ledger_0.2.39_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_arm64.dmg).
-- macOS Intel preview: [Usage-Ledger_0.2.39_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_x64.dmg).
-
-See [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/BUILD-INFO.json) for the source commit and build evidence, and [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/SHA256SUMS.txt) for download checksums. Downloads are manual only: this release supplies no updater `.sig` files, `latest.json` update feed, or portable executable.
-
-To upgrade on Windows, back up important data, fully quit the app from the tray, and run the new installer over the existing installation. This keeps the existing application data; do not uninstall or delete the ledger to update. On Mac, quit the app, choose the DMG for your processor, and replace the application in `/Applications`. Existing data directories remain in use; required database upgrades and evidence-based repairs run when the app starts.
+The release includes [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/latest/download/BUILD-INFO.json) and checksums. Installers are downloaded manually; automatic updates and portable executables are not provided.
 
 | Platform | Availability |
 | --- | --- |
@@ -166,9 +162,21 @@ Calendar-week usage, subscription-month usage, and a provider's weekly quota cyc
 
 A zero percentage alone does not prove that a new cycle started. At a confirmed 100% quota boundary, later extra-credit usage is kept separate from the included quota-cycle amount, while still contributing to the applicable month total.
 
-Forecasts require current, verified account attribution and quota evidence, pairing the quota percentage with subscription usage from the **same timestamp** and cycle. Historical snapshots retain their timestamps, but stale, expired, revoked, or incomplete evidence does not support a current forecast. Partial priced amounts are labeled and counted; unpriced portions show a human-readable reason. A forecast is not a promised final charge.
+Forecasts pair the quota percentage with the accumulated quota amount from the **same timestamp**, for the same account and cycle. A stale but valid pair remains available with its timestamp. Partial priced amounts are labeled and counted; unpriced portions show a human-readable reason. A forecast is not a promised final charge.
 
 ### Purchase Costs and Rates
+
+For directly signed-in accounts, open **Cost Workspace → Local data → Local Costs**. This uses the same local Codex and Claude usage records without a Sub2API, CLIProxyAPI, or Cockpit connection. Select a named account in **Cost Ledger**, enter its purchase or renewal amount and coverage dates, and record refunds or losses against the original purchase. Set account availability manually; a failed sign-in does not automatically mark an account as banned.
+
+The account table shows purchase price, period expense, remaining prepaid value, cost multiplier, and cost per million tokens. The multiplier compares expense with identified usage value for the same period, after currency conversion. Missing payments remain unentered, and incomplete pricing or account evidence makes the multiplier a reference value. Actual payments and usage value remain separate.
+
+**Asset overview** compares account usage value, subscription expense, API consumption and confirmed losses. Search, filter and sort the account table; its row actions open cost records or start an entry for that account. **Cost records** and **API prices** have separate tabs. Overview multipliers only include accounts that have both cost and usage for the selected period.
+
+**Usage & quota** shows the selected account's recorded quota percentage, reset time, observation-aligned full-quota projection, subscription-month usage and past cycles. Model details include input/output, cache reads/writes, price coverage and rates from recorded durations. Missing durations stay unavailable. Model and timeline totals use the same account ownership resolver as the monitor; all API records remain together. Gaps in recorded usage stay empty in charts.
+
+**Channels** uses entered purchase channels to filter actual financial records and their period costs. Purchase prices, refunds and losses need real entries; client logs do not reveal what you paid. Quota readings show their source time, and an older paired estimate is labelled while an update is pending.
+
+For **API**, enter dated model prices or a multiplier on the saved USD usage quote in **API Prices & Exchange Rate**. Cache reads and writes have separate prices. Unpriced calls remain unknown; top-ups are recorded separately and are not added to calculated API consumption. These settings do not rewrite saved usage quotes or subscription quota history.
 
 Use **Cost Ledger** for financial events and the account cost controls for purchase amount, currency, billing cycle, and start date. Review the active account/source and coverage dates before saving.
 
@@ -223,7 +231,7 @@ For a bug report, include the app version, OS/architecture, source type, selecte
 
 ### Windows
 
-Install Node.js 22 LTS (22.12.0+) or a compatible newer version, pnpm 9.15.9, Rust stable with the MSVC toolchain, Visual Studio C++ Build Tools, and WebView2 Runtime.
+Install Node.js 22 LTS or a compatible newer version, pnpm 9.15.9, Rust stable with the MSVC toolchain, Visual Studio C++ Build Tools, and WebView2 Runtime.
 
 ~~~powershell
 git clone https://github.com/9holy/usage-ledger.git
@@ -254,13 +262,7 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. Release builds use separate Apple Silicon and Intel targets. The default universal target, macOS 13 runtime behavior, Finder/Dock and full GUI flows, and real-account use remain outside the automated validation.
-
-### Release checks
-
-The main [repository workflow](.github/workflows/ci.yml) runs frontend, headless, and dependency checks, followed by native tests and installer builds for Windows x64, macOS Apple Silicon, and macOS Intel. A push to `main` publishes the versioned GitHub Release only after every required check, build, and package verification succeeds. The release's `BUILD-INFO.json` and linked Actions run record the actual outcome; these instructions do not claim that a pending run has passed.
-
-The separate [Mac preview workflow](.github/workflows/macos-test.yml) still runs on `test/macos-*` branches and uploads test artifacts without publishing a Release. Public downloads remain manual; neither workflow creates a signed automatic-update feed.
+The build command creates a universal app/DMG by default; the [macOS guide](docs/platforms/macos.md) also explains single-architecture targets and signing limitations. The default universal target is not validated. macOS 13 runtime behavior, Finder/Dock and full GUI flows, and real-account use have not been checked. See the release's `BUILD-INFO.json` for source/build provenance. Build workflows do not publish GitHub Releases; downloads are manual only.
 
 ## Documentation and Licensing
 
@@ -268,10 +270,7 @@ The separate [Mac preview workflow](.github/workflows/macos-test.yml) still runs
   all screenshots use fictional DEMO data, not real account statements.
 - [DeepSeek Harness integration](docs/integrations/deepseek-harness.md).
 - [macOS build and test guide](docs/platforms/macos.md).
-- [0.2.39 release notes](docs/release/0.2.39.md).
-- [2026-11-07 audit and validation report](docs/audit-2026-11-07.md).
-- [2026-11-07 usage statistics and account attribution follow-up](docs/monitor-accuracy-audit-2026-11-07.md).
-- [2026-11-07 third review: concurrency, attribution and ledger accuracy](docs/re-review-2026-11-07.md).
+- [0.2.25 release notes](docs/release/0.2.25.md).
 - [Privacy notes](docs/PRIVACY.md).
 - [Third-party notices](THIRD_PARTY_NOTICES.md) and [license texts](LICENSES/).
 

@@ -3,14 +3,19 @@ import { mount } from '@vue/test-utils'
 import { describe, it, expect } from 'vitest'
 import UsageTokenComposition from '../UsageTokenComposition.vue'
 describe('Token reservoir data', () => {
-  it('does not describe a zero known subtotal with missing fields as no usage', async () => {
-    const wrapper = mount(UsageTokenComposition, { props: { inputTokens: 0, outputTokens: 0, cacheReadTokens: null, partial: true } })
-    expect(wrapper.text()).toContain('已记录部分为 0')
-    expect(wrapper.text()).toContain('不能确认本周期没有用量')
-    await wrapper.setProps({ inputTokens: null, outputTokens: null })
-    expect(wrapper.text()).not.toContain('已记录部分为 0')
-    expect(wrapper.find('.token-landscape').exists()).toBe(false)
-    wrapper.unmount()
+  it('uses the same disjoint totals in compact mode without loading the large illustration',async()=>{
+    const w=mount(UsageTokenComposition,{props:{compact:true,inputTokens:800,cacheReadTokens:600,outputTokens:200}})
+    expect(w.findAll('img,svg')).toHaveLength(0)
+    expect(w.find('.token-stage').exists()).toBe(false)
+    expect(w.findAll('[data-tokens]').map(e=>Number(e.attributes('data-tokens')))).toEqual([200,600,200])
+    expect(w.findAll('[data-percent]').map(e=>Number(e.attributes('data-percent')))).toEqual([20,60,20])
+    expect(w.text()).toContain('占总量')
+    await w.setProps({cacheReadTokens:null})
+    expect(w.findAll('[data-tokens]').map(e=>Number(e.attributes('data-tokens')))).toEqual([800,200])
+    await w.setProps({inputTokens:0,outputTokens:0})
+    expect(w.find('.compact-token-track').exists()).toBe(false)
+    expect(w.text()).toContain('所选期间暂无 Token 用量')
+    w.unmount()
   })
   it('retains small positive shares and zero quantities', async () => {
     const w = mount(UsageTokenComposition, {

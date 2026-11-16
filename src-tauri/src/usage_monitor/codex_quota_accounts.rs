@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_plan_reset_and_home_do_not_identify_the_account_inside_or_outside_the_cycle() {
+    fn unique_authenticated_request_quota_matches_only_inside_its_cycle() {
         let conn = Connection::open_in_memory().unwrap();
         super::super::store::initialize(&conn).unwrap();
         let payload = serde_json::json!({"plan_type":"pro","rate_limit":{"primary_window":{
@@ -595,8 +595,14 @@ mod tests {
             };
             conn.execute("INSERT INTO monitor_requests VALUES('codex',?1,'codex:chat',?2,?3,'{}')",
                 params![id,time,serde_json::to_string(&usage).unwrap()]).unwrap();
-            assert!(matches!(super::super::request_accounts::EvidenceIndex::load(&conn).unwrap().account_for(&usage),
-                super::super::request_accounts::AccountMatch::None));
+            let index=super::super::request_accounts::EvidenceIndex::load(&conn).unwrap();
+            if time<700_000_000-WEEK_MS {
+                assert!(matches!(index.account_for(&usage),super::super::request_accounts::AccountMatch::None));
+            } else {
+                assert!(matches!(index.account_for(&usage),super::super::request_accounts::AccountMatch::Verified("account:current-login")));
+                save_authenticated(&conn,Path::new("fixture"),"other-login",&payload,600_002_000).unwrap();
+                assert!(matches!(super::super::request_accounts::EvidenceIndex::load(&conn).unwrap().account_for(&usage),super::super::request_accounts::AccountMatch::Conflict));
+            }
         }
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests", [], |r|r.get::<_,i64>(0)).unwrap(), 2);
         assert!(super::super::request_accounts::EvidenceIndex::load(&conn).unwrap().account_bounds().is_empty());

@@ -205,6 +205,7 @@ pub fn parse_artifact<R: BufRead>(mut reader: R, expected_version: Option<u64>) 
         let actual_model = text(source, "model");
         let actual_provider = text(source, "provider");
         let record = UsageRecord {
+            billing_scope: Some("api".into()),
             id: format!("dsh:{}:{turn}:{step}:{attempt}", current.id),
             tool: "deepseek-harness".into(),
             session_id: current.id.clone(),

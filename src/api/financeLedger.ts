@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isDesktopRuntime } from './url'
 
-export type FinanceSource = 'sub2api' | 'cliproxy' | 'cockpit'
+export type FinanceSource = 'sub2api' | 'cliproxy' | 'cockpit' | 'local'
 export type FinanceCurrency = 'CNY' | 'USD'
 export type FinanceEventKind = 'purchase' | 'renewal' | 'refund' | 'termination_loss'
 export interface FinanceScope { source: FinanceSource; instanceId: string }

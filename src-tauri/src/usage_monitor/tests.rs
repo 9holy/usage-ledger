@@ -39,6 +39,201 @@ fn header() -> Vec<serde_json::Value> {
 fn usage(n: i64) -> serde_json::Value {
     json!({"input_tokens":100*n,"output_tokens":20*n,"cached_input_tokens":50*n,"cache_write_input_tokens":0,"reasoning_output_tokens":5*n,"total_tokens":120*n})
 }
+
+#[test]
+fn scoped_activity_uses_current_auth_and_activity_instead_of_the_last_usage_receipt() {
+    let f = Fixture::new();
+    let mut conn = f.connection();
+    let now = 1_794_673_857_176;
+    let tx = conn.transaction().unwrap();
+    for (tool, id, kind, has_usage) in [
+        ("codex", "old-api", "api", true),
+        ("codex", "new-api", "api", false),
+        ("codex", "switched", "subscription", true),
+        ("claude", "claude-api", "api", true),
+        ("claude", "claude-switched", "subscription", true),
+        ("codex", "unknown-newest", "api", true),
+    ] {
+        if has_usage {
+            let usage = UsageRecord { tool: tool.into(), id: id.into(), session_id: id.into(),
+                timestamp_ms: now - 300_000, output_tokens: 20, ..Default::default() };
+            store::save_usage_with_catalog(&tx, &usage, i64::MAX, now, &crate::model_catalog::CatalogSnapshot::default()).unwrap();
+            tx.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope','api') WHERE tool=?1 AND id=?2", rusqlite::params![tool,id]).unwrap();
+        }
+        store::save_session(&tx, &SessionMeta { tool: tool.into(), id: id.into(), status: "active".into(),
+            updated_at_ms: now - 1000, model: Some("current-model".into()), ..Default::default() }).unwrap();
+        let source = format!("{id}.jsonl");
+        let state = json!({"session":{"id":id,"updatedAtMs":now-1000},"turn_id":"current","claude_request_ref":"request"});
+        tx.execute("INSERT INTO monitor_files VALUES(?1,?2,0,'',?3)", rusqlite::params![source,tool,state.to_string()]).unwrap();
+        if tool == "codex" {
+            tx.execute("INSERT INTO monitor_turn_billing VALUES(?1,'current',?2,?3)",rusqlite::params![store::session_key(tool,id),kind,now]).unwrap();
+        } else {
+            super::request_identity::save_context(&tx, &source, &super::request_identity::ClaudeContext {
+                reference: "request".into(), session: id.into(), kind, account: None,
+            }).unwrap();
+        }
+    }
+    let newest = json!({"session":{"id":"unknown-newest","updatedAtMs":now},"turn_id":"unconfirmed"});
+    tx.execute("INSERT INTO monitor_files VALUES('new-alias','codex',0,'',?1)",[newest.to_string()]).unwrap();
+    tx.commit().unwrap();
+    let api = store::sessions_scoped(&conn, None, now, Some("api")).unwrap();
+    let (counts, by_tool) = super::status_counts(&api, now);
+    assert_eq!(counts.running, 3);
+    assert_eq!(by_tool["codex"].running, 2);
+    assert_eq!(by_tool["claude"].running, 1);
+    for row in api.iter().filter(|row| row.meta.status == "active") {
+        assert_eq!(row.meta.updated_at_ms, now - 1000);
+        assert_eq!(row.meta.model.as_deref(), Some("current-model"));
+        assert_eq!(row.totals.output_tokens_per_second, 0.);
+    }
+    assert_eq!(api.iter().find(|row|row.meta.id=="new-api").unwrap().totals.request_count, 0);
+    for id in ["switched", "claude-switched", "unknown-newest"] {
+        let row = api.iter().find(|row|row.meta.id==id).unwrap();
+        assert_eq!(row.meta.status, "unknown");
+        assert_eq!(row.meta.updated_at_ms, now-300_000);
+        assert_eq!(row.totals.request_count, 1);
+    }
+    let subscription = store::sessions_scoped(&conn, None, now, Some("subscription")).unwrap();
+    assert_eq!(super::status_counts(&subscription,now).0.running, 2);
+    assert_eq!(store::sum_sessions(&api).request_count, 5);
+    assert_eq!(store::sum_sessions(&subscription).request_count, 0);
+    assert_eq!(store::sum_sessions(&store::sessions(&conn,None,now+121_000).unwrap()).request_count,5);
+    assert_eq!(super::status_counts(&store::sessions_scoped(&conn,None,now+121_000,Some("api")).unwrap(),now+121_000).0.running,0);
+}
+
+#[test]
+fn claude_activity_and_current_auth_follow_request_boundaries() {
+    let f = Fixture::new();
+    let mut conn = f.connection();
+    let path = f.0.join("claude.jsonl");
+    let now = 1_794_673_857_176;
+    for (offset,row,status,scope) in [
+        (0,json!({"type":"user","uuid":"turn","message":{"content":"hello"}}),"active",None),
+        (1,json!({"type":"api-request","id":"request","params":{"betas":[]}}),"active",Some("api")),
+        (2,json!({"type":"assistant","message":{"stop_reason":"tool_use"}}),"active",Some("api")),
+        (3,json!({"type":"user","message":{"content":[{"type":"tool_result"}]}}),"active",Some("api")),
+        (4,json!({"type":"assistant","message":{"stop_reason":"end_turn"}}),"idle",Some("api")),
+        (5,json!({"type":"user","uuid":"next","message":{"content":"next"}}),"active",None),
+        (6,json!({"type":"api-request","id":"oauth","params":{"betas":["oauth-2025-04-20"]}}),"active",Some("subscription")),
+        (7,json!({"type":"system","subtype":"turn_duration","durationMs":3000}),"idle",Some("subscription")),
+        (8,json!({"type":"api-request","id":"again","params":{"betas":[]}}),"active",Some("api")),
+        (9,json!({"type":"system","subtype":"stop_hook_summary"}),"idle",Some("api")),
+        (10,json!({"type":"api-request","id":"legacy-without-betas","params":{}}),"active",None),
+    ] {
+        let mut row = row;
+        row["sessionId"] = json!("claude-session");
+        row["timestamp"] = json!(chrono::DateTime::from_timestamp_millis(now+offset*1000).unwrap().to_rfc3339());
+        fs::OpenOptions::new().create(true).append(true).open(&path).unwrap().write_all(format!("{row}\n").as_bytes()).unwrap();
+        collector::ingest_file(&mut conn,"claude",&path,i64::MAX).unwrap();
+        let sessions = store::sessions(&conn,Some("claude"),now+offset*1000).unwrap();
+        assert_eq!(sessions[0].meta.status,status,"{row}");
+        assert_eq!(super::billing::session_kind(&conn,&sessions[0]).unwrap().as_deref(),scope,"{row}");
+    }
+}
+
+#[test]
+fn api_group_spans_tools_and_filters_mixed_session_drilldowns_without_repricing() {
+    let f=Fixture::new();
+    let mut conn=f.connection();
+    let tx=conn.transaction().unwrap();
+    let catalog=crate::model_catalog::CatalogSnapshot::default();
+    for (tool,id,scope,output,at) in [("codex","subscription",Some("subscription"),900,9000),("codex","api-codex",Some("api"),20,8000),("claude","api-claude",Some("api"),30,7000),("claude","unconfirmed",None,500,9500)] {
+        let u=UsageRecord{id:id.into(),tool:tool.into(),session_id:"mixed".into(),turn_id:"turn".into(),timestamp_ms:at,model:Some("model".into()),output_tokens:output,billing_scope:scope.map(str::to_owned),..Default::default()};
+        store::save_usage_with_catalog(&tx,&u,i64::MAX,10000,&catalog).unwrap();
+        // Exact runtime billing evidence is maintained independently of these test usage rows.
+        tx.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope',?3) WHERE tool=?1 AND id=?2",rusqlite::params![tool,id,scope]).unwrap();
+    }
+    tx.commit().unwrap();
+    let p=MonitorPeriod{billing_scope:Some("api".into()),start_ms:Some(0),end_ms:Some(10000),..Default::default()};
+    let report=super::analysis::read(&conn,None,&p,"",None,false,0,100,10000).unwrap();
+    assert_eq!((report.totals.request_count,report.totals.output_tokens),(2,50));
+    assert_eq!(report.by_tool.len(),2);
+    assert_eq!(report.sessions.len(),2);
+    let live_sessions=store::sessions_scoped(&conn,None,10000,Some("api")).unwrap();
+    let live_totals=store::sum_sessions(&live_sessions);
+    assert_eq!((live_totals.request_count,live_totals.output_tokens),(2,50));
+    for s in &report.sessions {
+        assert!(s.recent_request.as_ref().unwrap().id.starts_with("api-"));
+        assert!(s.latest_completed_turn.is_none());
+        let detail=store::session_detail(&conn,&s.key,0,1,10000,false,&p).unwrap();
+        assert_eq!(detail.request_count,1);
+        assert_eq!(detail.requests.len(),1);
+        assert_eq!(detail.requests[0].usage.billing_scope.as_deref(),Some("api"));
+        assert_eq!(detail.session.totals.request_count,1);
+    }
+    let page=super::analysis::read(&conn,None,&p,"",None,false,1,1,10000).unwrap();
+    assert_eq!((page.session_count,page.sessions.len(),page.totals.output_tokens),(2,1,50));
+    let all=super::analysis::read(&conn,None,&MonitorPeriod{billing_scope:None,..p.clone()},"",None,false,0,100,10000).unwrap();
+    assert_eq!((all.totals.request_count,all.totals.output_tokens),(4,1450));
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|r|r.get::<_,i64>(0)).unwrap(),4);
+}
+
+#[test]
+fn a_malformed_claude_append_keeps_its_cursor_and_does_not_block_codex_or_erase_prior_usage() {
+    let f=Fixture::new();
+    let mut conn=f.connection();
+    let codex=f.0.join("codex.jsonl");
+    let claude=f.0.join("claude.jsonl");
+    let mut rows=header();rows.push(canonical("one",1));
+    fs::write(&codex,lines(rows)).unwrap();
+    let good=json!({"type":"assistant","sessionId":"c","timestamp":"2026-11-13T10:00:00Z","message":{"id":"one","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":30,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
+    fs::write(&claude,format!("{good}\n")).unwrap();
+    collector::ingest_file(&mut conn,"codex",&codex,i64::MAX).unwrap();
+    collector::ingest_file(&mut conn,"claude",&claude,i64::MAX).unwrap();
+    let cursor:u64=conn.query_row("SELECT offset FROM monitor_files WHERE path=?1",[claude.to_string_lossy()],|r|r.get(0)).unwrap();
+    fs::OpenOptions::new().append(true).open(&claude).unwrap().write_all(b"{invalid}\n").unwrap();
+    assert!(collector::ingest_file(&mut conn,"claude",&claude,i64::MAX).is_err());
+    fs::OpenOptions::new().append(true).open(&codex).unwrap().write_all(format!("{}\n",canonical("two",2)).as_bytes()).unwrap();
+    collector::ingest_file(&mut conn,"codex",&codex,i64::MAX).unwrap();
+    assert_eq!(conn.query_row("SELECT offset FROM monitor_files WHERE path=?1",[claude.to_string_lossy()],|r|r.get::<_,u64>(0)).unwrap(),cursor);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests WHERE tool='claude'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests WHERE tool='codex'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(store::sum_sessions(&store::sessions(&conn,None,i64::MAX).unwrap()).output_tokens,70);
+}
+
+#[test]
+#[ignore = "Requires an explicit isolated ledger copy for complete monitor conservation checks"]
+fn copied_framework_conservation() {
+    let path=std::path::PathBuf::from(std::env::var_os("MONITOR_FRAMEWORK_COPY").unwrap()).canonicalize().unwrap();
+    assert_eq!(path.file_name().unwrap(),"ledger-audit-work.sqlite");
+    assert_ne!(path,crate::ledger_db::ledger_db_path().unwrap().canonicalize().unwrap());
+    let conn=Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+    store::initialize(&conn).unwrap();
+    let tx=conn.unchecked_transaction().unwrap();
+    let now=crate::ledger_db::now_ms();
+    let cached=store::sum_sessions(&store::sessions(&tx,None,now).unwrap());
+    let all=super::analysis::read(&tx,None,&MonitorPeriod::default(),"",None,false,0,1,now).unwrap();
+    let same=|a:&Totals,b:&Totals| {
+        assert_eq!((a.request_count,a.input_tokens,a.output_tokens,a.cache_read_tokens,a.cache_write_tokens),(b.request_count,b.input_tokens,b.output_tokens,b.cache_read_tokens,b.cache_write_tokens));
+        for(currency,x)in &a.automatic_price_summary.by_currency {
+            let y=&b.automatic_price_summary.by_currency[currency];
+            assert!((x.requested_subtotal-y.requested_subtotal).abs()<1e-6,"requested subtotal cache={} raw={}",x.requested_subtotal,y.requested_subtotal);
+            assert!((x.response_subtotal-y.response_subtotal).abs()<1e-6,"response subtotal cache={} raw={}",x.response_subtotal,y.response_subtotal);
+            assert!((x.unknown_reference_subtotal-y.unknown_reference_subtotal).abs()<1e-6);
+        }
+    };
+    same(&cached,&all.totals);
+    let mut by_tool=Totals::default();
+    for row in &all.by_tool{store::merge_totals(&mut by_tool,&row.totals);}
+    store::finish_totals(&mut by_tool);same(&all.totals,&by_tool);
+    let api=super::analysis::read(&tx,None,&MonitorPeriod{billing_scope:Some("api".into()),..Default::default()},"",None,false,0,10,now).unwrap();
+    let direct:(i64,i64)=tx.query_row("SELECT COUNT(*),COALESCE(SUM(json_extract(usage,'$.outputTokens')),0) FROM monitor_requests WHERE json_extract(usage,'$.billingScope')='api'",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!((api.totals.request_count,api.totals.output_tokens),direct);
+    let clock=std::time::Instant::now();
+    let scoped=store::sum_sessions(&store::sessions_scoped(&tx,None,now,Some("api")).unwrap());
+    let scoped_ms=clock.elapsed().as_millis();
+    same(&scoped,&api.totals);
+    let api_live=super::live::read_scoped(&tx,now,0,now,Some("api")).unwrap();
+    let observed_api:i64=tx.query_row("SELECT COALESCE(SUM(o.output_tokens),0) FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND json_extract(r.usage,'$.billingScope')='api' AND COALESCE(json_extract(r.usage,'$.usageBasis'),'')!='legacy_initial_cumulative'",rusqlite::params![now-60000,now],|r|r.get(0)).unwrap();
+    assert_eq!(api_live.windows[0].observed_output_tokens,observed_api);
+    let live=super::live::read(&tx,now,0,now).unwrap();
+    for(index,window)in live.windows.iter().enumerate(){
+        for groups in [&live.by_tool,&live.by_model,&live.by_session]{
+            assert_eq!(window.observed_output_tokens,groups.iter().map(|g|g.windows[index].observed_output_tokens).sum::<i64>());
+        }
+    }
+    println!("{}",json!({"cachedEqualsRaw":true,"toolTotalsConserve":true,"liveGroupsConserve":true,"apiSnapshotMatchesAnalysis":true,"apiSessionReadMs":scoped_ms,"apiObservedOutput60":observed_api,"totalRequests":all.totals.request_count,"apiRequests":api.totals.request_count,"apiSessions":api.session_count,"tokens":all.totals.total_tokens,"usdAutomatic":all.totals.automatic_price_summary.by_currency.get("USD")}));
+}
 fn legacy(n: i64) -> serde_json::Value {
     json!({"type":"event_msg","timestamp":"2026-10-15T00:00:03Z","payload":{"type":"token_count","info":{"total_token_usage":usage(n),"last_token_usage":usage(1)}}})
 }

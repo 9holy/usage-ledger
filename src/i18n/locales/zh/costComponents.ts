@@ -1,5 +1,14 @@
 export default {
   costComponents: {
+    "financeLinkedBeforeVoid": "请先处理或作废关联的退款、封停损失记录，再作废原记录。",
+    "financeLossExceedsBalance": "封停损失不能超过该时间点剩余的预付金额。",
+    "financeRefundExceedsLoss": "退款不能超过这条封停损失尚未退回的金额。",
+    "financeRefundExceedsPayment": "累计退款不能超过原购买金额。",
+    "financeRelatedUnavailable": "原记录已不存在或已作废，请重新选择。",
+    "financeRelatedIdentityMismatch": "请选择同一账号、同一币种下的原记录。",
+    "financeVoidedCannotEdit": "已作废记录不能修改，请重新录入。",
+    "financeOwnerCannotChange": "已有记录不能改到另一个账号，请作废后重新录入。",
+    "financeBatchMismatch": "请在整批编辑中核对分配合计，并统一币种、日期和渠道。",
     "adaptiveKicker": "按时段查看",
     "adaptiveTitle": "费用与请求趋势",
     "adaptiveDescription": "图表会按所选时段调整数据点数量。实线表示已记录的数据，虚线表示按当前设置估算的费用，空缺表示该段数据无法确认。",

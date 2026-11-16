@@ -24,6 +24,16 @@ body:has(.console-surface) .modal-overlay {
 .console-surface button, .console-surface input, .console-surface select { font: inherit; }
 .console-surface button, .console-surface a, .console-surface input, .console-surface select, .console-surface summary { transition: background-color .15s, border-color .15s, color .15s; }
 .console-surface :is(button, a, input, select, summary):focus-visible { outline: 2px solid var(--cost-lime); outline-offset: 3px; }
+.console-surface .account-search:focus-within { border-color: var(--cost-lime); box-shadow: 0 0 0 2px rgb(185 229 90 / 20%); }
+.console-surface .account-search input:focus-visible { outline: none; box-shadow: none; }
+@supports (appearance: base-select) {
+  .console-surface select:not([multiple]):not([size])::picker(select) { color: var(--cost-text); background: var(--cost-panel); border: 1px solid var(--cost-line-strong); border-radius: 4px; box-shadow: 0 12px 28px rgb(0 0 0 / 35%); padding: 4px; }
+  .console-surface select:not([multiple]):not([size]) option { min-height: 32px; padding: 7px 10px; border-radius: 3px; font-size: 12px; color: var(--cost-text); }
+  .console-surface select:not([multiple]):not([size]) option:hover,
+  .console-surface select:not([multiple]):not([size]) option:focus-visible { background: var(--cost-panel-2); }
+  .console-surface select:not([multiple]):not([size]) option:checked { color: var(--cost-lime); background: var(--cost-panel-2); }
+  .console-surface select:not([multiple]):not([size])::picker-icon { color: var(--cost-muted); }
+}
 .console-surface button:disabled { opacity: .45; cursor: default; }
 .console-icon-button { display: inline-flex; width: 36px; height: 36px; flex: 0 0 36px; align-items: center; justify-content: center; border: 1px solid var(--cost-line-strong); border-radius: 4px; color: var(--cost-muted); background: var(--cost-panel); }
 .console-icon-button:hover:not(:disabled) { color: var(--cost-text); background: var(--cost-panel-2); }

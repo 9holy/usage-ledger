@@ -28,17 +28,13 @@ function identified(usd: number, cny?: number): MonitorTotals {
 afterEach(() => vi.useRealTimers())
 
 describe('account allowance periods', () => {
-  it.each([{ active: false }, { billingPeriod: 'yearly' }, { error: 'Cannot verify current subscription' }])('never presents retained month totals as current after subscription evidence changes: %j', change => {
-    const data = account({ currentCycle: cycle(identified(10)), subscriptionMonth: period(identified(900)), monthCycles: [cycle(identified(800))], unsegmentedMonth: identified(100) })
-    data.subscription = { ...data.subscription, ...change }
-    const wrapper = mount(UsageAccountPeriods, { props: { account: data } })
-    expect(wrapper.get('.amount-overview .period-amount').text()).toBe('$10.00')
-    expect(wrapper.find('.subscription-month').exists()).toBe(false)
-    expect(wrapper.find('.cycle-history').exists()).toBe(false)
-    expect(wrapper.find('.unsegmented').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('$900')
-    expect(wrapper.text()).not.toContain('$800')
-    expect(wrapper.text()).not.toContain('$100')
+  it('shows recorded calendar-month money when the subscription billing dates are unknown',()=>{
+    i18n.global.locale.value='zh'
+    const wrapper=mount(UsageAccountPeriods,{props:{account:account({calendarMonth:period(identified(21))})}})
+    expect(wrapper.get('.subscription-month .period-amount').text()).toBe('$21.00')
+    expect(wrapper.get('.month-details .period-range').text()).toContain('2026/10/01')
+    expect(wrapper.find('.unknown-month').exists()).toBe(false)
+    expect(wrapper.props('account').subscription.startMs).toBeNull()
     wrapper.unmount()
   })
   it('preserves the original account totals without additional billing groups', () => {
@@ -74,7 +70,7 @@ describe('account allowance periods', () => {
     const wrapper = mount(UsageAccountPeriods, { props: { account: account({ billingAccountVerified: false,
       attribution: 'session_creator', currentCycle: cycle(identified(13.68)) }) } })
     expect(wrapper.get('.amount-overview').text()).not.toContain('$13.68')
-    expect(wrapper.get('.amount-overview').text()).toContain('尚无请求日志交叉匹配的账号用量')
+    expect(wrapper.get('.amount-overview').text()).toContain('本轮边界未确认')
     expect(wrapper.get('.creator-reference').text()).toContain('$13.68')
     expect(wrapper.get('.creator-reference').text()).toContain('未核实归属')
     expect(wrapper.get('.creator-reference').text()).toContain('未计入上方账号用量，不可再次相加')
@@ -102,7 +98,7 @@ describe('account allowance periods', () => {
     const data = account({ currentCycle: cycle(identified(1.25, 8.75)) })
     const wrapper = mount(UsageAccountPeriods, { props: { account: data } })
     i18n.global.locale.value = 'en'; await nextTick()
-    expect(wrapper.get('.amount-overview h4').text()).toBe('Account usage reference matched across request logs (including API)')
+    expect(wrapper.get('.amount-overview h4').text()).toBe('Weekly quota used this cycle')
     expect(wrapper.get('.period-amount').text()).toBe('$1.25 · CNY ¥8.75')
     expect(wrapper.text()).toContain('10/15/2026')
     expect(wrapper.props('account')).toEqual(data)
@@ -115,7 +111,7 @@ describe('account allowance periods', () => {
   it('keeps saved automatic prices in separate currencies and shows the real round dates', () => {
     const wrapper = mount(UsageAccountPeriods, { props: { account: account({ currentCycle: cycle(identified(1.25, 8.75)) }) } })
     expect(wrapper.get('.period-amount').text()).toBe('$1.25 · 人民币 ¥8.75')
-    expect(wrapper.get('.amount-overview h4').text()).toBe('请求日志匹配的账号用量参考（含 API）')
+    expect(wrapper.get('.amount-overview h4').text()).toBe('本轮周额度已用')
     expect(wrapper.findAll('details')).toHaveLength(1)
     expect(wrapper.get('details').attributes('open')).toBeUndefined()
     expect(wrapper.get('details summary').text()).toBe('金额明细')
@@ -152,7 +148,7 @@ describe('account allowance periods', () => {
     const second = cycle(identified(4))
     const wrapper = mount(UsageAccountPeriods, { props: { account: account({ currentCycle: second, subscription: { startMs: day('2026-10-01'), endMs: day('2027-01-01'), checkedAtMs: day('2026-10-18'), source: 'local_auth', error: null }, subscriptionMonth: period(identified(9)), monthCycles: [first, second], unsegmentedMonth: identified(2) }) } })
     expect(wrapper.get('.subscription-month .period-amount').text()).toBe('$9.00')
-    expect(wrapper.get('.subscription-month h4').text()).toBe('本月账号用量参考（含 API）')
+    expect(wrapper.get('.subscription-month h4').text()).toBe('本月已用')
     expect(wrapper.text()).toContain('本订阅月累计')
     expect(wrapper.text()).toContain('按来源订阅日期统计')
     expect(wrapper.text()).toContain('订阅信息更新于')
@@ -173,7 +169,7 @@ describe('account allowance periods', () => {
     vi.useFakeTimers().setSystemTime(day('2026-11-02'))
     const wrapper = mount(UsageAccountPeriods, { props: { account: account({ subscriptionMonth: period(identified(5)) }) } })
     expect(wrapper.text()).toContain('历史订阅月累计')
-    expect(wrapper.get('.subscription-month h4').text()).toBe('历史月账号用量参考（含 API）')
+    expect(wrapper.get('.subscription-month h4').text()).toBe('历史月已用')
     expect(wrapper.text()).toContain('该订阅月已结束')
     expect(wrapper.text()).not.toContain('本订阅月累计')
   })
@@ -240,7 +236,7 @@ describe('account allowance periods', () => {
   it('never substitutes natural-week money when the current quota boundary is unknown', () => {
     const wrapper = mount(UsageAccountPeriods, { props: { account: account({ calendarWeek: period(identified(4)) }) } })
     expect(wrapper.get('.period-amount').text()).toBe('本轮边界未确认')
-    expect(wrapper.get('.amount-overview h4').text()).toBe('请求日志匹配的账号用量参考（含 API）')
+    expect(wrapper.get('.amount-overview h4').text()).toBe('本轮周额度已用')
     expect(wrapper.text()).not.toContain('$4.00')
     expect(wrapper.text()).not.toContain('自然周')
   })
@@ -248,7 +244,7 @@ describe('account allowance periods', () => {
   it('shows the full previous round amount outside collapsed details even without subscription dates', () => {
     const previous = cycle(identified(123.45, 6), { startMs: day('2026-09-25'), endMs: day('2026-10-02'), resetAtMs: day('2026-10-02'), quotaObservedAtMs: day('2026-10-02'), observedEndMs: day('2026-10-02'), current: false })
     const wrapper = mount(UsageAccountPeriods, { props: { account: account({ previousCycle: previous, currentCycle: cycle(identified(7)) }) } })
-    expect(wrapper.get('.previous-cycle h4').text()).toBe('上轮账号用量参考（含 API）')
+    expect(wrapper.get('.previous-cycle h4').text()).toBe('上轮周额度已用')
     expect(wrapper.get('.previous-cycle .period-amount').text()).toBe('$123.45 · 人民币 ¥6.00')
     expect(wrapper.get('.previous-cycle').element.closest('details')).toBeNull()
     expect(wrapper.get('.amount-overview .period-amount').text()).toBe('$7.00')

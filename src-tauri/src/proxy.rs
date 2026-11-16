@@ -21,6 +21,8 @@ use tower_http::cors::{AllowHeaders, AllowOrigin, Any, CorsLayer};
 
 /// Kept in sync with src/api/url.ts.
 pub const PROXY_PORT: u16 = 18765;
+
+fn proxy_port(version:&str)->u16{if version.contains("-preview."){18766}else{PROXY_PORT}}
 const TARGET_HEADER: &str = "x-target-base";
 const TOKEN_HEADER: &str = "x-proxy-token";
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
@@ -59,7 +61,7 @@ fn bind_listener(address: SocketAddr) -> Result<TcpListener, String> {
 
 /// Setup gets a synchronous error if the bridge cannot own its socket.
 pub fn spawn_proxy() -> Result<(), String> {
-    let address = SocketAddr::from(([127, 0, 0, 1], PROXY_PORT));
+    let address = SocketAddr::from(([127, 0, 0, 1], proxy_port(env!("CARGO_PKG_VERSION"))));
     let listener = bind_listener(address)?;
     let token = new_token()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

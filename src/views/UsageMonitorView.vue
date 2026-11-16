@@ -1,30 +1,46 @@
 <script setup lang="ts">
 import { usageLocale } from '@/utils/usageFormat'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CalendarDays, ChevronLeft, ChevronRight, ChevronDown, GitBranch, Pause, Play, RefreshCw, RotateCcw, EyeOff, Search, X, Clock3, Database, Info, ExternalLink, MessageSquare } from '@lucide/vue'
-import CostLineChart from '@/features/cost-center/components/CostLineChart.vue'
+import { ArrowLeft, Check, CalendarDays, ChevronLeft, ChevronRight, ChevronDown, GitBranch, Pause, Play, RefreshCw, RotateCcw, EyeOff, Search, X, Clock3, Database, Info, ExternalLink, MessageSquare } from '@lucide/vue'
 import ConsoleWorkspaceHeader from '@/features/desktop/ConsoleWorkspaceHeader.vue'
 import UsageLivePanel from '@/features/desktop/UsageLivePanel.vue'
+import UsageCostSummary from '@/features/desktop/UsageCostSummary.vue'
+import UsageCostAccounts from '@/features/desktop/UsageCostAccounts.vue'
+import UsageAccountCost from '@/features/desktop/UsageAccountCost.vue'
+import UsageApiPrices from '@/features/desktop/UsageApiPrices.vue'
+import LocalCostUsagePanel from '@/features/desktop/LocalCostUsagePanel.vue'
+import LocalCostChannels from '@/features/desktop/LocalCostChannels.vue'
+import CostEventsPanel from '@/features/cost-center/components/CostEventsPanel.vue'
+import { useMonitorCosts } from '@/features/desktop/useMonitorCosts'
+import { monitorUpstreamRevision } from '@/api/monitorUpstreams'
+import { useLocalCostLive } from '@/features/desktop/useLocalCostLive'
+import { LOCAL_FINANCE_SCOPE } from '@/api/localCost'
 import { displayLiveRate } from '@/features/desktop/liveRate'
 import { accountLabelSuffixes } from '@/features/desktop/accountLabels'
 import UsageTurnTimeline from '@/features/desktop/UsageTurnTimeline.vue'
 import UsageValueChart from '@/features/desktop/UsageValueChart.vue'
 import { loadAccountQuotaSnapshots, saveAccountQuotaSnapshots, validAccountQuotaSnapshot, type AccountQuotaSnapshot } from '@/features/desktop/accountQuotaSnapshot'
+import { projectAccountQuotaCycle } from '@/features/desktop/accountQuotaProjection'
 import UsageTokenComposition from '@/features/desktop/UsageTokenComposition.vue'
 import UsageRequestPulse from '@/features/desktop/UsageRequestPulse.vue'
 import UsagePriceFlow from '@/features/desktop/UsagePriceFlow.vue'
 import UsageRecordId from '@/features/desktop/UsageRecordId.vue'
 import UsagePeriodSummary from '@/features/desktop/UsagePeriodSummary.vue'
+import UsageModelCosts from '@/features/desktop/UsageModelCosts.vue'
+import UsageTrend from '@/features/desktop/UsageTrend.vue'
+import UsageRecordedMetrics from '@/features/desktop/UsageRecordedMetrics.vue'
 import UsageAccountPeriods from '@/features/desktop/UsageAccountPeriods.vue'
+import UsageApiAccount from '@/features/desktop/UsageApiAccount.vue'
 import UsagePricingCoveragePanel from '@/features/desktop/UsagePricingCoveragePanel.vue'
 import UsageModeEvidence from '@/features/desktop/UsageModeEvidence.vue'
 import UsageEfficiencyBand from '@/features/desktop/UsageEfficiencyBand.vue'
-import { usageColors, usageCoverageColors, usageChartStyle, usageModelColor, usageToolColor, usageModeColor, usagePercentLabel, usageIntensityColors } from '@/features/desktop/usageChartPalette'
+import { usageColors, usageCoverageColors, usageChartStyle, usageModelColor, usageToolColor, usageModeColor, usagePercentLabel } from '@/features/desktop/usageChartPalette'
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import '@/styles/console-theme.css'
 import { isDesktopRuntime } from '@/api/url'
-import { accountSubscriptionUnavailable, getUsageMonitorAccounts, type AccountUsageReport } from '@/api/usageAccounts'
+import { getUsageMonitorAccounts, type AccountUsageReport } from '@/api/usageAccounts'
 import { getModelCatalogStatus, refreshModelCatalog, quoteModelCatalogBatch, type ModelCatalogStatus } from '@/api/modelCatalog'
 import {
   getUsageMonitorSnapshot, getUsageMonitorAnalysis, getUsageMonitorSession, monitorTotalCost, monitorToken,
@@ -44,17 +60,36 @@ const loadedAnalysisQuery = ref<MonitorAnalysisQuery | null>(null)
 const detail = ref<MonitorSessionDetail | null>(null)
 const tool = ref<string | null>(null)
 const model = ref<string | null>(null)
-const range = ref<'today' | '7d' | '30d' | 'all'>('today')
+const route = useRoute()
+const tab = ref<'overview' | 'analysis' | 'sessions' | 'sources' | 'costs'>(route?.query?.view === 'costs' ? 'costs' : 'overview')
+const callScope = ref<'all' | 'api'>('all')
+const billingScope = computed(() => callScope.value === 'api' ? 'api' as const : undefined)
+const billingScopes = computed(() => [
+  { id: 'all', label: t('usageMonitor.callScope.all') },
+  { id: 'api', label: 'API' },
+] as const)
+const range = ref<'today' | '7d' | '30d' | 'all' | 'month' | 'custom'>(route?.query?.view==='costs'?'month':'today')
 const anchor = ref(Date.now())
-const ranges = computed(() => [{ id: 'today', label: t('usageMonitor.text.today') }, { id: '7d', label: t('usageMonitor.text.last7Days') }, { id: '30d', label: t('usageMonitor.text.last30Days') }, { id: 'all', label: t('usageMonitor.text.all') }] as const)
-const windowRange = computed(() => {
-  const endMs = anchor.value
+const dateInput=(value:number)=>{const day=new Date(value);return `${day.getFullYear()}-${String(day.getMonth()+1).padStart(2,'0')}-${String(day.getDate()).padStart(2,'0')}`}
+const initialMonth=new Date(new Date().getFullYear(),new Date().getMonth(),1).getTime()
+const customStart=ref(dateInput(initialMonth)),customEnd=ref(dateInput(Date.now())),customError=ref('')
+const customWindow=ref({startMs:initialMonth,endMs:Date.now()})
+function applyCustomRange(){
+  const startMs=new Date(customStart.value+'T00:00:00').getTime(),finish=new Date(customEnd.value+'T00:00:00');finish.setDate(finish.getDate()+1)
+  const endMs=Math.min(finish.getTime(),Date.now())
+  if(!Number.isFinite(startMs)||!Number.isFinite(endMs)||startMs>=endMs){customError.value=t('usageMonitor.costs.invalidDates');return}
+  customError.value='';customWindow.value={startMs,endMs};anchor.value=Date.now();offset.value=0;resetDetailSelection()
+}
+const ranges = computed(() => [{ id: 'today', label: t('usageMonitor.text.today') }, { id: '7d', label: t('usageMonitor.text.last7Days') }, { id: '30d', label: t('usageMonitor.text.last30Days') }, { id: 'all', label: t('usageMonitor.text.all') },{id:'month',label:t('desktop.localCost.thisMonth')},{id:'custom',label:t('usageMonitor.costs.customDates')}] as const)
+function periodAt(endMs:number) {
+  if(range.value==='custom')return customWindow.value
   const day = new Date(endMs)
   const startMs = range.value === 'all' ? null : range.value === 'today'
     ? new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime()
-    : endMs - (range.value === '7d' ? 7 : 30) * 86400000
+    : range.value==='month'?new Date(day.getFullYear(),day.getMonth(),1).getTime():endMs - (range.value === '7d' ? 7 : 30) * 86400000
   return { startMs, endMs }
-})
+}
+const windowRange = computed(() => periodAt(anchor.value))
 const offset = ref(0)
 const selected = ref<string | null>(null)
 const detailAll = ref(false)
@@ -70,9 +105,10 @@ const pricingReasonFilter = ref<string | null>(null)
 const requestUnpricedOnly = ref(false)
 const following = ref(true)
 const historyFilters = computed(() => ({ search: search.value, status: sessionStatus.value, unpricedOnly: unpricedOnly.value, pricingReason: pricingReasonFilter.value }))
-const analysisQuery = computed(() => ({ tool: tool.value, ...windowRange.value, model: model.value, ...historyFilters.value, offset: offset.value, limit: MONITOR_PAGE_SIZE }))
+const analysisQuery = computed(() => ({ tool: tool.value, ...windowRange.value, model: model.value, ...historyFilters.value, ...(billingScope.value ? {billingScope:billingScope.value} : {}), offset: offset.value, limit: MONITOR_PAGE_SIZE }))
 const detailQuery = computed(() => ({ key: selected.value, offset: requestOffset.value, unpricedOnly: requestUnpricedOnly.value, filters: {
   includeDescendants: includeDescendants.value,
+  ...(billingScope.value ? {billingScope:billingScope.value} : {}),
   ...(detailAll.value
     ? { startMs: null, model: null, turnId: selectedTurn.value, pricingReason: null }
     : { ...windowRange.value, model: model.value, turnId: selectedTurn.value, pricingReason: pricingReasonFilter.value }),
@@ -110,6 +146,41 @@ function loadHiddenQuotaAccounts(): string[] {
 }
 const hiddenQuotaAccounts = ref(loadHiddenQuotaAccounts())
 const explicitQuotaAccountKey = ref<string | null>(null)
+const costPage = ref<'accounts' | 'account' | 'records' | 'channels' | 'api'>('accounts')
+const costAccountId = ref(''), accountListReturn = ref(false)
+const costSourceKey = ref('all')
+watch(costAccountId, () => { costSourceKey.value = 'all' })
+const costEvents = ref<InstanceType<typeof CostEventsPanel> | null>(null)
+let accountListScroll = 0, accountListTrigger: HTMLElement | null = null
+let accountListViewport: Element | null = null
+const costPeriodKey = computed(() => `${range.value}:${range.value === 'custom' ? customWindow.value.startMs + ':' + customWindow.value.endMs : ''}`)
+const costsEnabled = computed(() => desktop && tab.value !== 'sessions')
+const { data: costData, rows: costRows, error: costError, busy: costBusy, saving: costSaving, reload: reloadCosts, save: saveCostSettings, upstreamErrors: upstreamReadErrors } = useMonitorCosts(() => periodAt(Date.now()), costPeriodKey, costsEnabled)
+const costAccountChoices = computed(() => costRows.value.filter(row => row.id !== 'unassigned').map(row => ({ id: row.id, name: row.name })))
+const selectedAccountCost = computed(() => costRows.value.find(row => row.id === selectedQuotaAccountKey.value))
+const inspectedAccount = computed(() => costRows.value.find(row => row.id === costAccountId.value))
+const accountLiveEnabled = computed(() => tab.value === 'costs' && costPage.value === 'account' && !!inspectedAccount.value?.tool)
+const { report: accountLive, error: accountLiveError } = useLocalCostLive(costAccountId, accountLiveEnabled, costSourceKey)
+async function scrollToCosts() { await nextTick(); document.querySelector('.monitor-navigation')?.scrollIntoView({ block: 'start' }) }
+function openCostAccounts() { tab.value = 'costs'; costPage.value = 'accounts'; accountListReturn.value = false; void scrollToCosts() }
+function openCostChannels() { tab.value = 'costs'; costPage.value = 'channels'; void scrollToCosts() }
+async function openCostRecords(id = '', enter = false) {
+  costAccountId.value = id; tab.value = 'costs'; costPage.value = 'records'
+  await scrollToCosts(); costEvents.value?.selectAccount(id); if (enter) costEvents.value?.openEntry(id)
+}
+async function inspectCostAccount(id: string) {
+  accountListReturn.value = tab.value === 'costs' && costPage.value === 'accounts'
+  if (accountListReturn.value) {
+    accountListViewport = document.querySelector('.app-window--desktop .app-window__content') ?? document.scrollingElement
+    accountListScroll = accountListViewport?.scrollTop ?? 0
+    accountListTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  }
+  costAccountId.value = id; tab.value = 'costs'; costPage.value = 'account'
+  await nextTick(); document.querySelector('.monitor-finance-page')?.scrollIntoView({ block: 'start' })
+}
+async function backToCostAccounts() { costPage.value = 'accounts'; await nextTick(); if (accountListViewport) accountListViewport.scrollTop = accountListScroll; accountListTrigger?.focus({ preventScroll: true }) }
+function openApiPrices() { accountListReturn.value = false; tab.value = 'costs'; costPage.value = 'api'; void scrollToCosts() }
+function costsChanged() { void reloadCosts(); void refreshSummary(); void refreshWindow() }
 function saveHiddenQuotaAccounts(keys: string[]) {
   hiddenQuotaAccounts.value = keys
   try {
@@ -123,12 +194,11 @@ const detailSection = ref<HTMLElement | null>(null)
 const selectedTrigger = ref<HTMLElement | null>(null)
 const requestSection = ref<HTMLElement | null>(null)
 const requestTrigger = ref<HTMLElement | null>(null)
-const tab = ref<'overview' | 'analysis' | 'sessions' | 'sources'>('overview')
-const tabs = computed(() => [{ id: 'overview', label: t('usageMonitor.text.liveOverview') }, { id: 'analysis', label: t('usageMonitor.text.usageAnalysis') }, { id: 'sessions', label: t('usageMonitor.text.sessionDetails') }, { id: 'sources', label: t('usageMonitor.text.collectionPricing') }] as const)
+const tabs = computed(() => [{ id: 'overview', label: t('usageMonitor.text.liveOverview') }, { id: 'analysis', label: t('usageMonitor.text.usageAnalysis') }, { id: 'sessions', label: t('usageMonitor.text.sessionDetails') }, { id: 'sources', label: t('usageMonitor.text.collectionPricing') }, { id: 'costs', label: t('usageMonitor.inlineCosts.tab') }] as const)
 const historyReady = computed(() => {
   const loaded = loadedAnalysisQuery.value
   const current = analysisQuery.value
-  return !!analysis.value && !!loaded && loaded.tool === current.tool && loaded.model === current.model && loaded.search === current.search && loaded.status === current.status && loaded.unpricedOnly === current.unpricedOnly && loaded.pricingReason === current.pricingReason && loaded.offset === current.offset
+  return !!analysis.value && !!loaded && loaded.tool === current.tool && loaded.model === current.model && loaded.billingScope === current.billingScope && loaded.search === current.search && loaded.status === current.status && loaded.unpricedOnly === current.unpricedOnly && loaded.pricingReason === current.pricingReason && loaded.offset === current.offset
 })
 const historyCount = computed(() => historyReady.value ? analysis.value?.sessionCount : undefined)
 const visibleSessions = computed(() => tab.value === 'overview' ? snapshot.value?.activeSessions ?? [] : historyReady.value ? analysis.value?.sessions ?? [] : [])
@@ -156,8 +226,6 @@ const sessionTree = computed(() => {
 function toggleSession(key: string) { const next = new Set(collapsedSessions.value); next.has(key) ? next.delete(key) : next.add(key); collapsedSessions.value = next }
 const periodLabel = computed(() => ranges.value.find(item => item.id === range.value)?.label || t('usageMonitor.text.currentPeriod'))
 const statusCounts = computed(() => tool.value ? snapshot.value?.toolStatusCounts?.[tool.value] : snapshot.value?.statusCounts)
-const analysisMetric = ref<'input' | 'output' | 'cache' | 'value'>('output')
-const trendCurrency = ref('USD')
 const modelRanking = computed(() => (analysis.value?.byModel ?? []).slice().sort((a, b) => b.totals.totalTokens - a.totals.totalTokens))
 const rankingMaximum = computed(() => Math.max(1, ...modelRanking.value.map(row => row.totals.totalTokens)))
 function tokenUnit(maximum: number) { return maximum >= 1_000_000 ? { divisor: 1_000_000, label: t('usageMonitor.text.millionTokens') } : maximum >= 1000 ? { divisor: 1000, label: t('usageMonitor.text.thousandTokens') } : { divisor: 1, label: 'Token' } }
@@ -200,7 +268,10 @@ const modeEvidence = computed(() => [
 ].map(mode => ({ ...mode, count: row.counts?.[mode.key] ?? 0, percent: periodTotals.value?.requestCount ? (row.counts?.[mode.key] ?? 0) / periodTotals.value.requestCount * 100 : 0 })) })))
 function sessionWindow(key: string, seconds: number) { return snapshot.value?.live?.bySession.find(row => row.sessionKey === key)?.windows.find(row => row.seconds === seconds) }
 function sessionRate(key: string, seconds: number): string {
-  return snapshot.value?.collectedAtMs ? displayLiveRate(sessionWindow(key, seconds)).text : t('usageMonitor.text.loading')
+  if (!snapshot.value?.collectedAtMs) return t('usageMonitor.text.loading')
+  const rate = displayLiveRate(sessionWindow(key, seconds))
+  const running = snapshot.value.activeSessions?.some(session => session.key === key && ['active', 'running'].includes(session.status))
+  return running && !(rate.value != null && rate.value > 0) ? t('usageMonitor.text.runningWaitingForUsage') : rate.text
 }
 function sessionRatePartial(key: string): boolean {
   return [60, 300].some(seconds => {
@@ -208,10 +279,12 @@ function sessionRatePartial(key: string): boolean {
     return window != null && displayLiveRate(window).partial
   })
 }
+const liveRateSeconds = ref<60 | 300>(60)
 function toolRate(id: string): string {
   if (!snapshot.value?.collectedAtMs) return t('usageMonitor.text.loading')
-  const rate = displayLiveRate(snapshot.value.live?.byTool.find(row => row.tool === id)?.windows.find(row => row.seconds === 60), 1)
-  return rate.value != null && rate.value > 0 ? t('usageMonitor.text.s', { value0: rate.text, value1: rate.partial ? t('usageMonitor.text.partialSampling') : '' }) : rate.text
+  const samples = snapshot.value.live?.currentRates?.filter(row => row.tool === id) ?? []
+  if (samples.length) return t('usageMonitor.text.tokensS', { value0: samples.reduce((sum,row) => sum + row.outputTokensPerSecond,0).toFixed(1) })
+  return t((snapshot.value.toolStatusCounts?.[id]?.running ?? 0) > 0 ? 'usageMonitor.text.runningWaitingForUsage' : 'usageMonitor.speed.waiting')
 }
 function toolTotals(id: string) { return (analysis.value?.toolOverview ?? analysis.value?.byTool)?.find(row => row.tool === id)?.totals }
 function conciseCost(totals?: MonitorTotals): string {
@@ -227,12 +300,8 @@ function costBasis(totals?: MonitorTotals): string {
   const result = monitorAutomaticPriceSummary(totals)
   return t('usageMonitor.text.serviceResponseClientRecords', { value0: result.responseModeRequests, value1: result.requestedModeRequests }) + (result.unknownRequests ? t('usageMonitor.text.unidentifiedModesReferenceShownSeparately', { value0: result.unknownRequests }) : '') + (result.identifiedUnquotedRequests ? t('usageMonitor.text.missingUnitPrices', { value0: result.identifiedUnquotedRequests }) : '')
 }
-function coverageLabel(totals: MonitorTotals): string {
-  if (!totals.requestCount) return t('usageMonitor.text.noRequestsYet')
-  return t('usageMonitor.text.estimated', { value0: totals.requestCount - monitorUnquotedRequests(totals), value1: totals.requestCount })
-}
 function modeCount(mode: string): string | number { return periodTotals.value?.automaticPriceSummary ? monitorAutomaticPriceSummary(periodTotals.value).modes.find(row => row.mode === mode)?.requestCount ?? 0 : t('usageMonitor.text.unknown') }
-function platform(id: string): 'openai' | 'anthropic' | 'antigravity' | 'deepseek' { return id === 'codex' ? 'openai' : id === 'claude' ? 'anthropic' : id === 'deepseek-harness' ? 'deepseek' : 'antigravity' }
+function platform(id: string): 'openai' | 'anthropic' | 'antigravity' | 'deepseek' | undefined { return id==='api'?undefined:id === 'codex' ? 'openai' : id === 'claude' ? 'anthropic' : id === 'deepseek-harness' ? 'deepseek' : 'antigravity' }
 function modeLabel(session: MonitorSession): string {
   const mode = session.recentRequest ? monitorAutomaticMode(session.recentRequest) : null
   return mode?.mode ? `${monitorMode(mode.mode)} · ${mode.basis === 'response_reported' ? t('usageMonitor.text.serviceResponse') : mode.basis === 'runtime_mode' ? t('usageMonitor.text.runtimeLogs') : t('usageMonitor.text.clientSettings')}` : t('usageMonitor.text.unidentifiedMode')
@@ -259,8 +328,6 @@ const pageRequests = computed(() => detailPageReady.value ? detail.value?.reques
 const request = computed(() => pageRequests.value.find(item => item.id === selectedRequest.value))
 const automaticRequest = computed(() => request.value ? monitorRequestAutomaticPrice(request.value) : null)
 const periodTotals = computed(() => analysis.value?.totals)
-const unlocatedTotals = computed(() => analysis.value?.unlocatedTotals)
-const unassignedWeek = computed(() => tool.value ? accountUsage.value?.unassignedByTool?.[tool.value] : accountUsage.value?.unassignedWeek)
 const weeklyUnlocated = computed(() => tool.value ? weekly.value?.byTool.find(row => row.tool === tool.value)?.unlocatedTotals ?? weekly.value?.unlocatedByTool?.[tool.value] : weekly.value?.unlocatedTotals)
 const detailTotals = computed(() => detail.value?.filteredTotals ?? detail.value?.session.totals)
 const detailMembers = computed(() => detail.value?.members ?? (detail.value ? [detail.value.session] : []))
@@ -283,15 +350,18 @@ const weeklyScope = computed(() => tool.value ? weekly.value?.byTool.find(row =>
 const weeklyReference = computed(() => weeklyScope.value?.reference ?? [])
 const weeklyForecast = computed(() => exhaustedQuotas.value.length || restrictedMainQuotas.value.length ? [] : weeklyScope.value?.forecast ?? [])
 const visibleQuotas = computed(() => (quotas.value?.quotas ?? [])
-  .filter(item => !tool.value || item.tool === tool.value)
+  .filter(item => matchesAccountTool(item))
   .sort((a, b) => Number(a.stale || a.expired) - Number(b.stale || b.expired)
     || ['codex', 'claude', 'antigravity', 'deepseek-harness'].indexOf(a.tool) - ['codex', 'claude', 'antigravity', 'deepseek-harness'].indexOf(b.tool)
     || (b.observedAtMs ?? 0) - (a.observedAtMs ?? 0)))
 const currentQuotas = computed(() => visibleQuotas.value.filter(item => !quotaIsHistorical(item)))
 const accountUsageByKey = computed(() => new Map((accountUsage.value?.accounts ?? [])
   .map(account => [account.accountKey, account])))
+function matchesAccountTool(account:{tool:string;accountKey?:string;clientTools?:string[]}):boolean{
+  return !tool.value || account.tool===tool.value || (account.clientTools ?? (account.accountKey ? accountUsageByKey.value.get(account.accountKey)?.clientTools : undefined))?.includes(tool.value)===true
+}
 const currentForecastAccount = computed(() => accountUsage.value?.accounts.find(account =>
-  account.accountKey === accountUsage.value?.currentAccountKey && (!tool.value || account.tool === tool.value)))
+  account.accountKey === selectedQuotaAccountKey.value && matchesAccountTool(account)))
 function isAccountWeeklyQuota(quota: MonitorQuota): boolean {
   return quota.windowMinutes === 10080 && (quota.windowSeconds == null || quota.windowSeconds === 604800)
     && ((quota.tool === 'codex' && quota.limitId === 'codex')
@@ -299,14 +369,15 @@ function isAccountWeeklyQuota(quota: MonitorQuota): boolean {
 }
 const forecastQuota = computed(() => {
   const account = currentForecastAccount.value
-  const cycle = account?.currentCycle
+  const cycle = account?.currentCycle ?? account?.quotaCycles[0]
   return account && cycle ? visibleQuotas.value.find(item => item.accountKey === account.accountKey && item.tool === account.tool && item.attribution === 'account'
     && isAccountWeeklyQuota(item) && item.observedAtMs != null && item.resetsAtMs != null && item.resetsAtMs > item.observedAtMs
     && item.observedAtMs >= cycle.startMs && item.resetsAtMs - 7 * 86400000 <= cycle.quotaObservedAtMs) : undefined
 })
 const liveAccountQuotaPrediction = computed(() => {
   const account = currentForecastAccount.value
-  const cycle = account?.currentCycle
+  const cycle = account?.currentCycle ?? account?.quotaCycles[0]
+  const finalized = cycle?.usedPercent === 100 && cycle.exhaustedAtMs != null && !cycle.exhaustionUnknown
   const result = {
     label: account ? `${toolName(account.tool)} · ${quotaAccountLabel(account)}` : '',
     cycle,
@@ -316,48 +387,33 @@ const liveAccountQuotaPrediction = computed(() => {
     coveredRequests: 0,
     requestCount: 0,
     message: '',
+    finalized,
   }
   if (accountUsageError.value || quotaError.value) { result.message = t('usageMonitor.text.accountQuotaUpdateFailedWaitingForNewData'); return result }
   if (!account) { result.message = t('usageMonitor.text.currentAccountNotYetConfirmed'); return result }
-  if (account.billingAccountVerified !== true) { result.message = t('usageMonitor.text.billingAccountUnconfirmed'); return result }
-  if (accountSubscriptionUnavailable(account.subscription)) { result.message = t('usageMonitor.text.subscriptionEvidenceUnavailable'); return result }
-  if (!cycle?.current || cycle.resetAtMs <= Math.max(Date.now(), accountUsage.value?.collectedAtMs ?? 0)) { result.message = t('usageMonitor.text.currentWeeklyQuotaCycleNotYetConfirmed'); return result }
+  if (account.billingAccountVerified === false) { result.message = t('usageMonitor.text.billingAccountUnconfirmed'); return result }
+  if (!cycle || (!finalized && (!cycle.current || cycle.resetAtMs <= Math.max(Date.now(), accountUsage.value?.collectedAtMs ?? 0)))) { result.message = t('usageMonitor.text.currentWeeklyQuotaCycleNotYetConfirmed'); return result }
   const quota = forecastQuota.value
-  if (quota && quota.billingAccountVerified !== true) { result.message = t('usageMonitor.text.billingAccountUnconfirmed'); return result }
-  if (restrictedMainQuotas.value.some(item => item.accountKey === account.accountKey && item.tool === account.tool)) { result.message = t('usageMonitor.text.officialQuotaRestricted'); return result }
-  if (!quota || quotaIsHistorical(quota)) { result.message = t('usageMonitor.text.weeklyQuotaAwaitingUpdate'); return result }
+  if (quota?.billingAccountVerified === false) { result.message = t('usageMonitor.text.billingAccountUnconfirmed'); return result }
+  if (!finalized && (!quota || quotaIsHistorical(quota))) { result.message = t('usageMonitor.text.weeklyQuotaAwaitingUpdate'); return result }
   const used = cycle.usedPercent
-  if (used == null || used <= 0) { result.message = t('usageMonitor.text.waitingForUsageRecordsInThisCycle'); return result }
-  if (used >= 100 || cycle.exhaustionUnknown || cycle.exhaustedAtMs != null) { result.message = t('usageMonitor.text.cycleQuotaExhaustedExtraUsageCannotDetermineTheTotal'); return result }
-  if (quota.observedAtMs !== cycle.quotaObservedAtMs || quota.usedPercent !== used) { result.message = t('usageMonitor.text.synchronizingQuotaReadings'); return result }
-  const lastConfirmed = quotaSnapshots.value.find(saved => saved.accountKey === account.accountKey && saved.tool === account.tool)
-  if (lastConfirmed && quota.observedAtMs! < lastConfirmed.quotaObservedAtMs) { result.message = t('usageMonitor.text.synchronizingQuotaReadings'); return result }
-  const snapshot = cycle.quotaSnapshot
-  const quotaCutoffMs = cycle.quotaObservedAtMs + 1
-  if (!snapshot || snapshot.startMs !== cycle.startMs || snapshot.endMs !== cycle.endMs
-    || cycle.observedEndMs < quotaCutoffMs || snapshot.observedEndMs !== quotaCutoffMs) {
-    result.message = t('usageMonitor.text.synchronizingQuotaReadings'); return result
-  }
-  const subscription = snapshot.billingTotals?.subscription
-  if (!subscription?.requestCount) { result.message = t('usageMonitor.text.subscriptionUsageAwaitingEvidence'); return result }
-  const summary = monitorAutomaticPriceSummary(subscription)
-  result.quotes = summary.currencies.filter(row => row.identifiedSubtotal != null).map(row => {
-    const observedSubtotal = row.identifiedSubtotal!
-    const projectedSubtotal = observedSubtotal * 100 / used
-    return { currency: row.currency, observedSubtotal, projectedSubtotal, additionalSubtotal: projectedSubtotal - observedSubtotal }
-  })
-  if (!result.quotes.length) { result.message = t('usageMonitor.text.noIdentifiedBillableUsageYet'); return result }
-  result.context = { accountLabel: result.label, usedPercent: used }
-  result.partial = !summary.complete || subscription.requestCount !== snapshot.totals.requestCount
-  result.coveredRequests = summary.coveredRequests
-  result.requestCount = snapshot.totals.requestCount
+  const projected = projectAccountQuotaCycle(cycle, account.tool)
+  if (projected.reason) { result.message = t('usageMonitor.text.' + projected.reason); return result }
+  if (!finalized && (quota!.observedAtMs !== cycle.quotaObservedAtMs || quota!.usedPercent !== used)) { result.message = t('usageMonitor.text.synchronizingQuotaReadings'); return result }
+  result.quotes = projected.quotes
+  result.context = { accountLabel: result.label, usedPercent: used! }
+  result.partial = projected.partial
+  result.coveredRequests = projected.coveredRequests
+  result.requestCount = projected.requestCount
+  if (cycle.quotaSnapshot?.sourceCoverageIncomplete) result.message = t('usageMonitor.routes.partialUsage')
+  else if (finalized) result.message = t('usageMonitor.text.exhaustedQuotaAmountRecorded')
   return result
 })
 function captureQuotaSnapshot() {
   const live = liveAccountQuotaPrediction.value
   const account = currentForecastAccount.value
   const quota = forecastQuota.value
-  if (!live.context || !live.cycle || !account || quota?.observedAtMs == null) return
+  if (!live.context || !live.cycle || live.finalized || !account || quota?.observedAtMs == null) return
   const previous = quotaSnapshots.value.find(saved => saved.accountKey === account.accountKey)
   if (previous && quota.observedAtMs < previous.quotaObservedAtMs) return
   if (previous && quota.observedAtMs === previous.quotaObservedAtMs
@@ -387,23 +443,31 @@ function captureQuotaSnapshot() {
 }
 const accountQuotaPrediction = computed(() => {
   const live = liveAccountQuotaPrediction.value
-  // A previously valid pair cannot establish that its request/account evidence
-  // is still valid. Persisted amounts never substitute for current proof.
-  if (live.message || !live.context || !live.quotes.length) return { ...live, updatedAtMs: undefined }
   const account = currentForecastAccount.value
-  const cycle = account?.currentCycle
+  const cycle = account?.currentCycle ?? account?.quotaCycles[0]
+  if (live.finalized && live.context) return { ...live, updatedAtMs: cycle?.exhaustedAtMs ?? undefined }
   const quota = forecastQuota.value
   const saved = quotaSnapshots.value.find(row => row.accountKey === account?.accountKey && row.tool === account?.tool
-    && row.cycleStartMs === cycle?.startMs && row.cycleResetAtMs === cycle?.resetAtMs
-    && row.quotaObservedAtMs === quota?.observedAtMs && row.usedPercent === live.context?.usedPercent
-    && row.coveredRequests === live.coveredRequests && row.requestCount === live.requestCount
-    && row.partial === live.partial && row.quotes.length === live.quotes.length
-    && row.quotes.every((quote, index) => {
-      const current = live.quotes[index]
-      return current?.currency === quote.currency && current.observedSubtotal === quote.observedSubtotal
-        && current.additionalSubtotal === quote.additionalSubtotal && current.projectedSubtotal === quote.projectedSubtotal
-    }))
-  return { ...live, updatedAtMs: saved?.updatedAtMs }
+    && row.cycleStartMs === cycle?.startMs && row.cycleResetAtMs === cycle?.resetAtMs)
+  const used = cycle?.usedPercent
+  if (!saved || account?.billingAccountVerified === false || quota?.billingAccountVerified === false
+    || (account?.tool === 'codex' && cycle?.quotaSnapshot?.billingTotals && !cycle.quotaSnapshot.billingTotals.subscription?.requestCount)
+    || !cycle?.current || cycle.resetAtMs <= Math.max(Date.now(), accountUsage.value?.collectedAtMs ?? 0)
+    || used == null || !Number.isFinite(used) || used <= 0 || used >= 100 || cycle.exhaustionUnknown || cycle.exhaustedAtMs != null || !quota || quota.expired
+    || quota.usedPercent == null || !Number.isFinite(quota.usedPercent) || quota.usedPercent <= 0 || quota.usedPercent >= 100) {
+    return { ...live, updatedAtMs: undefined }
+  }
+  const waiting = !live.context || !live.quotes.length || quota.observedAtMs !== saved.quotaObservedAtMs || used !== saved.usedPercent
+    || live.coveredRequests !== saved.coveredRequests || live.requestCount !== saved.requestCount
+    || live.partial !== saved.partial || live.quotes.length !== saved.quotes.length
+    || live.quotes.some((quote, i) => quote.currency !== saved.quotes[i]?.currency || quote.observedSubtotal !== saved.quotes[i]?.observedSubtotal
+      || quote.additionalSubtotal !== saved.quotes[i]?.additionalSubtotal || quote.projectedSubtotal !== saved.quotes[i]?.projectedSubtotal)
+  return {
+    label: live.label, cycle: { startMs: saved.cycleStartMs, resetAtMs: saved.cycleResetAtMs },
+    context: { accountLabel: live.label, usedPercent: saved.usedPercent }, quotes: saved.quotes,
+    partial: saved.partial, coveredRequests: saved.coveredRequests, requestCount: saved.requestCount, finalized: false,
+    message: waiting ? t('usageMonitor.text.quotaAwaitingUpdateLastValidEstimateShown') : live.message, updatedAtMs: saved.updatedAtMs,
+  }
 })
 
 const displayQuotas = computed(() => {
@@ -432,9 +496,10 @@ const knownQuotaAccounts = computed(() => {
     if (!previous || (row.observedAtMs ?? 0) > (previous.observedAtMs ?? 0)) latest.set(row.accountKey, row)
   }
   const confirmedWithoutQuota = (accountUsage.value?.accounts ?? []).filter(account =>
-    ((account.verifiedWeekRequests ?? 0) > 0 || (account.verifiedHistory?.totals.requestCount ?? 0) > 0 || [account.creatorReference?.calendarWeek, account.creatorReference?.currentCycle, account.creatorReference?.previousCycle, account.creatorReference?.subscriptionMonth].some(period => (period?.totals.requestCount ?? 0) > 0))
-    && !latest.has(account.accountKey) && (!tool.value || account.tool === tool.value))
-  return [...latest.values(), ...confirmedWithoutQuota]
+    ((account.verifiedWeekRequests ?? 0) > 0 || (account.verifiedHistory?.totals.requestCount ?? 0) > 0)
+    && !latest.has(account.accountKey) && matchesAccountTool(account))
+  const api = accountUsage.value?.apiUsage || explicitQuotaAccountKey.value === 'api:all' ? [{accountKey:'api:all',accountLabel:'API',tool:'api',source:'api_usage',billingAccountVerified:true}] : []
+  return [...latest.values(), ...confirmedWithoutQuota, ...api]
 })
 const quotaAccountSuffixes = computed(() => accountLabelSuffixes(knownQuotaAccounts.value.map(account => ({
   accountKey: account.accountKey, tool: account.tool, label: quotaAccountBaseLabel(account),
@@ -445,12 +510,15 @@ const hiddenKnownQuotaAccounts = computed(() => knownQuotaAccounts.value.filter(
   account.accountKey !== accountUsage.value?.currentAccountKey && hiddenQuotaAccounts.value.includes(account.accountKey)))
 const selectedQuotaAccount = computed(() => quotaAccountChoices.value.find(account => account.accountKey === explicitQuotaAccountKey.value)
   ?? quotaAccountChoices.value.find(account => account.accountKey === accountUsage.value?.currentAccountKey)
+  ?? quotaAccountChoices.value.find(account => account.accountKey === 'api:all')
   ?? quotaAccountChoices.value[0])
 const selectedQuotaAccountKey = computed({
   get: () => selectedQuotaAccount.value?.accountKey ?? '',
   set: (key: string) => { explicitQuotaAccountKey.value = key },
 })
 const selectedAccountUsage = computed(() => accountUsageByKey.value.get(selectedQuotaAccountKey.value))
+const apiAccountSelected = computed(() => selectedQuotaAccountKey.value === 'api:all' || selectedAccountUsage.value?.billingKind === 'api')
+const selectedApiUsage = computed(() => selectedQuotaAccountKey.value === 'api:all' ? accountUsage.value?.apiUsage : selectedAccountUsage.value?.billingKind === 'api' ? { week:selectedAccountUsage.value.calendarWeek,month:selectedAccountUsage.value.calendarMonth ?? null } : null)
 function hideSelectedQuotaAccount() {
   const selected = selectedQuotaAccount.value
   if (!selected || selected.accountKey === accountUsage.value?.currentAccountKey) return
@@ -472,7 +540,6 @@ const accountUsageQuotaIds = computed(() => {
   }
   return new Set([...chosen.values()].map(quota => quota.id))
 })
-const selectedAccountHasUsageCard = computed(() => visibleQuotas.value.some(quota => quota.accountKey === selectedQuotaAccountKey.value && accountUsageQuotaIds.value.has(quota.id)))
 const creditAccounts = computed(() => {
   const latest = new Map<string, MonitorQuota>()
   for (const row of visibleQuotas.value.filter(item => item.tool === 'codex' && item.limitId === 'codex' && item.attribution === 'account')) {
@@ -542,18 +609,17 @@ const creditGroups = computed(() => [
   { id: 'current', label: t('usageMonitor.text.accountCredits'), items: creditAccounts.value.filter(account => hasCreditObservation(account) && account.accountKey === selectedQuotaAccountKey.value && (!creditIsHistorical(account) || displayAccountKeys.value.has(account.accountKey))) },
   { id: 'history', label: t('usageMonitor.text.historicalCreditsNotTheCurrentAvailableBalance'), items: creditAccounts.value.filter(account => hasCreditObservation(account) && account.accountKey === selectedQuotaAccountKey.value && creditIsHistorical(account) && !displayAccountKeys.value.has(account.accountKey)) },
 ].filter(group => group.items.length))
-const quotaSources = computed(() => (quotas.value?.sources ?? []).filter(item => !tool.value || item.tool === tool.value))
+const quotaSources = computed(() => (quotas.value?.sources ?? []).filter(item => !tool.value || item.tool === tool.value || visibleQuotas.value.some(quota=>quota.tool===item.tool)))
 const quotaSourceWarnings = computed(() => quotaSources.value.filter(source => source.error || source.status !== 'available' || source.coverage?.scopesUnreported).length)
 const exhaustedQuotas = computed(() => {
   const blockers: MonitorQuota[] = []
-  for (const source of tools.value.filter(item => item.id && (!tool.value || item.id === tool.value))) {
-    const rows = visibleQuotas.value.filter(item => item.tool === source.id && item.attribution === 'account'
-      && (item.tool !== 'codex' || item.limitId === 'codex'))
+  for (const source of tools.value.filter(item => item.id && (!tool.value || item.id === tool.value || visibleQuotas.value.some(quota=>quota.tool===item.id)))) {
+    const rows = visibleQuotas.value.filter(item => item.tool === source.id && item.attribution === 'account')
       .slice().sort((a, b) => (b.observedAtMs ?? 0) - (a.observedAtMs ?? 0))
     const accounts = new Set(currentQuotas.value.filter(item => item.tool === source.id).map(item => item.accountKey))
     if (!accounts.size && rows[0]) accounts.add(rows[0].accountKey)
     // An expired snapshot is not evidence that an exhausted allowance was replenished.
-    blockers.push(...rows.filter(item => accounts.has(item.accountKey) && item.remainingPercent === 0
+    blockers.push(...rows.filter(item => (item.tool !== 'codex' || item.limitId === 'codex') && accounts.has(item.accountKey) && item.remainingPercent === 0
       && !rows.some(next => next.accountKey === item.accountKey && next.limitId === item.limitId
         && next.windowMinutes === item.windowMinutes && next.windowSeconds === item.windowSeconds && !quotaIsHistorical(next)
         && (next.observedAtMs ?? 0) > (item.observedAtMs ?? 0)
@@ -575,30 +641,7 @@ function summaryMoney(amount: number | null, currency: string, forecast = false)
 }
 function currencyName(currency: string): string { return ({ USD: t('usageMonitor.text.usd'), CNY: t('usageMonitor.text.cny'), UNKNOWN: t('usageMonitor.text.currencyNotConfirmed') } as Record<string, string>)[currency] || currency }
 function forecastMethod(method: string): string { return ({ week_average: t('usageMonitor.text.basedOnThisWeekSUsagePace'), trailing_7d: t('usageMonitor.text.basedOnTheLast7Days'), weekday_hour: t('usageMonitor.text.basedOnHistoricalWeekdayTimeSlots') } as Record<string, string>)[method] || method }
-const tools = computed(() => [{ id: null, label: t('usageMonitor.text.allTools') }, { id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }, { id: 'antigravity', label: 'Antigravity' }, { id: 'deepseek-harness', label: 'DeepSeek Harness' }])
-const trendCurrencies = computed(() => [...new Set((analysis.value?.timeline ?? []).flatMap(item => monitorAutomaticPriceSummary(item.totals).currencies.filter(row => row.identifiedSubtotal != null).map(row => row.currency)))].sort())
-const selectedTrendCurrency = computed(() => trendCurrencies.value.includes(trendCurrency.value) ? trendCurrency.value : trendCurrencies.value[0] ?? 'USD')
-const chartLabels = computed(() => analysis.value?.timeline.map(item => {
-  const date = new Date(item.startMs)
-  return analysis.value!.timeline.some(bucket => bucket.endMs - bucket.startMs >= 20 * 3600_000) ? date.toLocaleDateString(usageLocale(), { month: '2-digit', day: '2-digit' }) : date.toLocaleString(usageLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
-}) ?? [])
-const trendValues = computed(() => analysis.value?.timeline.map(item => analysisMetric.value === 'value'
-    ? item.totals.requestCount === 0 ? 0 : monitorAutomaticPriceSummary(item.totals).currencies.find(row => row.currency === selectedTrendCurrency.value)?.identifiedSubtotal ?? null
-    : monitorKnownTokenTotal(item.totals, analysisMetric.value === 'input' ? 'inputTokens' : analysisMetric.value === 'output' ? 'outputTokens' : 'cacheReadTokens')) ?? [])
-const trendPeak = computed(() => Math.max(0, ...trendValues.value.map(value => value ?? 0)))
-const trendPeakIndex = computed(() => trendValues.value.findIndex(value => value != null && value === trendPeak.value))
-const chartSeries = computed(() => [{
-  label: analysisMetric.value === 'value' ? t('usageMonitor.text.referenceValue', { value0: currencyName(selectedTrendCurrency.value) }) : analysisMetric.value === 'input' ? t('usageMonitor.text.inputIncludingCache') : analysisMetric.value === 'output' ? t('usageMonitor.text.output') : t('usageMonitor.text.cacheRead'),
-  color: usageColors[analysisMetric.value],
-  fill: true,
-  colorStops: usageIntensityColors.map((color, index) => ({ color, value: (trendPeak.value > 0 ? trendPeak.value : 1) * index / 2 })),
-  data: trendValues.value,
-}])
-const trendUnit = computed(() => analysisMetric.value === 'value' ? { divisor: 1, label: currencyName(selectedTrendCurrency.value) } : tokenUnit(Math.max(0, ...chartSeries.value[0].data.map(value => value ?? 0))))
-function trendValue(value: number): string {
-  const scaled = value / trendUnit.value.divisor
-  return scaled.toLocaleString(usageLocale(), scaled > 0 && scaled < 0.01 ? { maximumSignificantDigits: 3 } : { maximumFractionDigits: 2 }) + ' ' + trendUnit.value.label
-}
+const tools = computed(() => [{ id: null, label: t('usageMonitor.text.allTools') }, { id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }, { id: 'antigravity', label: 'Antigravity' }, { id: 'deepseek-harness', label: 'DeepSeek Harness' },...(analysis.value?.byTool.some(row=>row.tool==='api')||snapshot.value?.toolStatusCounts?.api?[{id:'api',label:'API'}]:[])])
 const priceModel = ref('')
 const priceMode = ref('standard')
 const priceContext = ref(0)
@@ -635,7 +678,8 @@ let analysisQueued = false
 let detailQueued = false
 
 function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  const message=e instanceof Error ? e.message : String(e)
+  return ['database is locked','database table is locked'].includes(message)?t('usageMonitor.text.syncBusy'):message
 }
 function number(value: number | null | undefined): string { return value == null ? t('usageMonitor.text.unknown') : value.toLocaleString(usageLocale()) }
 function compactNumber(value: number | null | undefined): string { return value == null ? t('usageMonitor.text.unknown') : new Intl.NumberFormat(usageLocale(), { notation: 'compact', maximumFractionDigits: 2 }).format(value) }
@@ -693,7 +737,8 @@ function hasUnconfirmedHistoricalPlan(item: { accountKey?: string; source?: stri
 }
 type QuotaAccountLabel = { accountLabel: string; plan?: string | null; accountKey?: string; source?: string; billingAccountVerified?: boolean }
 function quotaAccountBaseLabel(item: QuotaAccountLabel): string {
-  const label = item.accountLabel.replace(/^Account /, t('usageMonitor.text.account')).replace(/^Unattributed session /, t('usageMonitor.text.sessionWithUnidentifiedAccount'))
+  const name=item.accountKey?costData.value?.report.accountNames?.[item.accountKey]??item.accountLabel:item.accountLabel
+  const label = name.replace(/^Account /, t('usageMonitor.text.account')).replace(/^Unattributed session /, t('usageMonitor.text.sessionWithUnidentifiedAccount'))
   if (hasUnconfirmedHistoricalPlan(item)) return label
   return item.plan ? `${label} · ${item.plan}` : label
 }
@@ -735,18 +780,27 @@ async function refreshSummary() {
   summaryBusy.value = true
   const now = Date.now()
   const week = monitorWeekBounds(now)
-  const [usage, allowance, accounts] = await Promise.allSettled([getUsageMonitorWeekly(week.startMs, now, week.endMs), getUsageMonitorQuotas(), getUsageMonitorAccounts(week.startMs, now)])
+  const scope=billingScope.value
+  const [usage, allowance, accounts] = await Promise.allSettled([scope ? getUsageMonitorWeekly(week.startMs, now, week.endMs,scope) : getUsageMonitorWeekly(week.startMs, now, week.endMs), getUsageMonitorQuotas(), getUsageMonitorAccounts(week.startMs, now)])
   if (!disposed) {
-    if (usage.status === 'fulfilled') { weekly.value = usage.value; weeklyError.value = '' }
-    else { weeklyError.value = errorMessage(usage.reason); if (weekly.value?.startMs !== week.startMs) weekly.value = null }
+    if(scope===billingScope.value){
+      if (usage.status === 'fulfilled') { weekly.value = usage.value; weeklyError.value = '' }
+      else { weeklyError.value = errorMessage(usage.reason); if (weekly.value?.startMs !== week.startMs) weekly.value = null }
+    }
     if (allowance.status === 'fulfilled') { quotas.value = allowance.value; quotaError.value = '' }
     else quotaError.value = errorMessage(allowance.reason)
     if (accounts.status === 'fulfilled') { accountUsage.value = accounts.value; accountUsageError.value = '' }
-    else { accountUsageError.value = errorMessage(accounts.reason); if (accountUsage.value?.weekStartMs !== week.startMs) accountUsage.value = null }
+    else {
+      accountUsageError.value = errorMessage(accounts.reason)
+      if (accountUsage.value?.weekStartMs !== week.startMs) {
+        if (apiAccountSelected.value) explicitQuotaAccountKey.value = 'api:all'
+        accountUsage.value = null
+      }
+    }
     captureQuotaSnapshot()
   }
   summaryBusy.value = false
-  if (!disposed) summaryTimer = setTimeout(refreshSummary, 60_000)
+  if (!disposed) summaryTimer = setTimeout(refreshSummary, scope===billingScope.value ? 60_000 : 0)
 }
 
 
@@ -773,16 +827,18 @@ async function refreshLive() {
   if (liveBusy.value) { liveQueued = true; return }
   liveBusy.value = true
   const source = tool.value
+  const scope=billingScope.value
+  const startedAt = performance.now()
   try {
-    const next = await getUsageMonitorSnapshot(source, 0)
-    if (!disposed && source === tool.value) { snapshot.value = next; error.value = '' }
+    const next = scope ? await getUsageMonitorSnapshot(source, 0,{billingScope:scope}) : await getUsageMonitorSnapshot(source, 0)
+    if (!disposed && source === tool.value && scope===billingScope.value) { snapshot.value = next; error.value = '' }
   } catch (e) {
-    if (!disposed && source === tool.value) error.value = errorMessage(e)
+    if (!disposed && source === tool.value && scope===billingScope.value) error.value = errorMessage(e)
   } finally {
     liveBusy.value = false
     if (!disposed) {
       if (liveQueued) { liveQueued = false; void refreshLive() }
-      else liveTimer = setTimeout(refreshLive, snapshot.value?.refreshMs || 2000)
+      else liveTimer = setTimeout(refreshLive, Math.max(0, (snapshot.value?.refreshMs || 2000) - (performance.now() - startedAt)))
     }
   }
 }
@@ -829,7 +885,13 @@ function refreshWindow() {
   if (anchor.value === now) { void refreshAnalysis(); if (selected.value) void refreshDetail() }
   else anchor.value = now
 }
-function manualRefresh() { void refreshLive(); refreshWindow(); void refreshSummary() }
+function manualRefresh() { void refreshLive(); refreshWindow(); void refreshSummary(); void reloadCosts() }
+function refreshOnResume() {
+  if (document.visibilityState === 'hidden') return
+  void refreshLive()
+  void refreshSummary()
+  if (following.value && offset.value === 0 && requestOffset.value === 0) refreshWindow()
+}
 function pauseFollowing() { following.value = false; clearTimeout(analysisTimer) }
 function toggleFollowing() {
   if (following.value) pauseFollowing()
@@ -883,7 +945,8 @@ function inspectBreakdown(source: string, selectedModel: string | null, byModel:
   pricingReasonFilter.value = null
   tool.value = source
   if (byModel) model.value = selectedModel
-  tab.value = 'sessions'; searchInput.value = ''; search.value = ''; sessionStatus.value = 'all'; unpricedOnly.value = false
+  tab.value = 'sessions'
+  searchInput.value = ''; search.value = ''; sessionStatus.value = 'all'; unpricedOnly.value = false
   offset.value = 0; resetDetailSelection()
 }
 function submitSearch() {
@@ -895,28 +958,48 @@ function submitSearch() {
 function clearSearch() { searchInput.value = ''; submitSearch() }
 function findParent(parentTool: string, parentId: string) {
   pricingReasonFilter.value = null
-  tab.value = 'sessions'; tool.value = parentTool; searchInput.value = parentId; search.value = parentId
+  tab.value = 'sessions'
+  tool.value = parentTool; searchInput.value = parentId; search.value = parentId
   sessionStatus.value = 'all'; unpricedOnly.value = false; offset.value = 0; resetDetailSelection()
 }
 function showUnpricedSessions(sessionTool: string | null = tool.value, sessionId = '') {
   pricingReasonFilter.value = null
-  tab.value = 'sessions'; tool.value = sessionTool; searchInput.value = sessionId; search.value = sessionId
+  tab.value = 'sessions'
+  tool.value = sessionTool; searchInput.value = sessionId; search.value = sessionId
   sessionStatus.value = 'all'; unpricedOnly.value = true; offset.value = 0; resetDetailSelection()
 }
 function showPricingReason(reason: string) {
-  tab.value = 'sessions'; searchInput.value = ''; search.value = ''; sessionStatus.value = 'all'
+  tab.value = 'sessions'
+  searchInput.value = ''; search.value = ''; sessionStatus.value = 'all'
   unpricedOnly.value = false; pricingReasonFilter.value = reason; offset.value = 0; resetDetailSelection()
+}
+function selectTab(next: typeof tab.value) {
+  tab.value = next
+  if (next === 'costs') void scrollToCosts()
+}
+function showApiView(view:'analysis'|'sessions') {
+  callScope.value = 'api'
+  tool.value = null; model.value = null
+  searchInput.value = ''; search.value = ''; sessionStatus.value = 'all'
+  unpricedOnly.value = false; pricingReasonFilter.value = null; offset.value = 0
+  resetDetailSelection(); tab.value = view
 }
 function moveTab(direction: number) {
   const index = tabs.value.findIndex(item => item.id === tab.value)
-  tab.value = tabs.value[(index + direction + tabs.value.length) % tabs.value.length].id
+  selectTab(tabs.value[(index + direction + tabs.value.length) % tabs.value.length].id)
   document.getElementById(`monitor-tab-${tab.value}`)?.focus()
 }
 watch([range, tool, model], () => { anchor.value = Date.now(); offset.value = 0; resetDetailSelection(); analysis.value = null; loadedAnalysisQuery.value = null; analysisError.value = '' })
-watch(tool, () => { explicitQuotaAccountKey.value = null; snapshot.value = null; void refreshLive(); captureQuotaSnapshot() })
+watch(tool, () => { if(explicitQuotaAccountKey.value!=='api:all') explicitQuotaAccountKey.value = null; snapshot.value = null; void refreshLive(); captureQuotaSnapshot() })
+watch(billingScope,()=>{
+  snapshot.value=null;weekly.value=null;analysis.value=null;loadedAnalysisQuery.value=null
+  model.value=null;offset.value=0;resetDetailSelection()
+  void refreshLive();void refreshSummary()
+})
 watch(historyFilters, () => { offset.value = 0; resetDetailSelection() })
 watch(unpricedOnly, value => { if (value) pricingReasonFilter.value = null })
 watch(analysisQuery, () => { void refreshAnalysis() })
+watch(monitorUpstreamRevision, () => { void refreshSummary(); void refreshLive() })
 watch(requestUnpricedOnly, () => { requestOffset.value = 0 })
 watch(includeDescendants, () => { selectedTurn.value = null; requestOffset.value = 0 })
 watch(detailQuery, () => { selectedRequest.value = null; detailError.value = ''; detailPageReady.value = false; if (selected.value) void refreshDetail() })
@@ -942,20 +1025,31 @@ watch(tab, value => {
     if (following.value) refreshWindow()
   }
 })
-onMounted(() => { void refreshLive(); void refreshAnalysis(); void refreshSummary() })
-onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(analysisTimer); clearTimeout(summaryTimer) })
+onMounted(() => {
+  window.addEventListener('focus', refreshOnResume)
+  document.addEventListener('visibilitychange', refreshOnResume)
+  void refreshLive(); void refreshAnalysis(); void refreshSummary()
+})
+watch(() => route?.query?.view, value => { if (value === 'costs') { range.value = 'month'; openCostAccounts() } })
+onBeforeUnmount(() => {
+  disposed = true
+  window.removeEventListener('focus', refreshOnResume)
+  document.removeEventListener('visibilitychange', refreshOnResume)
+  clearTimeout(liveTimer); clearTimeout(analysisTimer); clearTimeout(summaryTimer)
+})
 </script>
 
 <template>
   <main class="console-surface usage-monitor" :style="usageChartStyle">
-    <ConsoleWorkspaceHeader />
+    <ConsoleWorkspaceHeader @costs="openCostAccounts" />
     <p v-if="!desktop" class="notice" role="status">{{ t('usageMonitor.text.thisPageRequiresTheDesktopAppToReadLocal') }}</p>
     <template v-else>
-      <p v-if="error || snapshot?.error" class="notice error" role="alert">{{ error || snapshot?.error }}<span v-if="snapshot"> {{ t('usageMonitor.text.liveDataRetainedItMayBeStaleOrIncomplete') }}</span></p>
+      <p v-if="upstreamReadErrors?.length" class="cost-read-error" role="status" :title="upstreamReadErrors.join(' / ')">{{ t('usageMonitor.routes.unavailable') }} · {{ upstreamReadErrors.join(' / ') }}</p>
+      <p v-if="error || snapshot?.error" class="notice error" role="alert">{{ errorMessage(error || snapshot?.error) }}<span v-if="snapshot"> {{ t('usageMonitor.text.liveDataRetainedItMayBeStaleOrIncomplete') }}</span></p>
       <p v-if="analysisError" class="notice error" role="alert">{{ t('usageMonitor.text.failedToReadPeriodAnalysis') }}{{ analysisError }}<span v-if="analysis"> {{ t('usageMonitor.text.lastSuccessfulDataRetainedTheDisplayedRangeApplies') }}</span></p>
       <div class="monitor-navigation">
-        <nav class="monitor-tabs" role="tablist" :aria-label="t('usageMonitor.text.monitorViews')" @keydown.left.prevent="moveTab(-1)" @keydown.right.prevent="moveTab(1)"><button v-for="item in tabs" :id="`monitor-tab-${item.id}`" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" :tabindex="tab === item.id ? 0 : -1" :aria-controls="`monitor-panel-${item.id}`" @click="tab = item.id">{{ item.label }}</button></nav>
-        <div v-if="tab !== 'sessions'" class="source-selector" role="group" :aria-label="t('usageMonitor.text.toolFilter')"><button v-for="item in tools" :key="item.id ?? 'all'" type="button" :aria-pressed="tool === item.id" @click="tool = item.id">{{ item.label }}</button></div>
+        <nav class="monitor-tabs" role="tablist" :aria-label="t('usageMonitor.text.monitorViews')" @keydown.left.prevent="moveTab(-1)" @keydown.right.prevent="moveTab(1)"><button v-for="item in tabs" :id="`monitor-tab-${item.id}`" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" :tabindex="tab === item.id ? 0 : -1" :aria-controls="`monitor-panel-${item.id}`" @click="selectTab(item.id)">{{ item.label }}</button></nav>
+        <div v-if="tab !== 'sessions' && tab !== 'costs'" class="source-selector" role="group" :aria-label="t('usageMonitor.text.toolFilter')"><button v-for="item in tools" :key="item.id ?? 'all'" type="button" :aria-pressed="tool === item.id" @click="tool = item.id">{{ item.label }}</button></div>
         <div class="heading-actions">
           <button class="icon-button" type="button" :title="following ? t('usageMonitor.text.pauseAnalysisUpdates') : t('usageMonitor.text.resumeAnalysisUpdates')" :aria-label="following ? t('usageMonitor.text.pauseAnalysisUpdates') : t('usageMonitor.text.resumeAnalysisUpdates')" :aria-pressed="!following" @click="toggleFollowing"><Pause v-if="following" :size="16" /><Play v-else :size="16" /></button>
           <button class="icon-button" type="button" :title="t('usageMonitor.text.refreshData')" :aria-label="t('usageMonitor.text.refreshData')" :disabled="liveBusy || analysisBusy" @click="manualRefresh"><RefreshCw :size="17" :class="{ spinning: liveBusy || analysisBusy }" /></button>
@@ -963,18 +1057,20 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
           <span v-if="!following" class="paused-state" role="status">{{ t('usageMonitor.text.analysisUpdatesPausedLiveMonitoringContinues') }}</span>
         </div>
       </div>
-      <div class="tool-overview" :aria-label="t('usageMonitor.text.usageOverviewByTool')">
+      <div v-if="tab !== 'costs'" class="tool-overview" :aria-label="t('usageMonitor.text.usageOverviewByTool')">
         <button v-for="source in tools.filter(item => item.id)" :key="source.id!" type="button" :style="{ '--tool-color': usageToolColor(source.id) }" :aria-pressed="tool === source.id" @click="tool = tool === source.id ? null : source.id">
           <PlatformIcon :platform="platform(source.id!)" size="lg" /><strong>{{ source.label }}</strong><span>{{ toolRate(source.id!) }}</span><small>{{ t('usageMonitor.text.running2') }} {{ snapshot?.toolStatusCounts?.[source.id!]?.running ?? t('usageMonitor.text.unknown') }} · {{ periodLabel }} {{ compactNumber(monitorKnownTokenTotal(toolTotals(source.id!), 'totalTokens')) }} Token · {{ conciseCost(toolTotals(source.id!)) }}</small>
         </button>
       </div>
       <div :id="`monitor-panel-${tab}`" role="tabpanel" :aria-labelledby="`monitor-tab-${tab}`">
         <div class="scope-controls">
-          <h1>{{ tabs.find(item => item.id === tab)?.label }}</h1>
+          <h1>{{ tab === 'costs' || !billingScope ? t('usageMonitor.text.allAccounts') : billingScopes.find(item => item.id === billingScope)?.label }} · {{ tabs.find(item => item.id === tab)?.label }}</h1>
+          <label v-if="tab !== 'costs'" class="history-status call-scope-control">{{ t('usageMonitor.callScope.label') }}<select v-model="callScope" :aria-label="t('usageMonitor.callScope.label')"><option v-for="item in billingScopes" :key="item.id" :value="item.id">{{ item.label }}</option></select></label>
           <div v-if="tab !== 'sessions'" class="source-selector" role="group" :aria-label="t('usageMonitor.text.analysisTimeRange')"><button v-for="item in ranges" :key="item.id" type="button" :aria-pressed="range === item.id" @click="range = item.id">{{ item.label }}</button></div>
-          <label v-if="tab !== 'sessions'" class="history-status">{{ t('usageMonitor.text.model') }}<select v-model="model" :title="model || t('usageMonitor.text.allModels')" :aria-label="t('usageMonitor.text.analysisModel')"><option :value="null">{{ t('usageMonitor.text.allModels') }}</option><option v-if="model && !analysis?.availableModels.includes(model)" :value="model">{{ model }}</option><option v-for="item in analysis?.availableModels ?? []" :key="item">{{ item }}</option></select></label>
+          <label v-if="tab !== 'sessions' && tab !== 'costs'" class="history-status">{{ t('usageMonitor.text.model') }}<select v-model="model" :title="model || t('usageMonitor.text.allModels')" :aria-label="t('usageMonitor.text.analysisModel')"><option :value="null">{{ t('usageMonitor.text.allModels') }}</option><option v-if="model && !analysis?.availableModels.includes(model)" :value="model">{{ model }}</option><option v-for="item in analysis?.availableModels ?? []" :key="item">{{ item }}</option></select></label>
         </div>
-        <div v-if="tab === 'sessions'" class="session-filter-bar history-controls">
+        <form v-if="range==='custom'" class="monitor-custom-period" @submit.prevent="applyCustomRange"><label>{{ t('usageMonitor.costs.fromDate') }}<input v-model="customStart" type="date" :max="customEnd" required /></label><label>{{ t('usageMonitor.costs.toDate') }}<input v-model="customEnd" type="date" :min="customStart" :max="dateInput(Date.now())" required /></label><button type="submit" class="icon-button" :title="t('usageMonitor.text.refreshData')"><Check :size="15" /></button><span v-if="customError" role="alert">{{ customError }}</span></form>
+        <div v-if="(tab === 'sessions')" class="session-filter-bar history-controls">
           <form class="history-search" role="search" @submit.prevent="submitSearch"><input v-model="searchInput" type="search" maxlength="200" :aria-label="t('usageMonitor.text.searchSessionsProjectsOrModels')" :placeholder="t('usageMonitor.text.searchProjectsSessionsOrModels')" /><button type="submit" class="icon-button" :title="t('usageMonitor.text.searchSessions')" :aria-label="t('usageMonitor.text.searchSessions')"><Search :size="15" /></button><button type="button" class="icon-button" :title="t('usageMonitor.text.clearSearch')" :aria-label="t('usageMonitor.text.clearSearch')" :disabled="!searchInput && !search" @click="clearSearch"><X :size="15" /></button></form>
           <select v-model="tool" :aria-label="t('usageMonitor.text.sessionTool')"><option v-for="item in tools" :key="item.id ?? 'all'" :value="item.id">{{ item.label }}</option></select>
           <div class="source-selector" role="group" :aria-label="t('usageMonitor.text.analysisTimeRange')"><button v-for="item in ranges" :key="item.id" type="button" :aria-pressed="range === item.id" @click="range = item.id">{{ item.label }}</button></div>
@@ -984,9 +1080,40 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
           <select v-model="sessionSort" :aria-label="t('usageMonitor.text.sessionSorting')"><option value="recent">{{ t('usageMonitor.text.recentActivity') }}</option><option value="rate60">{{ t('usageMonitor.text.60SecondRate') }}</option><option value="rate300">{{ t('usageMonitor.text.5MinuteRate') }}</option></select>
           <div v-if="pricingReasonFilter" class="reason-filter" role="status"><span>{{ t('usageMonitor.text.savedQuoteHint') }}<strong>{{ pricingReason(pricingReasonFilter) }}</strong></span><button type="button" class="icon-button" :title="t('usageMonitor.text.clearQuoteHintFilter')" :aria-label="t('usageMonitor.text.clearQuoteHintFilter')" @click="pricingReasonFilter = null"><X :size="15" /></button></div>
         </div>
-        <UsagePeriodSummary v-if="tab === 'analysis'" :totals="periodTotals" :cost-text="conciseCost(periodTotals)" :cost-note="costBasis(periodTotals)" />
-        <UsageLivePanel v-if="tab === 'overview'" :snapshot="snapshot" :tool="tool" @session="openLiveSession" @model="openLiveModel">
+        <section v-if="tab === 'costs'" class="monitor-finance-page">
+          <nav class="finance-navigation" :aria-label="t('usageMonitor.inlineCosts.tab')">
+            <button type="button" :aria-pressed="costPage === 'accounts' || costPage === 'account'" @click="openCostAccounts">{{ t('desktop.localCost.accountAssets') }}</button>
+            <button type="button" :aria-pressed="costPage === 'channels'" @click="openCostChannels">{{ t('desktop.localCost.channels') }}</button>
+            <button type="button" :aria-pressed="costPage === 'records'" @click="openCostRecords()">{{ t('desktop.localCost.records') }}</button>
+            <button type="button" :aria-pressed="costPage === 'api'" @click="openApiPrices">{{ t('usageMonitor.delivery.prices') }}</button>
+          </nav>
+          <p v-if="costError" class="cost-read-error" role="status" :title="costError">{{ costData ? t('desktop.localCost.retained') : t('usageMonitor.costIntegration.unavailable') }} <button type="button" @click="reloadCosts"><RefreshCw :size="13" />{{ t('usageMonitor.text.refreshData') }}</button></p>
+          <template v-if="costData">
+            <div v-if="costPage === 'accounts' || accountListReturn" v-show="costPage === 'accounts'">
+              <UsageCostSummary :data="costData" :rows="costRows" :busy="costBusy" scope="all" hide-navigation @enter="openCostRecords('', true)" />
+              <UsageCostAccounts :data="costData" :rows="costRows" :busy="costBusy" :saving="costSaving" :save-settings="saveCostSettings" @account="inspectCostAccount" @record="openCostRecords" @changed="costsChanged" />
+            </div>
+            <CostEventsPanel v-if="costPage === 'records'" ref="costEvents" v-bind="LOCAL_FINANCE_SCOPE" :start-ms="costData.report.startMs" :end-ms="costData.report.endMs" :accounts="costAccountChoices" restrict-accounts @changed="costsChanged" />
+            <LocalCostChannels v-if="costPage === 'channels'" :snapshot="costData.finances" :start-ms="costData.report.startMs" :end-ms="costData.report.endMs" :accounts="costAccountChoices" @enter="openCostRecords('', true)" />
+            <UsageApiPrices v-if="costPage === 'api'" :settings="costData.report.settings" :saving="costSaving" :save-settings="saveCostSettings" />
+            <template v-if="costPage === 'account' && inspectedAccount">
+              <header class="finance-account-heading"><button type="button" class="monitor-cost-command" @click="backToCostAccounts"><ArrowLeft :size="14" />{{ t('usageMonitor.flow.backToAccounts') }}</button><h2>{{ inspectedAccount.name }}</h2></header>
+              <UsagePeriodSummary :totals="inspectedAccount.totals" :cost-text="conciseCost(inspectedAccount.totals)" :cost-note="costBasis(inspectedAccount.totals)" :cny-per-usd="costData.report.settings.cnyPerUsd" />
+              <UsageAccountCost v-if="inspectedAccount.id !== 'unassigned'" :key="inspectedAccount.id" :row="inspectedAccount" :data="costData" :saving="costSaving" :save-settings="saveCostSettings" hide-inspector @record="openCostRecords" @prices="openApiPrices" @changed="costsChanged" />
+              <p v-else-if="inspectedAccount.billingCounts" class="page-note">{{ t('desktop.localCost.unassignedCalls', { subscription: inspectedAccount.billingCounts.subscription ?? 0, unknown: inspectedAccount.billingCounts.unknown ?? 0 }) }}</p>
+              <LocalCostUsagePanel v-model="costAccountId" v-model:source="costSourceKey" :report="costData.report" :rows="costRows" :quotas="quotas?.quotas ?? []" :quota-error="quotaError" :live="accountLive" :live-error="accountLiveError" account-locked />
+            </template>
+          </template>
+          <p v-else-if="!costError" class="page-note" role="status">{{ t('desktop.localCost.loading') }}</p>
+        </section>
+        <UsagePeriodSummary v-if="(tab === 'analysis')" :totals="periodTotals" :cost-text="conciseCost(periodTotals)" :cost-note="costBasis(periodTotals)" :cny-per-usd="analysis?.cnyPerUsd" />
+        <UsageLivePanel v-if="tab === 'overview'" v-model:seconds="liveRateSeconds" :snapshot="snapshot" :tool="tool" @session="openLiveSession" @model="openLiveModel">
           <template #after-summary>
+        <div class="monitor-cost-overview">
+          <UsageCostSummary v-if="costData" compact :data="costData" :rows="costRows" :busy="costBusy" scope="all" @accounts="openCostAccounts" @open="openCostRecords()" @channels="openCostChannels" @prices="openApiPrices" />
+          <p v-else-if="!costError" class="page-note" role="status">{{ t('desktop.localCost.loading') }}</p>
+          <p v-if="costError" class="cost-read-error" role="status" :title="costError">{{ costData ? t('desktop.localCost.retained') : t('usageMonitor.costIntegration.unavailable') }} <button type="button" @click="reloadCosts"><RefreshCw :size="13" />{{ t('usageMonitor.text.refreshData') }}</button></p>
+        </div>
         <section v-if="tab === 'overview'" class="weekly-section" :aria-label="t('usageMonitor.text.weeklyValueQuota')">
           <div class="section-bar"><h2><CalendarDays :size="15" />{{ t('usageMonitor.text.weeklyValueQuota') }}</h2><div class="detail-actions"><span>{{ weekly ? time(weekly.startMs) + t('usageMonitor.text.onward') : t('usageMonitor.text.loadingThisWeekSRecords') }} {{ t('usageMonitor.text.updatedEvery60Seconds') }}</span><button type="button" class="icon-button" :title="t('usageMonitor.text.refreshWeeklyValueQuota')" :aria-label="t('usageMonitor.text.refreshWeeklyValueQuota')" :disabled="summaryBusy" @click="refreshSummary"><RefreshCw :size="15" :class="{ spinning: summaryBusy }" /></button></div></div>
           <div class="weekly-workspace">
@@ -995,7 +1122,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
               <p v-if="weeklyTotals?.unitemizedRecords" class="page-note">{{ monitorRequestCountLabel(weeklyTotals) }}</p>
               <div class="week-figures">
                 <div><span>{{ t('usageMonitor.text.estimatedIdentifiedUsageThisWeek') }}</span><strong>{{ conciseCost(weeklyTotals) }}</strong><small>{{ costBasis(weeklyTotals) }}</small><small>{{ t('usageMonitor.text.pricesFollowEachRecordSModeNotSubscriptionPayments') }}</small></div>
-                <div class="account-quota-forecast" :title="currentForecastAccount?.billingAccountVerified === false ? t('usageMonitor.text.quotaProjectionReferenceScope') : undefined"><span>{{ t(accountQuotaPrediction.partial ? 'usageMonitor.text.pricedPortionProjection' : 'usageMonitor.text.estimatedCurrentAccountWeeklyQuotaTotal') }}</span><strong v-for="quote in accountQuotaPrediction.quotes" :key="quote.currency">≈ {{ summaryMoney(quote.projectedSubtotal, quote.currency, true) }}</strong><strong v-if="!accountQuotaPrediction.quotes.length" class="quota-blocked">{{ t('usageMonitor.text.estimateUnavailable') }}</strong><small v-if="accountQuotaPrediction.label">{{ accountQuotaPrediction.label }}<template v-if="accountQuotaPrediction.context"> {{ t('usageMonitor.text.usedThisCycle') }} {{ accountQuotaPrediction.context.usedPercent.toFixed(1) }}%</template></small><small v-if="accountQuotaPrediction.message">{{ accountQuotaPrediction.message }}</small><small v-else>{{ t(currentForecastAccount?.billingAccountVerified === false ? 'usageMonitor.text.quotaProjectionReference' : 'usageMonitor.text.extrapolatesIdentifiedBillableUsageInThisCycleTo100') }}</small><small v-if="accountQuotaPrediction.partial">{{ t('usageMonitor.text.billablePortionOnlyUnidentifiedOrUnpricedUsageExcluded') }} · {{ t('usageMonitor.text.pricedPortionCoverage', { priced: accountQuotaPrediction.coveredRequests, total: accountQuotaPrediction.requestCount }) }}</small><small v-if="accountQuotaPrediction.updatedAtMs" class="quota-prediction-updated">{{ t('usageMonitor.text.estimateUpdated') }} {{ time(accountQuotaPrediction.updatedAtMs) }}</small></div>
+                <div v-if="!apiAccountSelected" class="account-quota-forecast" :title="currentForecastAccount?.billingAccountVerified === false ? t('usageMonitor.text.quotaProjectionReferenceScope') : undefined"><span>{{ t(accountQuotaPrediction.partial ? 'usageMonitor.text.pricedPortionProjection' : accountQuotaPrediction.finalized ? 'usageMonitor.text.recordedQuotaTotal' : currentForecastAccount?.accountKey === accountUsage?.currentAccountKey ? 'usageMonitor.text.estimatedCurrentAccountWeeklyQuotaTotal' : 'usageMonitor.text.estimatedSelectedAccountWeeklyQuotaTotal') }}</span><strong v-for="quote in accountQuotaPrediction.quotes" :key="quote.currency">{{ accountQuotaPrediction.finalized ? '' : '≈ ' }}{{ summaryMoney(quote.projectedSubtotal, quote.currency, true) }}</strong><strong v-if="!accountQuotaPrediction.quotes.length" class="quota-blocked">{{ t('usageMonitor.text.estimateUnavailable') }}</strong><small v-if="accountQuotaPrediction.label">{{ accountQuotaPrediction.label }}<template v-if="accountQuotaPrediction.context"> {{ t('usageMonitor.text.usedThisCycle') }} {{ accountQuotaPrediction.context.usedPercent.toFixed(1) }}%</template></small><small v-if="accountQuotaPrediction.message">{{ accountQuotaPrediction.message }}</small><small v-else>{{ t(currentForecastAccount?.billingAccountVerified === false ? 'usageMonitor.text.quotaProjectionReference' : 'usageMonitor.text.extrapolatesIdentifiedBillableUsageInThisCycleTo100') }}</small><small v-if="accountQuotaPrediction.partial">{{ t('usageMonitor.text.billablePortionOnlyUnidentifiedOrUnpricedUsageExcluded') }} · {{ t('usageMonitor.text.pricedPortionCoverage', { priced: accountQuotaPrediction.coveredRequests, total: accountQuotaPrediction.requestCount }) }}</small><small v-if="accountQuotaPrediction.updatedAtMs" class="quota-prediction-updated">{{ t('usageMonitor.text.estimateUpdated') }} {{ time(accountQuotaPrediction.updatedAtMs) }}</small></div>
               </div>
               <UsageValueChart v-for="quote in accountQuotaPrediction.quotes.filter(row => row.projectedSubtotal > 0)" :key="'composition-' + quote.currency" :forecast="quote" :quota="accountQuotaPrediction.context" :partial="accountQuotaPrediction.partial" />
               <p class="page-note">{{ t('usageMonitor.text.referenceValueNotAPaidBillUncollectedUsageIs') }}</p>
@@ -1015,14 +1142,14 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
                 <p class="page-note">{{ t('usageMonitor.text.identifiedRequestModesAndAmountsAppearAboveReferenceValues') }}</p>
               </details>
               <p v-if="weeklyTotals && monitorUnquotedRequests(weeklyTotals)" class="unpriced">{{ monitorUnquotedRequests(weeklyTotals) }} {{ t('usageMonitor.text.requestsHaveNoSavedQuoteReferenceValuesUseThe') }}</p>
-              <p v-if="unassignedWeek?.requestCount" class="page-note unassigned-usage">{{ t('usageMonitor.text.thisWeek') }} {{ number(unassignedWeek.requestCount) }} {{ t('usageMonitor.text.recordsHaveNoConfirmedAccountRetainedInGlobalTotals') }}</p>
+              <p v-if="!billingScope && !tool && accountUsage?.unassignedWeek.requestCount" class="page-note">{{ t('usageMonitor.text.thisWeek') }} {{ number(accountUsage.unassignedWeek.requestCount) }} {{ t('usageMonitor.text.recordsHaveNoConfirmedAccountRetainedInGlobalTotals') }}</p>
               <p v-if="weeklyError" class="unpriced" role="status">{{ t('usageMonitor.text.weeklyDataUpdateFailed') }}{{ weeklyError }}<template v-if="weekly">{{ t('usageMonitor.text.retainingRecordsFrom') }} {{ time(weekly.endMs) }} {{ t('usageMonitor.text.label5') }}</template></p>
             </div>
             <div class="allowance-overview">
-              <div class="allowance-heading"><h3>{{ t('usageMonitor.text.accountQuota') }}</h3><span><template v-if="quotaAccountChoices.length">{{ quotaAccountChoices.length }} {{ t('usageMonitor.text.accounts') }} </template>{{ t('usageMonitor.text.toolReportedData') }}</span></div>
+              <div class="allowance-heading"><h3>{{ t(apiAccountSelected ? 'usageMonitor.text.accountUsage' : 'usageMonitor.text.accountQuota') }}</h3><span><template v-if="quotaAccountChoices.length">{{ quotaAccountChoices.length }} {{ t('usageMonitor.text.accounts') }} </template>{{ t('usageMonitor.text.toolReportedData') }}</span></div>
               <div v-if="quotaAccountChoices.length" class="quota-account-controls">
-                <select v-model="selectedQuotaAccountKey" :aria-label="t('usageMonitor.text.quotaAccount')"><option v-for="account in quotaAccountChoices" :key="account.accountKey" :value="account.accountKey">{{ toolName(account.tool) }} · {{ quotaAccountLabel(account) }}{{ !accountUsageError && account.accountKey === accountUsage?.currentAccountKey ? t(account.billingAccountVerified === false ? 'usageMonitor.text.currentLoginIdentity' : 'usageMonitor.text.current') : '' }}</option></select>
-                <button v-if="selectedQuotaAccount && selectedQuotaAccount.accountKey !== accountUsage?.currentAccountKey" type="button" class="icon-button" :aria-label="t('usageMonitor.text.hideAccount')" :title="t('usageMonitor.text.removeFromList')" @click="hideSelectedQuotaAccount"><EyeOff :size="15" /></button>
+                <select v-model="selectedQuotaAccountKey" :aria-label="t('usageMonitor.text.quotaAccount')"><option v-for="account in quotaAccountChoices" :key="account.accountKey" :value="account.accountKey">{{ account.accountKey === 'api:all' ? 'API' : toolName(account.tool) + ' · ' + quotaAccountLabel(account) }}{{ !accountUsageError && account.accountKey === accountUsage?.currentAccountKey ? t(account.billingAccountVerified === false ? 'usageMonitor.text.currentLoginIdentity' : 'usageMonitor.text.current') : '' }}</option></select>
+                <button v-if="selectedQuotaAccount && selectedQuotaAccount.accountKey !== 'api:all' && selectedQuotaAccount.accountKey !== accountUsage?.currentAccountKey" type="button" class="icon-button" :aria-label="t('usageMonitor.text.hideAccount')" :title="t('usageMonitor.text.removeFromList')" @click="hideSelectedQuotaAccount"><EyeOff :size="15" /></button>
               </div>
               <details v-if="hiddenKnownQuotaAccounts.length" class="hidden-quota-accounts"><summary>{{ t('usageMonitor.text.hiddenAccounts') }} {{ hiddenKnownQuotaAccounts.length }}</summary><div v-for="account in hiddenKnownQuotaAccounts" :key="account.accountKey" class="hidden-quota-account"><span>{{ toolName(account.tool) }} · {{ quotaAccountLabel(account) }}</span><button type="button" class="icon-button" :aria-label="t('usageMonitor.text.restoreAccount') + quotaAccountLabel(account)" :title="t('usageMonitor.text.restoreAccount2')" @click="restoreQuotaAccount(account.accountKey)"><RotateCcw :size="15" /></button></div></details>
               <p v-if="quotaAccountStorageError" class="unpriced" role="status">{{ quotaAccountStorageError.operation === 'read' ? t('usageMonitor.text.failedToReadAccountDisplaySettings') : t('usageMonitor.text.failedToSaveAccountDisplaySettings') }}{{ quotaAccountStorageError.message }}</p>
@@ -1053,7 +1180,9 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
                 </div>
                 </div>
               </details>
-              <UsageAccountPeriods v-if="selectedAccountUsage && !selectedAccountHasUsageCard" :account="selectedAccountUsage" />
+              <UsageAccountPeriods v-if="selectedAccountUsage && !displayAccountKeys.has(selectedQuotaAccountKey)" :account="selectedAccountUsage" />
+              <UsageApiAccount v-if="selectedApiUsage" :usage="selectedApiUsage"><div v-if="selectedQuotaAccountKey === 'api:all'" class="detail-actions"><button type="button" class="evidence-link" data-api-view="analysis" @click="showApiView('analysis')">{{ t('usageMonitor.text.usageAnalysis') }}<ChevronRight :size="14" /></button><button type="button" class="evidence-link" data-api-view="sessions" @click="showApiView('sessions')">{{ t('usageMonitor.text.viewApiDetails') }}<ChevronRight :size="14" /></button></div><button v-else type="button" class="evidence-link" @click="inspectCostAccount(selectedQuotaAccountKey)">{{ t('usageMonitor.flow.accountDetails') }}<ChevronRight :size="14" /></button></UsageApiAccount>
+              <p v-else-if="apiAccountSelected" class="page-note api-usage-unavailable" role="status">{{ t('usageMonitor.text.apiUsageUnavailable') }}</p>
               <section v-if="creditGroups.length" class="credits-section" :aria-label="t('usageMonitor.text.extraCreditBalance')">
                 <div class="allowance-heading"><h3>{{ t('usageMonitor.text.extraCredits') }}</h3><span>{{ t('usageMonitor.text.countedOncePerAccount') }}</span></div>
                 <p v-if="!creditGroups.some(group => group.id === 'current')" class="page-note">{{ t('usageMonitor.text.currentCreditBalanceUnavailableExpandToViewHistoricalRecords') }}</p>
@@ -1063,55 +1192,37 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
                 </details>
                 <p class="page-note">{{ t('usageMonitor.text.creditsAndPlanQuotaAreSeparateNotConvertedTo') }}</p>
               </section>
-              <details v-if="quotaSources.length || visibleQuotas.some(item => item.billingAccountVerified === false)" class="quota-source-details"><summary>{{ t('usageMonitor.text.quotaSourcesStatus') }} <span>{{ quotaSources.length }} {{ t('usageMonitor.text.sources') }}</span><b v-if="quotaSourceWarnings">{{ quotaSourceWarnings }} {{ t('usageMonitor.text.itemsUnconfirmed') }}</b></summary><p v-if="visibleQuotas.some(item => item.billingAccountVerified === false)" class="quota-source-note">{{ t('usageMonitor.text.quotaAccountUnconfirmed') }}</p><p v-for="source in quotaSources" :key="source.tool + source.source" class="quota-source-note">{{ toolName(source.tool) }} · {{ source.error || quotaSourceStatus(source.status) }}<template v-if="source.scopeNote"> · {{ quotaScopeNote(source.scopeNote) }}</template><template v-if="source.coverage?.scopesUnreported"> · {{ source.coverage.scopesUnreported }} {{ t('usageMonitor.text.sourcesWithoutQuotaData') }}</template></p></details>
+              <details v-if="!apiAccountSelected && (quotaSources.length || visibleQuotas.some(item => item.billingAccountVerified === false))" class="quota-source-details"><summary>{{ t('usageMonitor.text.quotaSourcesStatus') }} <span>{{ quotaSources.length }} {{ t('usageMonitor.text.sources') }}</span><b v-if="quotaSourceWarnings">{{ quotaSourceWarnings }} {{ t('usageMonitor.text.itemsUnconfirmed') }}</b></summary><p v-if="visibleQuotas.some(item => item.billingAccountVerified === false)" class="quota-source-note">{{ t('usageMonitor.text.quotaAccountUnconfirmed') }}</p><p v-for="source in quotaSources" :key="source.tool + source.source" class="quota-source-note">{{ toolName(source.tool) }} · {{ source.error || quotaSourceStatus(source.status) }}<template v-if="source.scopeNote"> · {{ quotaScopeNote(source.scopeNote) }}</template><template v-if="source.coverage?.scopesUnreported"> · {{ source.coverage.scopesUnreported }} {{ t('usageMonitor.text.sourcesWithoutQuotaData') }}</template></p></details>
               <p v-if="quotaError" class="unpriced" role="status">{{ t('usageMonitor.text.quotaReadFailed') }}{{ quotaError }}{{ t('usageMonitor.text.existingSnapshotsDoNotRepresentCurrentQuota') }}</p>
+              <UsageAccountCost v-if="costData && selectedAccountCost" compact :key="selectedAccountCost.id" :row="selectedAccountCost" :data="costData" :saving="costSaving" :save-settings="saveCostSettings" @record="openCostRecords" @inspect="inspectCostAccount" @prices="openApiPrices" @changed="costsChanged" />
               <p v-if="accountUsageError" class="unpriced" role="status">{{ t('usageMonitor.text.accountAmountsReadFailed') }}{{ accountUsageError }}{{ t('usageMonitor.text.existingAmountsMayNotBeCurrent') }}</p>
             </div>
           </div>
         </section>
-            <UsagePeriodSummary :totals="periodTotals" overview :counts="statusCounts" :cost-text="conciseCost(periodTotals)" :cost-note="costBasis(periodTotals)" />
+            <UsagePeriodSummary :totals="periodTotals" overview :counts="statusCounts" :cost-text="conciseCost(periodTotals)" :cost-note="costBasis(periodTotals)" :cny-per-usd="analysis?.cnyPerUsd" />
           </template>
         </UsageLivePanel>
-        <div v-if="tab === 'overview' || tab === 'analysis'" class="mode-coverage"><span>{{ t('usageMonitor.text.autoDetectedModesStandard') }} {{ modeCount('standard') }} {{ t('usageMonitor.text.fast2') }} {{ modeCount('fast') }} {{ t('usageMonitor.text.priority2') }} {{ modeCount('ultrafast') }} {{ t('usageMonitor.text.unidentified') }} {{ modeCount('unknown') }}</span><button v-if="periodTotals && monitorUnquotedRequests(periodTotals)" class="unpriced-link" :aria-label="t('usageMonitor.text.viewUnestimatedSessions')" @click="showUnpricedSessions()">{{ monitorUnquotedRequests(periodTotals) }} {{ t('usageMonitor.text.unestimated') }}</button></div>
-        <p v-if="unlocatedTotals?.requestCount" class="page-note unlocated-usage">{{ t(range === 'all' ? 'usageMonitor.text.unlocatedIncludedInAll' : 'usageMonitor.text.unlocatedExcludedFromPeriod', { count: number(unlocatedTotals.requestCount) }) }}</p>
-        <p v-if="periodTotals?.unitemizedRecords" class="page-note unitemized-records">{{ monitorRequestCountLabel(periodTotals) }}</p>
-        <p class="analysis-range">{{ analysisBusy ? t('usageMonitor.text.updatingPeriodData') : '' }}{{ periodLabel }} · {{ analysis ? (analysis.startMs == null ? t('usageMonitor.text.allRecords') : time(analysis.startMs)) + t('usageMonitor.text.to2') + time(analysis.endMs) : t('usageMonitor.text.notYetLoaded') }}<template v-if="periodTotals?.incompleteRequests"> · {{ periodTotals.incompleteRequests }} {{ t('usageMonitor.text.incompleteRecordsKnownSubtotalsOnly') }}</template> {{ t('usageMonitor.text.historicalDatesModelsDoNotRestrictLiveRatesOr') }}</p>
-        <template v-if="tab === 'analysis'">
+        <div v-if="tab === 'overview' || (tab === 'analysis')" class="mode-coverage"><span>{{ t('usageMonitor.text.autoDetectedModesStandard') }} {{ modeCount('standard') }} {{ t('usageMonitor.text.fast2') }} {{ modeCount('fast') }} {{ t('usageMonitor.text.priority2') }} {{ modeCount('ultrafast') }} {{ t('usageMonitor.text.unidentified') }} {{ modeCount('unknown') }}</span><button v-if="periodTotals && monitorUnquotedRequests(periodTotals)" class="unpriced-link" :aria-label="t('usageMonitor.text.viewUnestimatedSessions')" @click="showUnpricedSessions()">{{ monitorUnquotedRequests(periodTotals) }} {{ t('usageMonitor.text.unestimated') }}</button></div>
+        <p v-if="tab !== 'costs'" class="analysis-range">{{ analysisBusy ? t('usageMonitor.text.updatingPeriodData') : '' }}{{ periodLabel }} · {{ analysis ? (analysis.startMs == null ? t('usageMonitor.text.allRecords') : time(analysis.startMs)) + t('usageMonitor.text.to2') + time(analysis.endMs) : t('usageMonitor.text.notYetLoaded') }}<template v-if="periodTotals?.incompleteRequests"> · {{ periodTotals.incompleteRequests }} {{ t('usageMonitor.text.incompleteRecordsKnownSubtotalsOnly') }}</template> {{ t('usageMonitor.text.historicalDatesModelsDoNotRestrictLiveRatesOr') }}</p>
+        <template v-if="(tab === 'analysis')">
           <div class="analysis-visuals">
-            <section class="trend-section">
-              <div class="section-bar"><h2>{{ t('usageMonitor.text.usageTrend') }}</h2><div class="source-selector" :aria-label="t('usageMonitor.text.chartMetric')"><button :aria-pressed="analysisMetric === 'input'" @click="analysisMetric = 'input'">{{ t('usageMonitor.text.input') }}</button><button :aria-pressed="analysisMetric === 'output'" @click="analysisMetric = 'output'">{{ t('usageMonitor.text.output') }}</button><button :aria-pressed="analysisMetric === 'cache'" @click="analysisMetric = 'cache'">{{ t('usageMonitor.text.cache') }}</button><button :aria-pressed="analysisMetric === 'value'" @click="analysisMetric = 'value'">{{ t('usageMonitor.text.referenceValue2') }}</button></div></div>
-              <div class="chart-unit"><span v-if="trendPeakIndex >= 0" class="trend-peak"><i aria-hidden="true" />{{ t('usageMonitor.text.recordedPeak') }} <strong>{{ trendValue(trendPeak) }}</strong><small>{{ chartLabels[trendPeakIndex] }}</small></span><span class="intensity-key" :title="t('usageMonitor.text.comparedByValuesInTheCurrentChart')"><span>{{ t('usageMonitor.text.less') }}</span><i aria-hidden="true" /><span>{{ t('usageMonitor.text.more') }}</span></span><span>{{ t('usageMonitor.text.unit') }}{{ trendUnit.label }}</span><label v-if="analysisMetric === 'value' && trendCurrencies.length > 1">{{ t('usageMonitor.text.currency') }} <select v-model="trendCurrency" :aria-label="t('usageMonitor.text.referenceValueCurrency')"><option v-for="currency in trendCurrencies" :key="currency" :value="currency">{{ currencyName(currency) }}</option></select></label></div>
-              <CostLineChart :labels="chartLabels" :series="chartSeries" :height="260" show-values :value-divisor="trendUnit.divisor" :value-suffix="analysisMetric === 'value' ? '' : ' Token'" :state="analysisError && analysis ? 'stale' : analysis ? periodTotals?.incompleteRequests || (analysisMetric === 'value' && !monitorAutomaticPriceSummary(periodTotals).complete) ? 'partial' : 'measured' : analysisBusy ? 'loading' : 'unavailable'" :state-reason="analysisError || (analysisMetric === 'value' ? t('usageMonitor.text.noIdentifiedEstimatedAmountAvailableInThisCurrency') : t('usageMonitor.text.aggregatedBySavedRequestTime'))" />
-              <p class="chart-note">{{ analysisMetric === 'value' ? t('usageMonitor.text.estimatedUsingEachIdentifiedModeMissingModesOrPrices') : t('usageMonitor.text.aggregatedByRequestRecordTimeHoverForExactUsage') }}</p>
-            </section>
-            <section class="model-ranking"><div class="section-bar"><h2>{{ t('usageMonitor.text.modelUsageRanking') }}</h2><span>{{ t('usageMonitor.text.unit') }}{{ rankingUnit.label }}</span></div><p class="chart-note">{{ t('usageMonitor.text.inputOutputReasoningIsNotAddedTwice') }}</p><div class="ranking-scroll"><button v-for="row in modelRanking" :key="row.tool + row.model" :style="{ '--model-color': usageModelColor(row.model) }" :disabled="!row.model" :title="(row.model || t('usageMonitor.text.modelNotRecordedModelFilteringUnavailable')) + ' · ' + number(monitorKnownTokenTotal(row.totals, 'totalTokens')) + ' Token'" @click="inspectBreakdown(row.tool, row.model, true)"><span>{{ row.model || t('usageMonitor.text.unidentifiedModel') }}<small>{{ toolName(row.tool) }}</small></span><span class="rank-track"><i :style="{ width: row.totals.totalTokens / rankingMaximum * 100 + '%' }" /></span><b>{{ rankingValue(monitorKnownTokenTotal(row.totals, 'totalTokens')) }}</b></button><p v-if="!modelRanking.length" class="empty">{{ analysis ? t('usageMonitor.text.noModelUsageInThisPeriod') : t('usageMonitor.text.modelUsageNotYetAvailable') }}</p></div></section>
+            <UsageTrend :timeline="analysis?.timeline" :history="analysis?.observedTimeline" :totals="periodTotals" :loading="analysisBusy" :error="analysisError" />
+            <section class="model-ranking"><div class="section-bar"><h2>{{ t('usageMonitor.text.modelUsageRanking') }}</h2><span>{{ t('usageMonitor.text.unit') }}{{ rankingUnit.label }}</span></div><p class="chart-note">{{ t('usageMonitor.text.inputOutputReasoningIsNotAddedTwice') }}</p><div class="ranking-scroll"><button v-for="row in modelRanking" :key="row.tool + row.model" :style="{ '--model-color': usageModelColor(row.model) }" :disabled="!row.model" :title="(row.model || t('usageMonitor.text.modelNotRecordedModelFilteringUnavailable')) + ' · ' + number(row.totals.totalTokens) + ' Token'" @click="inspectBreakdown(row.tool, row.model, true)"><span>{{ row.model || t('usageMonitor.text.unidentifiedModel') }}<small>{{ toolName(row.tool) }}</small></span><span class="rank-track"><i :style="{ width: row.totals.totalTokens / rankingMaximum * 100 + '%' }" /></span><b>{{ rankingValue(row.totals.totalTokens) }}</b></button><p v-if="!modelRanking.length" class="empty">{{ analysis ? t('usageMonitor.text.noModelUsageInThisPeriod') : t('usageMonitor.text.modelUsageNotYetAvailable') }}</p></div></section>
           </div>
-          <section class="breakdown-section model-cost-section">
-            <div class="section-bar"><h2>{{ t('usageMonitor.text.modelsCost') }}</h2><span>{{ periodLabel }} {{ t('usageMonitor.text.basedOnSavedRequestsAndPricingEvidence') }}</span></div>
-            <div class="table-scroll" role="region" :aria-label="t('usageMonitor.text.modelsCostTable')" tabindex="0"><table class="model-cost-table">
-              <thead><tr><th>{{ t('usageMonitor.text.model') }}</th><th>{{ t(periodTotals?.unitemizedRecords ? 'usageMonitor.text.usageRecords' : 'usageMonitor.text.requests3') }}</th><th>{{ t('usageMonitor.text.inputOutput') }}</th><th>{{ t('usageMonitor.text.cacheHit') }}</th><th>{{ t('usageMonitor.text.referenceCost') }}</th><th>{{ t('usageMonitor.text.pricingCoverage') }}</th><th>{{ t('usageMonitor.text.evidence') }}</th></tr></thead>
-              <tbody><tr v-for="row in analysis?.byModel ?? []" :key="row.tool + ':' + row.model" :style="{ '--model-color': usageModelColor(row.model) }">
-                <td><strong class="model-name">{{ row.model || t('usageMonitor.text.unidentifiedModel') }}</strong><small>{{ toolName(row.tool) }}</small></td>
-                <td>{{ row.totals.unitemizedRecords ? monitorRequestCountLabel(row.totals) : number(row.totals.requestCount) }}</td>
-                <td :title="number(monitorKnownTokenTotal(row.totals, 'inputTokens')) + ' / ' + number(monitorKnownTokenTotal(row.totals, 'outputTokens'))">{{ compactNumber(monitorKnownTokenTotal(row.totals, 'inputTokens')) }} / {{ compactNumber(monitorKnownTokenTotal(row.totals, 'outputTokens')) }}<small v-if="row.totals.incompleteRequests">{{ t('usageMonitor.text.includes') }} {{ number(row.totals.incompleteRequests) }} {{ t('usageMonitor.text.incompleteRecords') }}</small></td>
-                <td>{{ monitorCacheRatio(row.totals) }}<small :title="t('usageMonitor.text.cacheRead2') + number(monitorKnownTokenTotal(row.totals, 'cacheReadTokens')) + t('usageMonitor.text.write') + number(monitorKnownTokenTotal(row.totals, 'cacheWriteTokens'))">{{ t('usageMonitor.text.read') }} {{ compactNumber(monitorKnownTokenTotal(row.totals, 'cacheReadTokens')) }} {{ t('usageMonitor.text.write2') }} {{ compactNumber(monitorKnownTokenTotal(row.totals, 'cacheWriteTokens')) }}</small><small v-if="monitorCacheCoverage(row.totals)">{{ monitorCacheCoverage(row.totals) }}</small></td>
-                <td class="model-money" :title="monitorTotalCost(row.totals)">{{ conciseCost(row.totals) }}</td>
-                <td><span class="coverage-badge" :class="{ complete: row.totals.requestCount > 0 && !monitorUnquotedRequests(row.totals) }">{{ coverageLabel(row.totals) }}</span><small v-if="monitorUnquotedRequests(row.totals)">{{ number(monitorUnquotedRequests(row.totals)) }} {{ t('usageMonitor.text.unestimated') }}</small></td>
-                <td><button v-if="row.model" type="button" class="evidence-link model-evidence-link" :aria-label="t('usageMonitor.text.view') + toolName(row.tool) + ' ' + row.model + t('usageMonitor.text.pricingEvidence')" @click="inspectBreakdown(row.tool, row.model, true)">{{ t('usageMonitor.text.viewEvidence') }}<ChevronRight :size="15" /></button><span v-else class="page-note">{{ t('usageMonitor.text.modelNotRecorded2') }}</span></td>
-              </tr><tr v-if="!analysis?.byModel.length"><td colspan="7" class="empty">{{ analysis ? t('usageMonitor.text.noModelUsageInTheSelectedRange') : t('usageMonitor.text.loadingModelUsage') }}</td></tr></tbody>
-            </table></div>
-          </section>
-          <UsageTokenComposition :input-tokens="monitorKnownTokenTotal(periodTotals, 'inputTokens')" :output-tokens="monitorKnownTokenTotal(periodTotals, 'outputTokens')" :cache-read-tokens="monitorKnownTokenTotal(periodTotals, 'cacheReadTokens')" :partial="!!periodTotals?.incompleteRequests" />
+          <UsageModelCosts :models="analysis?.byModel ?? []" :expenses="analysis?.apiExpense?.byModel" :live="snapshot?.live" :period="periodLabel" :loading="analysisBusy" evidence @evidence="(source, name) => inspectBreakdown(source, name, true)" />
+          <p v-if="analysis?.costError" class="cost-read-error" role="status" :title="analysis.costError">{{ t('usageMonitor.costIntegration.unavailable') }}</p>
+          <UsageTokenComposition :input-tokens="periodTotals?.inputTokens" :output-tokens="periodTotals?.outputTokens" :cache-read-tokens="periodTotals?.cacheReadTokens" :partial="!!periodTotals?.incompleteRequests" />
           <UsageEfficiencyBand :totals="periodTotals" :motion="following" />
-          <details class="tool-breakdown breakdown-section"><summary>{{ t('usageMonitor.text.summaryByTool') }}</summary><div class="table-scroll" role="region" :aria-label="t('usageMonitor.text.summaryByToolTable')" tabindex="0"><table class="breakdown-table"><thead><tr><th>{{ t('usageMonitor.text.tool') }}</th><th>{{ t(periodTotals?.unitemizedRecords ? 'usageMonitor.text.usageRecords' : 'usageMonitor.text.requests') }}</th><th>{{ t('usageMonitor.text.inputOutput') }}</th><th>{{ t('usageMonitor.text.cacheReadWrite') }}</th><th>{{ t('usageMonitor.text.cacheHit') }}</th><th>{{ t('usageMonitor.text.usageBasedEstimate') }}</th><th>{{ t('usageMonitor.text.unestimated2') }}</th></tr></thead><tbody><tr v-for="row in analysis?.byTool ?? []" :key="row.tool"><td><button type="button" class="session-link" @click="inspectBreakdown(row.tool, null, false)">{{ toolName(row.tool) }}</button></td><td>{{ row.totals.unitemizedRecords ? monitorRequestCountLabel(row.totals) : number(row.totals.requestCount) }}</td><td>{{ number(monitorKnownTokenTotal(row.totals, 'inputTokens')) }} / {{ number(monitorKnownTokenTotal(row.totals, 'outputTokens')) }}<small v-if="row.totals.incompleteRequests">{{ t('usageMonitor.text.recordedPortion') }}</small></td><td>{{ number(monitorKnownTokenTotal(row.totals, 'cacheReadTokens')) }} / {{ number(monitorKnownTokenTotal(row.totals, 'cacheWriteTokens')) }}</td><td>{{ monitorCacheRatio(row.totals) }}<small v-if="monitorCacheCoverage(row.totals)">{{ monitorCacheCoverage(row.totals) }}</small></td><td>{{ monitorTotalCost(row.totals) }}</td><td>{{ number(monitorUnquotedRequests(row.totals)) }} {{ t('usageMonitor.text.requests4') }}</td></tr><tr v-if="!analysis?.byTool.length"><td colspan="7" class="empty">{{ analysis ? t('usageMonitor.text.noSummaryInTheSelectedRange') : t('usageMonitor.text.summaryNotYetLoaded') }}</td></tr></tbody></table></div></details>
+          <UsageRecordedMetrics :totals="periodTotals" />
+          <details class="tool-breakdown breakdown-section"><summary>{{ t('usageMonitor.text.summaryByTool') }}</summary><div class="table-scroll" role="region" :aria-label="t('usageMonitor.text.summaryByToolTable')" tabindex="0"><table class="breakdown-table"><thead><tr><th>{{ t('usageMonitor.text.tool') }}</th><th>{{ t('usageMonitor.text.requests') }}</th><th>{{ t('usageMonitor.text.inputOutput') }}</th><th>{{ t('usageMonitor.text.cacheReadWrite') }}</th><th>{{ t('usageMonitor.text.cacheHit') }}</th><th>{{ t('usageMonitor.text.usageBasedEstimate') }}</th><th>{{ t('usageMonitor.text.unestimated2') }}</th></tr></thead><tbody><tr v-for="row in analysis?.byTool ?? []" :key="row.tool"><td><button type="button" class="session-link" @click="inspectBreakdown(row.tool, null, false)">{{ toolName(row.tool) }}</button></td><td>{{ number(row.totals.requestCount) }}</td><td>{{ number(row.totals.inputTokens) }} / {{ number(row.totals.outputTokens) }}<small v-if="row.totals.incompleteRequests">{{ t('usageMonitor.text.recordedPortion') }}</small></td><td>{{ number(row.totals.cacheReadTokens) }} / {{ number(row.totals.cacheWriteTokens) }}</td><td>{{ monitorCacheRatio(row.totals) }}<small v-if="monitorCacheCoverage(row.totals)">{{ monitorCacheCoverage(row.totals) }}</small></td><td>{{ monitorTotalCost(row.totals) }}</td><td>{{ number(monitorUnquotedRequests(row.totals)) }} {{ t('usageMonitor.text.requests4') }}</td></tr><tr v-if="!analysis?.byTool.length"><td colspan="7" class="empty">{{ analysis ? t('usageMonitor.text.noSummaryInTheSelectedRange') : t('usageMonitor.text.summaryNotYetLoaded') }}</td></tr></tbody></table></div></details>
           <details class="metric-notes"><summary>{{ t('usageMonitor.text.methodPriceSources') }}</summary><p>{{ t('usageMonitor.text.inputIncludesCacheReadsAndWritesTotalTokensInput') }}</p><p>{{ t('usageMonitor.text.liveRateIsConfirmedOutputOverTheLast') }} {{ snapshot?.rateWindowSeconds ?? 60 }} {{ t('usageMonitor.text.seconds') }} {{ snapshot?.rateWindowSeconds ?? 60 }}{{ t('usageMonitor.text.readEvery') }} {{ (snapshot?.refreshMs ?? 2000) / 1000 }} {{ t('usageMonitor.text.secondsLogsMayBeWrittenLateInBatchesThis') }}</p><p>{{ t('usageMonitor.text.analysisUpdatesAboutEvery15SecondsTodayStartsAt') }}</p><p>{{ t('usageMonitor.text.amountsUseSavedOfficialPriceSnapshotsIncludingHistoricalUsage') }}</p><p>{{ t('usageMonitor.text.glmUsesZAiOfficialEquivalentPricesActualProvider') }}</p></details>
         </template>
-        <div v-if="tab === 'overview' || tab === 'sessions'" class="session-layout" :class="{ 'is-browser': tab === 'sessions' }">
-        <section v-if="tab === 'overview' || tab === 'sessions'" class="sessions-section">
+        <div v-if="tab === 'overview' || (tab === 'sessions')" class="session-layout" :class="{ 'is-browser': (tab === 'sessions') }">
+        <section v-if="tab === 'overview' || (tab === 'sessions')" class="sessions-section">
           <div class="section-bar"><h2>{{ tab === 'overview' ? t('usageMonitor.text.activeUnconfirmedSessions') : t('usageMonitor.text.periodSessionRecords') }} <span>{{ tab === 'overview' ? snapshot?.activeSessions == null ? t('usageMonitor.text.unknown') : number(snapshot.activeSessions.length) : number(historyCount) }}</span></h2><span v-if="tab === 'overview'">{{ t('usageMonitor.text.activeAndUnconfirmedSessionsOnlyFullSubagentRecordsIn') }}</span></div>
-          <p v-if="tab === 'sessions'" class="history-scope">{{ historyReady ? number(historyCount) + t('usageMonitor.text.matchingSessions') : t('usageMonitor.text.currentFilterResultsNotYetAvailable') }} {{ t('usageMonitor.text.summaryRetainsTheCurrentTimeAndModelRange') }}</p>
+          <p v-if="(tab === 'sessions')" class="history-scope">{{ historyReady ? number(historyCount) + t('usageMonitor.text.matchingSessions') : t('usageMonitor.text.currentFilterResultsNotYetAvailable') }} {{ t('usageMonitor.text.summaryRetainsTheCurrentTimeAndModelRange') }}</p>
           <label v-if="tab === 'overview'" class="session-sort">{{ t('usageMonitor.text.sort') }}<select v-model="sessionSort" :aria-label="t('usageMonitor.text.sessionSorting')"><option value="recent">{{ t('usageMonitor.text.recentActivity') }}</option><option value="rate60">{{ t('usageMonitor.text.60SecondRate') }}</option><option value="rate300">{{ t('usageMonitor.text.5MinuteRate') }}</option></select></label>
-          <div v-if="tab === 'sessions'" class="session-browser" role="region" :aria-label="t('usageMonitor.text.sessionSubagentList')">
+          <div v-if="(tab === 'sessions')" class="session-browser" role="region" :aria-label="t('usageMonitor.text.sessionSubagentList')">
             <div v-for="row in sessionTree" :key="row.session.key" class="session-browser-row" :class="{ selected: selected === row.session.key }" :style="{ '--depth': Math.min(row.depth, 5) }"><button v-if="row.childCount" type="button" class="branch-toggle" :aria-expanded="!collapsedSessions.has(row.session.key)" :aria-label="t('usageMonitor.text.expandOrCollapseSubSessionsOf') + sessionName(row.session) + t('usageMonitor.text.label6')" @click="toggleSession(row.session.key)"><ChevronRight v-if="collapsedSessions.has(row.session.key)" :size="15" /><ChevronDown v-else :size="15" /></button><GitBranch v-else-if="row.session.parentId" :size="15" class="branch-icon" /><button type="button" class="session-choice" :aria-pressed="selected === row.session.key" @click="selectSession(row.session.key, $event)"><strong>{{ sessionName(row.session) }}</strong><span>{{ toolName(row.session.tool) }} · {{ row.session.model || t('usageMonitor.text.modelNotReported') }}</span><small class="usage-state" :data-state="row.session.status">{{ status(row.session.status) }}</small><small>{{ time(row.session.updatedAtMs) }} · #{{ row.session.id.slice(0, 8) }}</small></button><button v-if="row.session.parentId" class="parent-link" :aria-label="t('usageMonitor.text.locateParentSession') + row.session.parentId" @click="findParent(row.session.tool, row.session.parentId)">{{ t('usageMonitor.text.parentSession') }}</button></div><p v-if="!sessionTree.length" class="empty">{{ analysisBusy ? t('usageMonitor.text.loadingSessions') : !historyReady ? t('usageMonitor.text.currentFilterResultsNotYetAvailable') : t('usageMonitor.text.noSessionsMatchTheCurrentFilters') }}</p>
           </div>
           <div v-else class="table-scroll" role="region" :aria-label="t('usageMonitor.text.sessionRecordsTable')" tabindex="0"><table class="sessions-table"><thead><tr><th>{{ t('usageMonitor.text.toolSession') }}</th><th>{{ t('usageMonitor.text.modelMode') }}</th><th>{{ t('usageMonitor.text.statusLastUpdate') }}</th><th>{{ t('usageMonitor.text.totalInputOutput') }}</th><th>{{ t('usageMonitor.text.60Second5MinuteAverageRate') }}</th><th>{{ t('usageMonitor.text.latestRequestCompleteTurn') }}</th><th>{{ t('usageMonitor.text.cacheHit') }}</th><th>{{ t('usageMonitor.text.usageBasedEstimate') }}</th></tr></thead><tbody>
@@ -1127,9 +1238,9 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
             </tr>
             <tr v-if="!visibleSessions.length"><td colspan="8" class="empty">{{ snapshot?.activeSessions == null ? t('usageMonitor.text.theCurrentCollectorDoesNotProvideAGlobalActivity') : t('usageMonitor.text.noConfirmedActiveOrUnconfirmedSessionsCurrently') }}</td></tr>
           </tbody></table></div>
-          <div v-if="tab === 'sessions'" class="pagination"><span>{{ t('usageMonitor.text.page') }} {{ Math.floor(offset / MONITOR_PAGE_SIZE) + 1 }} {{ t('usageMonitor.text.perPage') }} {{ MONITOR_PAGE_SIZE }} {{ t('usageMonitor.text.records') }}</span><button class="icon-button" type="button" :title="t('usageMonitor.text.previousSessionPage')" :aria-label="t('usageMonitor.text.previousSessionPage')" :disabled="offset === 0" @click="offset -= MONITOR_PAGE_SIZE"><ChevronLeft :size="17" /></button><button class="icon-button" type="button" :title="t('usageMonitor.text.nextSessionPage')" :aria-label="t('usageMonitor.text.nextSessionPage')" :disabled="!historyReady || !analysis || offset + MONITOR_PAGE_SIZE >= analysis.sessionCount" @click="offset += MONITOR_PAGE_SIZE"><ChevronRight :size="17" /></button></div>
+          <div v-if="(tab === 'sessions')" class="pagination"><span>{{ t('usageMonitor.text.page') }} {{ Math.floor(offset / MONITOR_PAGE_SIZE) + 1 }} {{ t('usageMonitor.text.perPage') }} {{ MONITOR_PAGE_SIZE }} {{ t('usageMonitor.text.records') }}</span><button class="icon-button" type="button" :title="t('usageMonitor.text.previousSessionPage')" :aria-label="t('usageMonitor.text.previousSessionPage')" :disabled="offset === 0" @click="offset -= MONITOR_PAGE_SIZE"><ChevronLeft :size="17" /></button><button class="icon-button" type="button" :title="t('usageMonitor.text.nextSessionPage')" :aria-label="t('usageMonitor.text.nextSessionPage')" :disabled="!historyReady || !analysis || offset + MONITOR_PAGE_SIZE >= analysis.sessionCount" @click="offset += MONITOR_PAGE_SIZE"><ChevronRight :size="17" /></button></div>
         </section>
-        <div v-if="tab === 'sessions' && !selected" class="session-placeholder"><MessageSquare :size="36" /><h2>{{ t('usageMonitor.text.noSessionSelected') }}</h2><span>{{ number(historyCount) }} {{ t('usageMonitor.text.matchingSessions2') }}</span></div>
+        <div v-if="(tab === 'sessions') && !selected" class="session-placeholder"><MessageSquare :size="36" /><h2>{{ t('usageMonitor.text.noSessionSelected') }}</h2><span>{{ number(historyCount) }} {{ t('usageMonitor.text.matchingSessions2') }}</span></div>
         <section v-if="selected && detailAll === (tab === 'overview')" id="monitor-session-detail" ref="detailSection" class="detail-section" :aria-label="t('usageMonitor.text.selectedSessionDetails')" tabindex="-1">
           <div class="section-bar"><div><h2>{{ detail ? sessionName(detail.session) : t('usageMonitor.text.sessionTurnsRequests') }}</h2><p class="detail-id"><template v-if="detail">{{ toolName(detail.session.tool) }} <span class="session-kind">{{ detail.session.parentId ? t('usageMonitor.text.subSessions') : t('usageMonitor.text.mainSession') }}</span> {{ t('usageMonitor.text.latestModelInThisSession') }} {{ detail.session.model || t('usageMonitor.text.notRecorded') }}</template><template v-else>{{ t('usageMonitor.text.loadingSessions') }}</template></p></div><div class="detail-actions"><label class="unpriced-filter"><input v-model="includeDescendants" type="checkbox" :aria-label="t('usageMonitor.text.includeSubagents')" />{{ t('usageMonitor.text.includeSubagents') }}</label><label class="unpriced-filter"><input v-model="requestUnpricedOnly" type="checkbox" :aria-label="t('usageMonitor.text.unestimatedOnly')" />{{ t('usageMonitor.text.unestimatedOnly') }}</label><button type="button" class="icon-button" :title="t('usageMonitor.text.closeSessionDetails')" :aria-label="t('usageMonitor.text.closeSessionDetails')" @click="closeSession"><X :size="16" /></button></div></div>
           <p v-if="detailError" class="notice error" role="alert">{{ detailError }} {{ t('usageMonitor.text.displayedDetailsMayBeStale') }}</p><p v-if="detailBusy" class="page-note" role="status">{{ t('usageMonitor.text.loadingRequestPage') }}</p>
@@ -1176,7 +1287,18 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
           <article v-if="request" ref="requestSection" class="request-detail" :aria-label="t('usageMonitor.text.selectedRequestPricingUsageEvidence')" tabindex="-1"><div class="section-bar"><h3>{{ t('usageMonitor.text.requestDetails') }}</h3><div class="detail-actions"><span>{{ requestRecordedTime(request) }}</span><button type="button" class="icon-button" :title="t('usageMonitor.text.closeRequestEvidence')" :aria-label="t('usageMonitor.text.closeRequestEvidence')" @click="closeRequest"><X :size="16" /></button></div></div><p class="page-note"><span class="request-source" :title="requestSourceTitle(request)">{{ requestSource(request) }}</span> · {{ request.model || t('usageMonitor.text.unknownModel') }} · {{ requestModeLabel(request) }} {{ t('usageMonitor.text.input2') }} {{ number(monitorToken(request, 'input_tokens')) }} {{ t('usageMonitor.text.output2') }} {{ number(monitorToken(request, 'output_tokens')) }} · {{ quoteState(request) }}</p>
             <div class="request-proof-layout">
               <section class="request-price-panel" :aria-label="t('usageMonitor.text.pricingEvidenceForThisRequest')"><h4>{{ t('usageMonitor.text.referenceEstimate') }}</h4>
-                <div v-for="quote in automaticRequest?.quotes ?? []" :key="quote.currency" class="selected-price-evidence"><strong class="proof-amount">{{ monitorAmount(quote.amount, quote.currency) }}</strong><span class="mode-badge" :style="{ '--mode-color': usageModeColor(automaticRequest?.mode || 'unknown') }">{{ requestModeLabel(request) }}</span><template v-if="quote.evidence"><p>{{ t('usageMonitor.text.referenceQuoteProvider') }}{{ quote.evidence.pricingBasis === 'sub2api_reference' ? pricingProvider(quote.evidence) : quote.evidence.pricingProvider || t('usageMonitor.text.sourceUnspecified') }}</p><dl class="request-rates"><div><dt>{{ t('usageMonitor.text.uncachedInput') }}</dt><dd>{{ quote.evidence.inputPerMillion }}</dd></div><div><dt>{{ t('usageMonitor.text.cacheRead') }}</dt><dd>{{ quote.evidence.cachedPerMillion ?? t('usageMonitor.text.notProvided') }}</dd></div><div><dt>{{ t('usageMonitor.text.output') }}</dt><dd>{{ quote.evidence.outputPerMillion }}</dd></div></dl><small>{{ currencyName(quote.currency) }} {{ t('usageMonitor.text.millionTokens2') }} {{ displayContext(quote.evidence.contextTier) }}<template v-if="quote.evidence.pricingBasis === 'sub2api_reference'"> · {{ t('usageMonitor.text.currentReferencePriceNotHistoricalBill') }} {{ t('usageMonitor.text.priceChecked') }} {{ quote.evidence.checkedAt }}</template></small><a v-if="priceLink(quote.evidence.sourceUrl)" :href="priceLink(quote.evidence.sourceUrl)" target="_blank" rel="noopener noreferrer">{{ t('usageMonitor.text.viewTheSourceOfThisUnitPrice') }}<ExternalLink :size="13" /></a></template></div>
+                <div v-for="quote in automaticRequest?.quotes ?? []" :key="quote.currency" class="selected-price-evidence">
+                  <strong class="proof-amount">{{ monitorAmount(quote.amount, quote.currency) }}</strong><span class="mode-badge" :style="{ '--mode-color': usageModeColor(automaticRequest?.mode || 'unknown') }">{{ requestModeLabel(request) }}</span>
+                  <template v-if="quote.evidence">
+                    <p>{{ t('usageMonitor.text.referenceQuoteProvider') }}{{ quote.evidence.pricingBasis === 'sub2api_reference' ? pricingProvider(quote.evidence) : quote.evidence.pricingProvider || t('usageMonitor.text.sourceUnspecified') }}</p>
+                    <p v-if="quote.evidence.pricingBasis === 'upstream_recorded'">{{ t('usageMonitor.text.upstreamCharge') }}</p>
+                    <template v-else>
+                      <dl class="request-rates"><div><dt>{{ t('usageMonitor.text.uncachedInput') }}</dt><dd>{{ quote.evidence.inputPerMillion }}</dd></div><div><dt>{{ t('usageMonitor.text.cacheRead') }}</dt><dd>{{ quote.evidence.cachedPerMillion ?? t('usageMonitor.text.notProvided') }}</dd></div><div><dt>{{ t('usageMonitor.text.output') }}</dt><dd>{{ quote.evidence.outputPerMillion }}</dd></div></dl>
+                      <small>{{ currencyName(quote.currency) }} {{ t('usageMonitor.text.millionTokens2') }} {{ displayContext(quote.evidence.contextTier) }}<template v-if="quote.evidence.pricingBasis === 'sub2api_reference'"> · {{ t('usageMonitor.text.currentReferencePriceNotHistoricalBill') }} {{ t('usageMonitor.text.priceChecked') }} {{ quote.evidence.checkedAt }}</template></small>
+                    </template>
+                    <a v-if="priceLink(quote.evidence.sourceUrl)" :href="priceLink(quote.evidence.sourceUrl)" target="_blank" rel="noopener noreferrer">{{ t('usageMonitor.text.viewPriceSource') }}<ExternalLink :size="13" /></a>
+                  </template>
+                </div>
                 <p v-if="!automaticRequest?.quotes.length" class="proof-pending">{{ quoteState(request) }}</p><p class="page-note">{{ t('usageMonitor.text.estimatedUsingSavedModelModeAndUnitPricesNot') }}</p>
               </section>
               <section class="request-original-evidence" :aria-label="t('usageMonitor.text.originalCollectionEvidence')"><h4>{{ t('usageMonitor.text.originalCollectionEvidence') }}</h4><dl class="source-facts"><div><dt>{{ t(request.unknownFields.includes('timestamp') || monitorIsUnitemizedRecord(request) ? 'usageMonitor.text.collectionObservedTime' : 'usageMonitor.text.recordTime') }}</dt><dd>{{ time(request.timestampMs) }}</dd></div><div><dt>{{ t('usageMonitor.text.usageSource') }}</dt><dd>{{ basisLabel(request.usageBasis) }}</dd></div><div><dt>{{ t('usageMonitor.text.modeEvidence') }}</dt><dd>{{ requestModeLabel(request) }}</dd></div></dl><p v-if="request.unknownFields.length" class="unpriced">{{ request.unknownFields.length }} {{ t('usageMonitor.text.fieldsNotReportedRecordedPortionOnly') }}</p>
@@ -1195,7 +1317,16 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
             <p v-if="automaticRequest?.basis === 'unknown' && request.unknownFields.includes('requested_mode_ambiguous')" class="page-note">{{ t('usageMonitor.text.modeChangedDuringThisTurnTheModeForThis') }}</p>
             </details>
             <details class="alternative-price-evidence"><summary>{{ t('usageMonitor.text.allOriginalPriceComparisonsNotAddedToThisRequest') }}</summary>
-            <div v-for="option in pricingOptions(request.cost)" :key="`${option.label}:${option.evidence.version}`" class="price-evidence"><h4>{{ option.label }} · {{ option.amount == null ? t('usageMonitor.text.amountUnknown') : monitorAmount(option.amount, option.evidence.currency ?? 'USD') }}</h4><p>{{ t('usageMonitor.text.calculationEvidence') }} {{ option.evidence.version }} · {{ pricingProvider(option.evidence) }}<template v-if="option.evidence.pricingBasis === 'sub2api_reference'"> · {{ t('usageMonitor.text.currentReferencePriceNotHistoricalBill') }}</template></p><p>{{ option.evidence.model }} / {{ monitorMode(option.evidence.mode) }} / {{ displayContext(option.evidence.contextTier) }} {{ t('usageMonitor.text.priceChecked') }} {{ option.evidence.checkedAt }}</p><p v-if="option.evidence.catalogRevision">{{ t('usageMonitor.text.catalog') }} {{ option.evidence.catalogRevision }} {{ t('usageMonitor.text.rules') }} {{ option.evidence.ruleVersion }}<template v-if="option.evidence.timeBand"> · {{ option.evidence.timeBand === 'peak' ? t('usageMonitor.text.peak') : t('usageMonitor.text.offPeak') }}</template></p><p>{{ option.evidence.currency === 'CNY' ? t('usageMonitor.text.cny') : t('usageMonitor.text.usd') }} {{ t('usageMonitor.text.millionTokensInput') }} {{ option.evidence.inputPerMillion }} {{ t('usageMonitor.text.cacheRead3') }} {{ option.evidence.cachedPerMillion ?? t('usageMonitor.text.unknown') }} · <template v-if="option.evidence.cacheWritePerMillion != null">{{ t('usageMonitor.text.cacheWrite') }} {{ option.evidence.cacheWritePerMillion }}</template><template v-else>{{ t('usageMonitor.text.cacheWrite5Minutes') }} {{ option.evidence.cacheWrite5mPerMillion ?? t('usageMonitor.text.unknown') }} {{ t('usageMonitor.text.1Hour') }} {{ option.evidence.cacheWrite1hPerMillion ?? t('usageMonitor.text.unknown') }}</template> {{ t('usageMonitor.text.output3') }} {{ option.evidence.outputPerMillion }}</p><p v-if="option.evidence.excludedComponents?.length" class="excluded-components">{{ t('usageMonitor.text.amountsAboveExclude') }}{{ option.evidence.excludedComponents.map(excludedComponent).join(t('usageMonitor.text.label3')) }}</p><a v-if="priceLink(option.evidence.sourceUrl)" :href="priceLink(option.evidence.sourceUrl)" target="_blank" rel="noopener noreferrer">{{ t('usageMonitor.text.viewPriceSource') }}</a><span v-else>{{ option.evidence.sourceUrl }}</span><p v-for="source in option.evidence.ruleSources ?? []" :key="source"><a v-if="priceLink(source)" :href="priceLink(source)" target="_blank" rel="noopener noreferrer">{{ t(option.evidence.pricingBasis === 'sub2api_reference' ? 'usageMonitor.text.viewSub2apiPricingRules' : 'usageMonitor.text.viewOfficialSupplementaryNotes') }}</a><span v-else>{{ source }}</span></p></div>
+            <div v-for="option in pricingOptions(request.cost)" :key="`${option.label}:${option.evidence.version}`" class="price-evidence">
+              <h4>{{ option.label }} · {{ option.amount == null ? t('usageMonitor.text.amountUnknown') : monitorAmount(option.amount, option.evidence.currency ?? 'USD') }}</h4>
+              <p>{{ t('usageMonitor.text.calculationEvidence') }} {{ option.evidence.version }} · {{ pricingProvider(option.evidence) }}<template v-if="option.evidence.pricingBasis === 'sub2api_reference'"> · {{ t('usageMonitor.text.currentReferencePriceNotHistoricalBill') }}</template></p>
+              <p>{{ option.evidence.model }} / {{ monitorMode(option.evidence.mode) }} / {{ displayContext(option.evidence.contextTier) }} {{ t('usageMonitor.text.priceChecked') }} {{ option.evidence.checkedAt }}</p>
+              <p v-if="option.evidence.catalogRevision">{{ t('usageMonitor.text.catalog') }} {{ option.evidence.catalogRevision }} {{ t('usageMonitor.text.rules') }} {{ option.evidence.ruleVersion }}<template v-if="option.evidence.timeBand"> · {{ option.evidence.timeBand === 'peak' ? t('usageMonitor.text.peak') : t('usageMonitor.text.offPeak') }}</template></p>
+              <p v-if="option.evidence.pricingBasis !== 'upstream_recorded'">{{ option.evidence.currency === 'CNY' ? t('usageMonitor.text.cny') : t('usageMonitor.text.usd') }} {{ t('usageMonitor.text.millionTokensInput') }} {{ option.evidence.inputPerMillion }} {{ t('usageMonitor.text.cacheRead3') }} {{ option.evidence.cachedPerMillion ?? t('usageMonitor.text.unknown') }} · <template v-if="option.evidence.cacheWritePerMillion != null">{{ t('usageMonitor.text.cacheWrite') }} {{ option.evidence.cacheWritePerMillion }}</template><template v-else>{{ t('usageMonitor.text.cacheWrite5Minutes') }} {{ option.evidence.cacheWrite5mPerMillion ?? t('usageMonitor.text.unknown') }} {{ t('usageMonitor.text.1Hour') }} {{ option.evidence.cacheWrite1hPerMillion ?? t('usageMonitor.text.unknown') }}</template> {{ t('usageMonitor.text.output3') }} {{ option.evidence.outputPerMillion }}</p>
+              <p v-if="option.evidence.excludedComponents?.length" class="excluded-components">{{ t('usageMonitor.text.amountsAboveExclude') }}{{ option.evidence.excludedComponents.map(excludedComponent).join(t('usageMonitor.text.label3')) }}</p>
+              <a v-if="priceLink(option.evidence.sourceUrl)" :href="priceLink(option.evidence.sourceUrl)" target="_blank" rel="noopener noreferrer">{{ t('usageMonitor.text.viewPriceSource') }}</a><span v-else>{{ option.evidence.sourceUrl }}</span>
+              <p v-for="source in option.evidence.ruleSources ?? []" :key="source"><a v-if="priceLink(source)" :href="priceLink(source)" target="_blank" rel="noopener noreferrer">{{ t(option.evidence.pricingBasis === 'sub2api_reference' ? 'usageMonitor.text.viewSub2apiPricingRules' : 'usageMonitor.text.viewOfficialSupplementaryNotes') }}</a><span v-else>{{ source }}</span></p>
+            </div>
             </details>
           </article>
         </section>
@@ -1231,6 +1362,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(liveTimer); clearTimeout(a
 </template>
 
 <style scoped>
+.monitor-finance-page{scroll-margin-top:50px;min-width:0}.finance-navigation{display:flex;align-items:center;gap:20px;flex-wrap:wrap;border-bottom:1px solid var(--cost-line);margin-bottom:16px}.finance-navigation button{display:flex;align-items:center;gap:5px;min-height:42px;border-bottom:2px solid transparent;font-size:13px;color:var(--cost-muted)}.finance-navigation button[aria-pressed=true]{color:var(--cost-lime);border-bottom-color:var(--cost-lime)}.finance-account-heading{display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin:20px 0}.finance-account-heading h2{font-size:18px;font-weight:600;overflow-wrap:anywhere}.monitor-cost-command,.cost-read-error button{display:inline-flex;align-items:center;gap:6px;min-height:32px;color:var(--cost-blue);font-size:12px}.monitor-cost-command{padding:5px 9px;border:1px solid var(--cost-line);border-radius:4px}.monitor-cost-command:hover{background:var(--cost-panel)}.cost-read-error{font-size:11px;line-height:1.6;color:var(--cost-gold);margin:8px 0}.cost-read-error button{font-size:11px;margin-left:8px}.monitor-custom-period,.monitor-custom-period label{display:flex;align-items:center;gap:8px}.monitor-custom-period{flex-wrap:wrap;margin:10px 0 16px;font-size:12px;color:var(--cost-muted)}.monitor-custom-period input{padding:6px 8px;border:1px solid var(--cost-line);border-radius:4px;background:var(--cost-panel);color:var(--cost-text);font:inherit}.monitor-custom-period [role=alert]{color:var(--cost-gold)}.monitor-api-prices{scroll-margin-top:52px}
 .selected-price-evidence{padding:16px 0;margin-top:12px;border-top:1px solid var(--cost-line);border-bottom:1px solid var(--cost-line)}.selected-price-evidence h4{color:var(--cost-gold);font-size:14px;margin:0 0 8px}.selected-price-evidence p{font-size:12px;color:#a3b5a8;line-height:1.8}.selected-price-evidence a{display:inline-block;font-size:11px;color:var(--cost-blue);margin-top:10px}.alternative-price-evidence{margin-top:16px;font-size:12px}.alternative-price-evidence>summary{cursor:pointer;color:#9fb6a8;padding:10px 0;line-height:1.7}
 
 .credits-section{padding-top:14px;margin-top:8px;border-top:1px solid var(--cost-line)}.credit-account{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:10px 0;border-bottom:1px solid var(--cost-line)}.credit-account span{font-size:13px}.credit-account small{display:block;font-size:11px;color:#9db1a3;margin-top:6px;font-weight:400}.credit-account strong{font-size:22px;font-weight:600;color:var(--cost-blue);font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}.credit-account p{grid-column:1/-1;color:#92a89a;font-size:10px;margin:4px 0}
@@ -1314,15 +1446,12 @@ h2{font-size:20px;font-weight:600;margin:0}h2 span,h3 span{color:var(--cost-mute
 .source-head,.source-entry>summary{display:grid;grid-template-columns:minmax(150px,1fr) 140px minmax(140px,1fr) minmax(210px,1.5fr) minmax(150px,1fr);gap:16px;align-items:center;padding:16px 14px;font-size:12px}.source-head{color:#93a79a;background:var(--cost-panel);font-size:11px}.source-entry{border-bottom:1px solid var(--cost-line)}.source-entry>summary{cursor:pointer;list-style:none}.source-entry>summary::-webkit-details-marker{display:none}.source-entry>summary>span:first-child,.source-entry>summary>span:last-child{display:flex;align-items:center;gap:10px}.source-entry>summary>span:last-child{font-size:11px;color:#93a79a}.source-entry-detail{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:18px;background:var(--cost-panel);font-size:12px}.source-entry-detail code{overflow-wrap:anywhere;color:var(--cost-blue)}.source-entry-detail p{margin:0;font-size:12px}.source-entry-detail p:last-child{grid-column:1/-1}
 .catalog-band{display:flex;align-items:center;gap:25px;padding:28px 0;margin:8px 0;border-bottom:1px solid var(--cost-line);flex-wrap:wrap}.catalog-band>div{flex:1;min-width:180px;font-size:12px;color:#a4b4a9}.catalog-band>div:nth-child(2){display:flex;align-items:center;gap:10px}.catalog-band h2{font-size:18px;margin-bottom:10px}.catalog-band a,.lookup-evidence a{display:inline-flex;align-items:center;gap:5px;color:var(--cost-blue)}.catalog-band small{display:block;margin-top:7px;font-size:11px;color:#8da294}.catalog-sync{display:flex;align-items:center;justify-content:center;gap:8px;min-height:38px;padding:8px 14px;border:1px solid var(--cost-line-strong);border-radius:5px;color:var(--cost-text);font-size:12px}.catalog-sync:hover{background:var(--cost-panel-2)}.source-price-workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px}.price-lookup{border-left:1px solid var(--cost-line);padding-left:30px}.reason-list{margin-top:20px}.reason-list>div{display:flex;gap:20px;justify-content:space-between;padding:13px 0;border-bottom:1px solid var(--cost-line);font-size:12px}.reason-list b{flex-shrink:0;font-weight:500}.evidence-link{display:flex;align-items:center;gap:8px;margin-top:18px;color:var(--cost-blue);font-size:12px}.price-form{display:grid;grid-template-columns:minmax(0,1fr) 130px;gap:15px}.price-form label{display:flex;flex-direction:column;gap:8px;font-size:12px;color:#9eafa3}.price-form .catalog-sync{align-self:end;white-space:nowrap}.price-form .catalog-sync svg{flex-shrink:0}.price-empty{display:flex;justify-content:center;align-items:center;gap:10px;min-height:120px;color:#82968a;font-size:13px}.lookup-evidence{padding:20px 0}.lookup-evidence>div{display:flex;justify-content:space-between;gap:12px;font-size:12px}.lookup-evidence>div>span{color:#97aa9e}.lookup-evidence a{font-size:12px;margin-top:14px}
 @media(max-width:1200px){.session-layout.is-browser{grid-template-columns:260px minmax(0,1fr);gap:20px}.is-browser .detail-workspace{grid-template-columns:1fr}.is-browser .turn-index{border-right:0;padding-right:0}.source-head{display:none}.source-entry>summary{grid-template-columns:1fr 1fr;gap:12px}.source-entry>summary>span:nth-child(4){grid-column:1/-1}.source-price-workspace{grid-template-columns:1fr}.price-lookup{border-left:0;border-top:1px solid var(--cost-line);padding:0}.weekly-workspace{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:24px}.quota-dial{flex-basis:82px;width:82px;height:82px}.quota-dial>strong{font-size:19px}}
-@media(max-width:850px){.weekly-workspace,.analysis-visuals,.session-layout.is-browser{grid-template-columns:1fr}.weekly-value,.model-ranking,.is-browser>.sessions-section{border-right:0;border-left:0;padding:0}.model-ranking{border-top:1px solid var(--cost-line)}.session-browser{max-height:260px}.timing-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.source-entry-detail{grid-template-columns:1fr}.source-entry-detail p:last-child{grid-column:auto}.tool-overview{padding:8px 16px}.scope-controls{gap:12px}.scope-controls h1{flex-basis:100%}.week-figures strong{font-size:27px}}
-
-.chart-unit{display:flex;justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:10px 16px;min-height:32px;font-size:12px;color:#b4c4ba}.chart-unit select{padding:4px 8px;background:var(--cost-panel);border:1px solid var(--cost-line);border-radius:4px;color:var(--cost-text)}.chart-note{font-size:12px;line-height:1.7;color:#a3b7aa;margin:10px 0}.trend-section .source-selector button{font-size:13px;min-height:36px;padding:0 14px}.model-ranking .ranking-scroll>button{font-size:14px;min-height:60px}.model-ranking .ranking-scroll small{font-size:12px}.model-ranking .ranking-scroll b{font-size:15px;font-variant-numeric:tabular-nums}
+@media(max-width:850px){.weekly-workspace,.analysis-visuals,.session-layout.is-browser{grid-template-columns:1fr}.weekly-value,.model-ranking,.is-browser>.sessions-section{border-right:0;border-left:0;padding:0}.model-ranking{border-top:1px solid var(--cost-line)}.session-browser{max-height:260px}.timing-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.source-entry-detail{grid-template-columns:1fr}.source-entry-detail p:last-child{grid-column:auto}.tool-overview{padding:8px 16px}.scope-controls{gap:12px}.scope-controls h1{flex-basis:100%}.week-figures strong{font-size:27px}}.chart-note{font-size:12px;line-height:1.7;color:#a3b7aa;margin:10px 0}.trend-section .source-selector button{font-size:13px;min-height:36px;padding:0 14px}.model-ranking .ranking-scroll>button{font-size:14px;min-height:60px}.model-ranking .ranking-scroll small{font-size:12px}.model-ranking .ranking-scroll b{font-size:15px;font-variant-numeric:tabular-nums}
 .session-summary{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;padding:20px 0 24px;border-bottom:1px solid var(--cost-line);margin-top:8px}.session-summary>div{min-width:0;padding:0 16px;border-right:1px solid var(--cost-line)}.session-summary>div:first-child{padding-left:0}.session-summary>div:last-child{padding-right:0;border-right:0}.session-summary span{font-size:14px;color:#b4c4ba}.session-summary strong{display:block;font-size:30px;line-height:1.3;font-weight:650;margin:10px 0;color:var(--cost-blue);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.session-summary>div:nth-child(1) strong{color:var(--usage-input)}.session-summary>div:nth-child(2) strong{color:var(--usage-output)}.session-summary>div:nth-child(3) strong{color:var(--usage-cache)}.session-summary>div:nth-child(n+4) strong{color:var(--cost-text)}.session-summary small{display:block;font-size:11px;line-height:1.7;color:#a3b7aa}.record-evidence{padding:12px 0;border-bottom:1px solid var(--cost-line);font-size:12px}.record-evidence>summary{cursor:pointer;color:var(--cost-blue);line-height:1.8}.record-evidence[open]>summary{margin-bottom:12px}.record-evidence p{overflow-wrap:anywhere}.reason-filter{display:flex;align-items:center;justify-content:space-between;gap:10px;border-left:2px solid var(--cost-gold);padding:10px;background:var(--cost-panel);font-size:12px;color:var(--cost-muted)}.reason-filter strong{display:block;margin-top:5px;color:var(--cost-gold);font-size:13px;font-weight:500}.reason-link{display:inline-flex;align-items:center;gap:6px;color:var(--cost-blue);font-size:12px;white-space:nowrap}.reason-link:hover{color:var(--cost-lime)}.reason-list>div{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:16px;align-items:center;font-size:13px}.reason-list h3{font-size:15px}
 .source-group{border-bottom:1px solid var(--cost-line)}.source-group>summary{display:grid;grid-template-columns:minmax(150px,1fr) 140px minmax(140px,1fr) minmax(210px,1.5fr) minmax(150px,1fr);gap:16px;align-items:center;padding:20px 14px;list-style:none;cursor:pointer;font-size:14px;min-height:76px}.source-group>summary::-webkit-details-marker{display:none}.source-group>summary>span:first-child,.source-group>summary>span:last-child{display:flex;align-items:center;gap:10px}.source-group>summary>span:last-child{justify-content:space-between;font-size:12px}.source-group small,.source-entry small{display:block;font-size:11px;color:#a3b7aa;margin-top:5px;overflow-wrap:anywhere}.group-sources{padding:0 12px 12px;background:var(--cost-panel)}.group-sources>.source-entry:last-child{border-bottom:0}.group-sources .source-entry>summary>span:first-child{display:block}.group-sources .source-entry-detail{background:var(--cost-bg)}
 @media(max-width:1200px){.session-summary{grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}.session-summary>div{padding-left:0;border:0}.source-group>summary{grid-template-columns:1fr 1fr}.source-group>summary>span:nth-child(4){grid-column:1/-1}}
 @media(max-width:700px){.session-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.session-summary strong{font-size:26px}.reason-list>div{gap:10px}.reason-link{font-size:11px}.trend-section .section-bar{gap:10px}.trend-section .source-selector{width:100%}.trend-section .source-selector button{flex:1;padding:0 8px}}
-.session-filter-bar{display:grid;grid-template-columns:minmax(220px,1fr) 110px auto minmax(140px,180px) 122px auto 120px;gap:10px;align-items:center;border-bottom:1px solid var(--cost-line);padding:0 0 18px;margin-bottom:4px}.session-filter-bar .history-search{width:100%;max-width:none}.session-filter-bar .source-selector{margin:0}.session-filter-bar .source-selector button{min-height:36px}.session-filter-bar>select{height:36px;min-width:0;max-width:100%;padding:0 20px 0 9px;border:1px solid var(--cost-line-strong);border-radius:4px;background:var(--cost-panel);color:var(--cost-text);font-size:12px}.session-filter-bar .reason-filter{grid-column:1/-1;justify-self:start;max-width:100%}.history-scope{margin:0 0 16px}
-.model-cost-table{min-width:960px}.model-cost-table th:first-child{width:20%}.model-cost-table th:nth-child(2){width:7%}.model-cost-table th:nth-child(3){width:18%}.model-cost-table th:nth-child(4){width:15%}.model-cost-table th:nth-child(5){width:15%}.model-cost-table th:nth-child(6){width:16%}.model-cost-table th:last-child{width:9%}.model-cost-table td{font-size:13px;vertical-align:middle}.model-money{color:var(--cost-gold);font-weight:600;font-variant-numeric:tabular-nums}.model-evidence-link{margin:0;font-size:12px;white-space:nowrap}.coverage-badge{display:inline-flex;align-items:center;gap:6px;padding:3px 7px;border-radius:4px;border:1px solid #6e6039;color:var(--cost-gold);font-size:11px;line-height:1.5}.coverage-badge.complete{border-color:#415e32;color:var(--cost-lime)}.tool-breakdown>summary{font-size:13px;color:var(--cost-blue);cursor:pointer;padding:16px 0}
+.session-filter-bar{display:grid;grid-template-columns:minmax(220px,1fr) 110px auto minmax(140px,180px) 122px auto 120px;gap:10px;align-items:center;border-bottom:1px solid var(--cost-line);padding:0 0 18px;margin-bottom:4px}.session-filter-bar .history-search{width:100%;max-width:none}.session-filter-bar .source-selector{margin:0}.session-filter-bar .source-selector button{min-height:36px}.session-filter-bar>select{height:36px;min-width:0;max-width:100%;padding:0 20px 0 9px;border:1px solid var(--cost-line-strong);border-radius:4px;background:var(--cost-panel);color:var(--cost-text);font-size:12px}.session-filter-bar .reason-filter{grid-column:1/-1;justify-self:start;max-width:100%}.history-scope{margin:0 0 16px}.coverage-badge{display:inline-flex;align-items:center;gap:6px;padding:3px 7px;border-radius:4px;border:1px solid #6e6039;color:var(--cost-gold);font-size:11px;line-height:1.5}.coverage-badge.complete{border-color:#415e32;color:var(--cost-lime)}.tool-breakdown>summary{font-size:13px;color:var(--cost-blue);cursor:pointer;padding:16px 0}
 .usage-monitor :deep(.usage-state){display:inline-flex;align-items:center;gap:7px;color:#a5b5ac;font-size:12px;line-height:1.6}.usage-monitor :deep(.usage-state::before){content:'';width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0}.usage-monitor :deep(.usage-state[data-state='running']){color:var(--usage-success)}.usage-monitor :deep(.usage-state[data-state='active']),.usage-monitor :deep(.usage-state[data-state='recent']){color:var(--cost-blue)}.usage-monitor :deep(.usage-state[data-state='stale']){color:var(--usage-warning)}.usage-monitor :deep(.usage-state[data-state='unknown']){color:var(--usage-unknown)}.usage-monitor :deep(.session-kind){display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-style:normal;line-height:1.5;padding:2px 7px;border:1px solid #47584c;border-radius:4px;background:#1d2b20;color:#b9d398;vertical-align:middle}.source-group>summary>span:nth-child(2)::before{content:'';display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;background:currentColor}
 .request-proof-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px;padding:22px 0;border-top:1px solid var(--cost-line);border-bottom:1px solid var(--cost-line);margin:18px 0}.request-proof-layout h4{font-size:16px;font-weight:600;margin:0 0 16px}.request-price-panel,.request-original-evidence{min-width:0}.request-original-evidence{border-left:1px solid var(--cost-line);padding-left:28px}.request-proof-layout .selected-price-evidence{padding:0 0 16px;margin:0;border:0}.proof-amount{display:block;color:var(--cost-gold);font-size:26px;font-weight:650;font-variant-numeric:tabular-nums;line-height:1.4;overflow-wrap:anywhere;margin-bottom:12px}.request-rates{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:18px 0 8px}.request-rates dt,.source-facts dt,.lookup-context dt{font-size:12px;color:var(--cost-muted)}.request-rates dd{font-size:17px;margin:7px 0;color:var(--cost-text);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.request-price-panel small{font-size:11px;color:var(--cost-muted)}.request-price-panel a{display:inline-flex;align-items:center;gap:6px}.source-facts{margin:0}.source-facts>div{display:grid;grid-template-columns:80px minmax(0,1fr);gap:14px;margin-bottom:14px}.source-facts dd{margin:0;font-size:13px;overflow-wrap:anywhere}.request-original-evidence .record-evidence{border-bottom:0}.request-original-evidence .request-facts{grid-template-columns:1fr;margin:0;padding:10px 0;background:transparent}.proof-pending{font-size:17px;color:var(--cost-gold);line-height:1.7}.lookup-context{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 24px;padding:16px 0;margin:0;border-bottom:1px solid var(--cost-line)}.lookup-context dd{margin:6px 0 0;font-size:13px;font-weight:500;overflow-wrap:anywhere}
 @media(max-width:1250px){.session-filter-bar{grid-template-columns:minmax(175px,1fr) 100px auto minmax(110px,140px) 110px auto 108px;gap:8px}.session-filter-bar .source-selector button{padding:0 8px}.proof-amount{font-size:23px}}
@@ -1333,7 +1462,6 @@ h2{font-size:20px;font-weight:600;margin:0}h2 span,h3 span{color:var(--cost-mute
 .source-health [data-tone='healthy']{color:var(--usage-success)}.source-health [data-tone='warning']{color:var(--usage-warning)}.source-health [data-tone='error']{color:var(--usage-danger)}.source-health [data-tone='unknown']{color:var(--usage-unknown)}
 .ranking-scroll>button>span:first-child{min-width:0;overflow-wrap:anywhere}.ranking-scroll>button:disabled{cursor:default;opacity:1}.ranking-scroll>button:disabled>span:first-child{color:var(--usage-unknown)}.timing-strip>div:nth-child(3) strong,.speed-cell>strong{color:var(--usage-output)}.timing-strip>div:nth-child(4) strong{color:var(--usage-requests)}
 .usage-monitor .timing-strip strong.unknown-value{color:var(--usage-unknown)}
-.trend-peak{display:inline-flex;align-items:center;flex-wrap:wrap;gap:7px;margin-right:auto;font-size:12px;color:var(--cost-muted)}.trend-peak>i{width:6px;height:6px;background:var(--usage-output);transform:rotate(45deg)}.trend-peak strong{color:var(--usage-output);font-weight:600;font-variant-numeric:tabular-nums}.trend-peak small{font-size:11px}.intensity-key{display:inline-flex;align-items:center;gap:7px;font-size:11px;white-space:nowrap;color:var(--cost-muted)}.intensity-key>i{display:inline-block;width:72px;height:5px;border-radius:2px;background:var(--usage-intensity)}
 .credits-section .allowance-heading h3{font-size:16px}.credit-group>summary,.quota-source-details>summary{cursor:pointer;padding:10px 0;font-size:12px;color:var(--cost-text);line-height:1.6}.credit-group>summary>span,.quota-source-details>summary>span{margin-left:7px;color:var(--cost-muted);font-size:11px}.credit-group.current-credits>summary{display:none}.credit-accounts{max-height:175px;overflow:auto}.credit-account strong small{display:inline;font-size:10px;margin-left:5px}.historical-credit strong{color:var(--usage-unknown)}.credit-group:not(.current-credits),.quota-source-details{border-top:1px solid var(--cost-line)}.quota-source-details>summary>b{margin-left:10px;color:var(--usage-warning);font-size:11px;font-weight:400}.quota-source-details .quota-source-note:last-child{border-bottom:0}
 .detail-cost{display:flex;align-items:baseline;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--cost-muted);margin:10px 0 16px}.detail-cost strong{font-size:18px;color:var(--usage-output)}.detail-cost>span{color:var(--usage-warning)}.family-members{border-block:1px solid var(--cost-line);margin:18px 0;padding:12px 0}.family-members>summary{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer;list-style:none}.family-expand{margin-left:auto;transition:transform .15s}.family-members[open] .family-expand{transform:rotate(90deg)}.family-members>summary>svg{color:var(--cost-blue)}.family-members>summary>span,.family-members>summary>small{font-size:11px;font-weight:400;color:var(--cost-muted)}.family-member-scroll{max-height:250px;overflow:auto}.family-table{min-width:620px;font-size:12px}.family-table th{position:sticky;top:0;background:var(--cost-panel);z-index:1}.family-table td{padding:10px 12px;vertical-align:middle}.family-table td:first-child{max-width:260px;overflow-wrap:anywhere}.family-table td small{font-size:10px;color:var(--cost-muted)}.family-table .is-root{background:#ffffff04}.family-root-label{color:var(--cost-text);font-weight:600}.family-link{text-align:left;font-size:12px}.token-input{color:var(--usage-input)}.token-output{color:var(--usage-output)}.request-source{display:inline-flex!important;align-items:center;gap:4px;color:var(--cost-muted);font-size:11px}.request-source.child{color:var(--cost-blue)}.unlinked-children{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.own-timing-note{margin:0 0 12px}
 

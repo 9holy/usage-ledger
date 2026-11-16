@@ -64,13 +64,7 @@ function injectPublicSettings(backendUrl: string): Plugin {
           if (response.ok) {
             const data = await response.json()
             if (data.code === 0 && data.data) {
-              // HTML parses </script> before JavaScript parses its string values.
-              // Escape every '<', including in nested settings, so remote public
-              // settings cannot close this script and inject executable markup.
-              const serialized = JSON.stringify(data.data)
-                .replace(/</g, '\\u003c')
-                .replace(/\u2028/g, '\\u2028')
-                .replace(/\u2029/g, '\\u2029')
+              const serialized = JSON.stringify(data.data).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
               const script = `<script>window.__APP_CONFIG__=${serialized};</script>`
               return injectBranding(html, data.data).replace('</head>', () => `${script}\n</head>`)
             }
@@ -121,8 +115,6 @@ export default defineConfig(({ mode }) => {
     __INTLIFY_JIT_COMPILATION__: true
   },
     build: {
-    // This is a standalone repository. Never clear an unrelated sibling
-    // checkout's backend directory when running the ordinary build command.
     outDir: 'dist',
     emptyOutDir: true,
     rollupOptions: {

@@ -1,5 +1,5 @@
 import { flushPromises } from '@vue/test-utils'
-import { mountWithCostI18n as mount } from './costI18n'
+import { mountWithCostI18n as mount, costComponentI18n } from './costI18n'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getFinanceBatch, getFinanceLedger, getFinanceRelatedEvents, saveFinanceEvent, voidFinanceBatch, voidFinanceEvent, type FinanceEvent, type FinanceSnapshot } from '@/api/financeLedger'
 import CostEventsPanel from '../CostEventsPanel.vue'
@@ -15,6 +15,20 @@ function panel() {
 
 describe('CostEventsPanel', () => {
   beforeEach(() => { vi.clearAllMocks(); vi.mocked(getFinanceLedger).mockResolvedValue(empty()); vi.mocked(getFinanceRelatedEvents).mockResolvedValue([]); vi.mocked(saveFinanceEvent).mockResolvedValue(event); vi.mocked(voidFinanceEvent).mockResolvedValue({ ...event, voidedAtMs: 2 }) })
+
+  it('closes a confirmed void prompt and exposes a readable rejection without reporting a saved change', async () => {
+    vi.mocked(getFinanceLedger).mockResolvedValue(facts())
+    vi.mocked(voidFinanceEvent).mockRejectedValue('Handle or void the active linked events before voiding their source')
+    const wrapper=panel();await flushPromises()
+    await wrapper.get('[aria-label="作废财务记录"]').trigger('click');await wrapper.get('.confirm-void').trigger('click');await flushPromises()
+    expect(wrapper.find('.confirm-void').exists()).toBe(false)
+    expect(wrapper.get('[role="alert"]').text()).toContain('请先处理或作废关联的退款')
+    expect(wrapper.emitted('changed')).toBeUndefined()
+    expect(wrapper.get('[aria-label="作废财务记录"]').attributes('disabled')).toBeUndefined()
+    costComponentI18n('en');await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toBe('Handle or void the linked refunds and termination losses before voiding the original record.')
+    wrapper.unmount()
+  })
 
   it('keeps no entered facts distinct from actual zero and shows independent components', async () => {
     const wrapper = panel(); await flushPromises()
@@ -41,6 +55,23 @@ describe('CostEventsPanel', () => {
     await wrapper.get('input[type="number"]').setValue('125')
     await wrapper.get('form').trigger('submit'); await flushPromises()
     expect(saveFinanceEvent).toHaveBeenLastCalledWith(expect.objectContaining({ id: event.id, accountId: 'a', amount: 125, occurredAtMs: event.occurredAtMs, coverageStartMs: event.coverageStartMs, coverageEndMs: event.coverageEndMs }))
+  })
+
+  it('offers local accounts by name while persisting their stable identity', async () => {
+    const wrapper = mount(CostEventsPanel, { props: { source: 'local', instanceId: 'usage-monitor', startMs: 1, endMs: 1792166400000, accounts: [{ id: 'codex:stable', name: 'Codex Account 2' }], restrictAccounts: true } })
+    await flushPromises()
+    wrapper.vm.selectAccount('codex:stable')
+    wrapper.vm.openEntry('codex:stable')
+    await flushPromises()
+    const form = wrapper.get('form'), account = form.get('select')
+    expect(account.text()).toContain('Codex Account 2')
+    expect(account.element.value).toBe('codex:stable')
+    expect(form.find('input[list]').exists()).toBe(true) // Purchase channel still has suggestions.
+    await account.setValue('codex:stable')
+    await form.get('input[type="number"]').setValue('100')
+    await form.trigger('submit'); await flushPromises()
+    expect(saveFinanceEvent).toHaveBeenCalledWith(expect.objectContaining({ source: 'local', instanceId: 'usage-monitor', accountId: 'codex:stable', amount: 100 }))
+    wrapper.unmount()
   })
 
   it('requires explicit void confirmation and keeps a voided row visible', async () => {

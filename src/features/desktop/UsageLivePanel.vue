@@ -15,9 +15,10 @@ const { t } = useI18n()
 ChartJS.register(LineController, LineElement, PointElement, DoughnutController, ArcElement, CategoryScale, LinearScale, Filler, Tooltip)
 const props = defineProps<{ snapshot: MonitorSnapshot | null; tool: string | null }>()
 const emit = defineEmits<{ session: [key: string, event: MouseEvent]; model: [tool: string | null, model: string | null] }>()
-const seconds = ref<60 | 300>(60)
+const selectedSeconds = defineModel<60 | 300>('seconds')
+const seconds = computed({ get: () => selectedSeconds.value ?? 60, set: (value: 60 | 300) => { selectedSeconds.value = value } })
 const grouping = ref<'session' | 'model'>('session')
-const toolName = (tool: string | null) => ({ codex: 'Codex', claude: 'Claude Code', antigravity: 'Antigravity', 'deepseek-harness': 'DeepSeek Harness' }[tool || ''] || t('usageMonitor.text.allTools'))
+const toolName = (tool: string | null) => ({ api:'API',codex: 'Codex', claude: 'Claude Code', antigravity: 'Antigravity', 'deepseek-harness': 'DeepSeek Harness' }[tool || ''] || t('usageMonitor.text.allTools'))
 const windowOf = (windows?: LiveWindow[]) => windows?.find(row => row.seconds === seconds.value)
 const totalWindow = computed(() => windowOf(props.tool ? props.snapshot?.live?.byTool.find(row => row.tool === props.tool)?.windows : props.snapshot?.live?.windows))
 function rate(window?: LiveWindow, legacy?: number): ReturnType<typeof displayLiveRate> {
@@ -27,7 +28,12 @@ function rate(window?: LiveWindow, legacy?: number): ReturnType<typeof displayLi
   }
   return displayLiveRate(window)
 }
-const totalRate = computed(() => rate(totalWindow.value, props.snapshot?.totals.outputTokensPerSecond))
+const running = computed(() => !!props.snapshot?.collectedAtMs && (props.snapshot.rateSessions ?? props.snapshot.activeSessions ?? []).some(session =>
+  (!props.tool || session.tool === props.tool) && ['active', 'running'].includes(session.status)))
+const totalRate = computed(() => {
+  const display = rate(totalWindow.value, props.snapshot?.totals.outputTokensPerSecond)
+  return running.value && !(display.value != null && display.value > 0) ? { ...display, text: t('usageMonitor.text.runningWaitingForUsage') } : display
+})
 const formatMeasuredRate = (value: number) => value < .01 ? new Intl.NumberFormat(usageLocale(), { maximumSignificantDigits: 2, useGrouping: false }).format(value) : value.toFixed(2)
 function coverage(window?: LiveWindow): string {
   if (!props.snapshot?.collectedAtMs) return t('usageMonitor.text.waitingForSampleRecords')
@@ -37,6 +43,7 @@ function coverage(window?: LiveWindow): string {
   return display.value === 0 ? t('usageMonitor.text.noNewOutputRecordedInThisWindow') : t('usageMonitor.text.lastOfRecordsUpdatedEveryS', { value0: seconds.value === 60 ? t('usageMonitor.text.60Seconds') : t('usageMonitor.text.5Minutes'), value1: (props.snapshot?.refreshMs || 2000) / 1000 })
 }
 const sessionRows = computed(() => {
+  if (!props.snapshot?.collectedAtMs) return []
   const windowsBySession = new Map<string | null, LiveWindow[]>()
   for (const row of props.snapshot?.live?.bySession ?? []) {
     const key = row.sessionKey
@@ -49,9 +56,9 @@ const sessionRows = computed(() => {
     recentSpeed: row.session.requestSpeed?.latest && row.session.requestSpeed.latest.outputTokensPerSecond > 0 && Number.isFinite(row.session.requestSpeed.latest.outputTokensPerSecond) && row.session.requestSpeed.latest.timestampMs > 0
       ? t('usageMonitor.text.latestValidRequestTokensS', { value0: formatMeasuredRate(row.session.requestSpeed.latest.outputTokensPerSecond), value1: new Date(row.session.requestSpeed.latest.timestampMs).toLocaleString(usageLocale(), { hour12: false }) }) : null,
   })).filter(row => (!props.tool || row.session.tool === props.tool)
-    && (row.window ? row.window.observedOutputTokens > 0 : (row.rate.value ?? 0) > 0))
+    && (['active', 'running'].includes(row.session.status) || (row.window ? row.window.observedOutputTokens > 0 : (row.rate.value ?? 0) > 0)))
 })
-const modelRows = computed(() => (props.snapshot?.live?.byModel ?? []).filter(row => !props.tool || row.tool === props.tool)
+const modelRows = computed(() => (props.snapshot?.live?.byModel ?? []).filter(row => (!props.tool || row.tool === props.tool) && (windowOf(row.windows)?.observedOutputTokens ?? 0) > 0)
   .slice().sort((a, b) => (windowOf(b.windows)?.observedOutputTokens ?? 0) - (windowOf(a.windows)?.observedOutputTokens ?? 0)))
 const timelineSource = computed(() => props.tool ? props.snapshot?.live?.recordedTimelineByTool?.[props.tool] : props.snapshot?.live?.recordedTimeline)
 const timeline = computed(() => timelineSource.value ?? [])
@@ -205,7 +212,7 @@ function name(project: string | null, id: string): string { return project?.spli
     <div class="live-band">
       <div class="global-rate"><span>{{ tool ? toolName(tool) : t('usageMonitor.text.global') }}{{ t('usageMonitor.text.averageOutputRate') }} <Info :size="14" aria-hidden="true" /></span><strong :class="{ 'rate-state': !(totalRate.value != null && totalRate.value > 0) }">{{ totalRate.text }} <small v-if="totalRate.value != null && totalRate.value > 0">{{ t('usageMonitor.text.tokensS4') }}</small></strong><p>{{ coverage(totalWindow) }}</p><p class="rate-basis">{{ t('usageMonitor.text.averageRateNotTokenByTokenGenerationSpeed') }}</p><p v-if="totalWindow?.sourceComplete === false || snapshot?.live?.sourceCoverageIncomplete" class="partial">{{ t('usageMonitor.text.someToolsAreTemporarilyUnreadableTotalsIncludeOnlyCollected') }}</p></div>
       <div v-if="grouping === 'session'" class="rate-sessions" role="region" :aria-label="t('usageMonitor.text.averageOutputRateBySession')" tabindex="0">
-        <button v-for="row in sessionRows" :key="row.session.key" class="rate-session" :style="{ '--model-color': usageModelColor(row.session.recentRequest?.model || row.session.model) }" :title="row.session.project || row.session.id" @click="emit('session', row.session.key, $event)"><span>{{ name(row.session.project, row.session.id) }} <em class="session-kind">{{ row.session.parentId ? t('usageMonitor.text.subSessions') : t('usageMonitor.text.mainSession') }}</em></span><small>{{ toolName(row.session.tool) }} · {{ row.session.recentRequest?.model || row.session.model || t('usageMonitor.text.modelNotReported') }}</small><strong :class="{ 'rate-state': !(row.rate.value != null && row.rate.value > 0) }">{{ row.rate.value === 0 && ['running', 'active'].includes(row.session.status) ? t('usageMonitor.text.waitingForOutput') : row.rate.text }} <small v-if="row.rate.value != null && row.rate.value > 0">{{ t('usageMonitor.text.tokensS4') }}</small></strong><small v-if="!(row.rate.value != null && row.rate.value > 0) && row.recentSpeed" class="recent-request-speed">{{ row.recentSpeed }}</small><div v-if="row.window" class="contribution-track" :title="t('usageMonitor.text.shareOfCollectedOutput') + usagePercentLabel(contribution(row.window))"><i :style="{ width: contribution(row.window) + '%' }" /></div><small class="usage-state" :data-state="row.session.status">{{ ['idle', 'completed'].includes(row.session.status) ? t('usageMonitor.text.completedStillIncludedInTheCurrentWindow') + (row.rate.partial ? ' · ' + coverage(row.window) : '') : row.rate.partial || row.rate.value === 0 ? coverage(row.window) : t('usageMonitor.text.recentOutput') }}</small></button>
+        <button v-for="row in sessionRows" :key="row.session.key" class="rate-session" :style="{ '--model-color': usageModelColor(row.session.recentRequest?.model || row.session.model) }" :title="row.session.project || row.session.id" @click="emit('session', row.session.key, $event)"><span>{{ name(row.session.project, row.session.id) }} <em class="session-kind">{{ row.session.parentId ? t('usageMonitor.text.subSessions') : t('usageMonitor.text.mainSession') }}</em></span><small>{{ toolName(row.session.tool) }} · {{ row.session.recentRequest?.model || row.session.model || t('usageMonitor.text.modelNotReported') }}</small><strong :class="{ 'rate-state': !(row.rate.value != null && row.rate.value > 0) }">{{ !(row.rate.value != null && row.rate.value > 0) && ['running', 'active'].includes(row.session.status) ? t('usageMonitor.text.runningWaitingForUsage') : row.rate.text }} <small v-if="row.rate.value != null && row.rate.value > 0">{{ t('usageMonitor.text.tokensS4') }}</small></strong><small v-if="!(row.rate.value != null && row.rate.value > 0) && row.recentSpeed" class="recent-request-speed">{{ row.recentSpeed }}</small><div v-if="row.window" class="contribution-track" :title="t('usageMonitor.text.shareOfCollectedOutput') + usagePercentLabel(contribution(row.window))"><i :style="{ width: contribution(row.window) + '%' }" /></div><small class="usage-state" :data-state="row.session.status">{{ ['idle', 'completed'].includes(row.session.status) ? t('usageMonitor.text.completedStillIncludedInTheCurrentWindow') + (row.rate.partial ? ' · ' + coverage(row.window) : '') : row.rate.partial || row.rate.value === 0 ? coverage(row.window) : t('usageMonitor.text.recentOutput') }}</small></button>
         <p v-if="!sessionRows.length" class="empty">{{ snapshot ? t('usageMonitor.text.noOutputRecordedInTheCurrentWindow') : t('usageMonitor.text.loadingSessions') }}</p>
       </div>
       <div v-else class="rate-sessions" role="region" :aria-label="t('usageMonitor.text.averageOutputRateByModel')" tabindex="0">

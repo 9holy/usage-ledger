@@ -1,7 +1,7 @@
 <template>
   <form class="finance-batch" :aria-label="t('costComponents.purchaseBatchForm')" @submit.prevent="requestSave">
     <header><h4>{{ initial ? t('costComponents.editPurchaseBatch') : t('costComponents.batchPurchaseRenewal') }}</h4><span>{{ rows.length }} {{ t('costComponents.accountsAllocated') }} {{ allocated.toFixed(2) }} / {{ form.total || '0.00' }} {{ form.currency }}</span></header>
-    <p v-if="error" class="finance-error" role="alert">{{ error }}</p>
+    <p v-if="error" class="finance-error" role="alert">{{ financeErrorText(error) }}</p>
     <div class="batch-fields">
       <label> {{ t('costComponents.totalBatchPayment') }} <input v-model="form.total" :aria-label="t('costComponents.totalBatchPayment')" type="number" min="0" step="any" required :disabled="saving" /></label>
       <label> {{ t('costComponents.currency') }} <select v-model="form.currency" :aria-label="t('costComponents.batchCurrency')" :disabled="saving"><option>CNY</option><option>USD</option></select></label>
@@ -34,6 +34,7 @@ const { t } = useI18n()
 import { computed, getCurrentInstance, reactive, ref, watch } from 'vue'
 import { CheckCheck, Copy, Equal, Save, X } from '@lucide/vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import { financeErrorText } from '../financeErrorText'
 import { saveFinanceBatch, type FinanceBatch, type FinanceCurrency, type FinanceEvent, type FinanceEventInput, type FinanceScope } from '@/api/financeLedger'
 
 const props = defineProps<{ scope: FinanceScope; accounts: Array<{ id: string; name: string }>; channels: string[]; initial?: FinanceBatch | null }>()
@@ -51,7 +52,7 @@ const rows = ref<Row[]>(props.initial?.events.map(eventRow) ?? [])
 const selected = ref(rows.value.map(row => row.accountId))
 const search = ref('')
 const saving = ref(false)
-const error = ref('')
+const error = ref<unknown>('')
 const confirmRemoval = ref(false)
 const options = computed(() => { const map = new Map(props.accounts.map(account => [account.id, account])); for (const event of props.initial?.events ?? []) if (!map.has(event.accountId)) map.set(event.accountId, { id: event.accountId, name: event.accountId }); return [...map.values()] })
 const originalRows = computed(() => new Map((props.initial?.events ?? []).map(event => [event.accountId, event])))
@@ -99,7 +100,7 @@ async function submit() {
     const allocations: FinanceEventInput[] = rows.value.map(row => ({ ...props.scope, id: row.id, accountId: row.accountId, kind: row.kind, amount: Number(row.amount), currency: form.currency, occurredAtMs: occurredAtMs.value, coverageStartMs: rowTime(row, 'start'), coverageEndMs: rowTime(row, 'end'), planLabel: row.plan.trim() || null, note: row.note.trim() || null, batchId, batchTotal: Number(form.total), purchaseChannel: form.channel.trim() || null, relatedEventId: null }))
     await saveFinanceBatch({ scope: { ...props.scope }, batchId, totalAmount: Number(form.total), currency: form.currency, occurredAtMs: occurredAtMs.value, purchaseChannel: form.channel.trim() || null, allocations })
     emit('saved')
-  } catch (failure) { error.value = failure instanceof Error ? failure.message : String(failure) }
+  } catch (failure) { error.value = failure }
   finally { saving.value = false; emit('busy', false) }
 }
 </script>

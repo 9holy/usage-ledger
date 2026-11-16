@@ -13,6 +13,8 @@ pub(super) fn initialize(conn: &Connection) -> Result<(), String> {
         PRIMARY KEY(source,log_id,session_id));
         CREATE INDEX IF NOT EXISTS monitor_request_account_identity
           ON monitor_request_account_evidence(account_key);
+        CREATE INDEX IF NOT EXISTS monitor_request_account_session
+          ON monitor_request_account_evidence(session_id);
         CREATE TABLE IF NOT EXISTS monitor_request_account_source_rows (
           source TEXT NOT NULL,log_id INTEGER NOT NULL,request_id TEXT,
           PRIMARY KEY(source,log_id));",
@@ -134,6 +136,9 @@ fn replace_source_row(
             // A cleared identity does not establish replacement and must revoke
             // the retained row's proof instead of preserving it as an archive.
             let archive = format!("{source}#request:{:x}", md5::compute(previous));
+            conn.execute("DELETE FROM monitor_upstream_receipts WHERE source='cockpit' AND instance=?1 AND event_id=?2
+                AND monitor_id=(SELECT monitor_id FROM monitor_upstream_receipts WHERE source='cockpit' AND instance=?3 AND event_id=?2)", params![source,id.to_string(),archive]).map_err(|e|e.to_string())?;
+            conn.execute("UPDATE monitor_upstream_receipts SET instance=?3 WHERE source='cockpit' AND instance=?1 AND event_id=?2", params![source,id.to_string(),archive]).map_err(|e|e.to_string())?;
             conn.execute("INSERT OR IGNORE INTO monitor_request_account_evidence
                 SELECT ?3,log_id,session_id,account_key,model,requested_model,started_ms,finished_ms,input_tokens,output_tokens,cached_tokens
                 FROM monitor_request_account_evidence WHERE source=?1 AND log_id=?2", params![source,id,archive])
@@ -187,6 +192,9 @@ struct Evidence {
 type Fingerprint = (String, i64, i64, i64);
 pub(super) struct EvidenceIndex {
     proxy: BTreeMap<Fingerprint, Vec<Evidence>>,
+    quota: BTreeMap<String, (BTreeSet<String>, i64)>,
+    native: super::request_identity::Owners,
+    upstream: BTreeMap<(String,String),super::upstream_accounts::Owner>,
 }
 
 pub(super) enum AccountMatch<'a> {
@@ -196,6 +204,38 @@ pub(super) enum AccountMatch<'a> {
 }
 
 impl EvidenceIndex {
+    pub(super) fn account_is_api_only(&self,tool:&str,account:&str)->bool{
+        let owners=self.upstream.values().filter(|owner|owner.account_tool==tool&&owner.account==account&&!owner.conflict).collect::<Vec<_>>();
+        owners.iter().any(|owner|!owner.subscription)&&!owners.iter().any(|owner|owner.subscription)&&!self.native.contains_account(tool,account)
+    }
+
+    pub(super) fn persist_proxy_owners(&self, conn: &Connection) -> Result<(), String> {
+        let matches = self.unique_matches();
+        for records in self.proxy.values() {
+            for record in records {
+                let id = record.monitor_ids.first().filter(|id| record.monitor_ids.len() == 1
+                    && matches.get(id.as_str()).copied().flatten().is_some_and(|matched|
+                        matched.source == record.source && matched.log_id == record.log_id && matched.account == record.account));
+                let Some(id) = id else {
+                    conn.execute("UPDATE monitor_upstream_receipts SET conflicted=1 WHERE source='cockpit' AND instance=?1 AND event_id=?2 AND monitor_id IS NOT NULL AND NOT conflicted",params![record.source,record.log_id.to_string()]).map_err(|e|e.to_string())?;
+                    continue;
+                };
+                let exists:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM monitor_upstream_receipts WHERE source='cockpit' AND instance=?1 AND event_id=?2)",params![record.source,record.log_id.to_string()],|r|r.get(0)).map_err(|e|e.to_string())?;
+                if exists {
+                    conn.execute("UPDATE monitor_upstream_receipts SET conflicted=1 WHERE source='cockpit' AND instance=?1 AND event_id=?2 AND (account_key<>?3 OR monitor_id IS NOT ?4)",params![record.source,record.log_id.to_string(),record.account,id]).map_err(|e|e.to_string())?;
+                    continue;
+                }
+                let data:String=conn.query_row("SELECT usage FROM monitor_requests WHERE tool='codex' AND id=?1",[id],|r|r.get(0)).map_err(|e|e.to_string())?;
+                let usage:UsageRecord=serde_json::from_str(&data).map_err(|e|e.to_string())?;
+                if let AccountMatch::Verified(account)=self.proxy_account_for(&usage) {
+                    conn.execute("INSERT OR IGNORE INTO monitor_upstream_receipts(source,instance,event_id,tool,account_key,subscription,request_id,model,timestamp_ms,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,monitor_id)
+                      VALUES('cockpit',?1,?2,'codex',?3,1,?4,?5,?6,?7,?8,?9,?10,?11)",params![record.source,record.log_id.to_string(),account,usage.request_id.as_deref().unwrap_or(id),usage.model,usage.timestamp_ms,usage.input_tokens,usage.output_tokens,usage.cache_read_tokens,usage.cache_write_tokens,id]).map_err(|e|e.to_string())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn unique_matches(&self) -> BTreeMap<&str, Option<&Evidence>> {
         let mut matches = BTreeMap::new();
         for evidence in self.proxy.values().flatten() {
@@ -211,7 +251,7 @@ impl EvidenceIndex {
         matches
     }
 
-    pub(super) fn api_request_ids(&self) -> BTreeSet<String> {
+    pub(super) fn api_request_ids(&self)->BTreeSet<String>{
         self.unique_matches().into_iter().filter_map(|(id, row)| row.map(|_| id.to_owned())).collect()
     }
 
@@ -226,12 +266,23 @@ impl EvidenceIndex {
     }
 
     pub(super) fn load(conn: &Connection) -> Result<Self, String> {
+        Self::load_scoped(conn,None,None)
+    }
+
+    pub(super) fn load_for_requests(conn:&Connection,requests:&[UsageRecord])->Result<Self,String>{
+        let sessions=serde_json::to_string(&requests.iter().filter(|r|r.tool=="codex").map(|r|r.session_id.as_str()).collect::<BTreeSet<_>>()).map_err(|e|e.to_string())?;
+        let ids=serde_json::to_string(&requests.iter().map(|r|r.id.as_str()).collect::<BTreeSet<_>>()).map_err(|e|e.to_string())?;
+        Self::load_scoped(conn,Some(&sessions),Some(&ids))
+    }
+
+    fn load_scoped(conn:&Connection,sessions:Option<&str>,ids:Option<&str>)->Result<Self,String>{
         let mut index: BTreeMap<Fingerprint, Vec<Evidence>> = BTreeMap::new();
-        let mut statement = conn.prepare("SELECT source,log_id,session_id,account_key,model,requested_model,
-            started_ms,finished_ms,input_tokens,output_tokens,cached_tokens FROM monitor_request_account_evidence")
+        let filter=if sessions.is_some(){" WHERE session_id IN (SELECT value FROM json_each(?1))"}else{""};
+        let mut statement = conn.prepare(&format!("SELECT source,log_id,session_id,account_key,model,requested_model,
+            started_ms,finished_ms,input_tokens,output_tokens,cached_tokens FROM monitor_request_account_evidence{filter}"))
             .map_err(|e| e.to_string())?;
         let rows = statement
-            .query_map([], |r| {
+            .query_map(rusqlite::params_from_iter(sessions), |r| {
                 Ok((
                     (r.get(2)?, r.get(8)?, r.get(9)?, r.get(10)?),
                     Evidence {
@@ -283,16 +334,60 @@ impl EvidenceIndex {
                 evidence.monitor_ids = ids;
             }
         }
-        Ok(Self { proxy: index })
+        let mut quota = BTreeMap::<String,(BTreeSet<String>,i64)>::new();
+        let filter=if ids.is_some(){" WHERE e.id IN (SELECT value FROM json_each(?1))"}else{""};
+        let mut query = conn.prepare(&format!("SELECT r.id,r.timestamp_ms,a.account_key FROM monitor_request_quota_evidence e
+            JOIN monitor_codex_quota_accounts a ON a.home=e.home AND a.reset_ms=e.reset_ms AND a.plan=e.plan
+            JOIN monitor_requests r ON r.tool='codex' AND r.id=e.id
+              AND r.timestamp_ms>=e.reset_ms-604800000 AND r.timestamp_ms<e.reset_ms{filter}"))
+            .map_err(|e|e.to_string())?;
+        let rows = query.query_map(rusqlite::params_from_iter(ids),|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?)))
+            .map_err(|e|e.to_string())?;
+        for row in rows {
+            let (id,time,account)=row.map_err(|e|e.to_string())?;
+            quota.entry(id).or_insert_with(||(BTreeSet::new(),time)).0.insert(account);
+        }
+        Ok(Self { proxy:index, quota,native:super::request_identity::Owners::load(conn,ids)?,upstream:super::upstream_accounts::owners(conn,ids)? })
+    }
+
+    pub(super) fn upstream_owner(&self, usage: &UsageRecord) -> Option<super::upstream_accounts::Owner> {
+        let mut owner = self.upstream.get(&(usage.tool.clone(),usage.id.clone())).cloned();
+        if let AccountMatch::Verified(account) = self.proxy_account_for(usage) {
+            let value = owner.get_or_insert_with(|| super::upstream_accounts::Owner { account: account.into(), account_tool:"codex".into(), subscription: true, quota_eligible:true, ..Default::default() });
+            value.conflict |= value.account != account || !value.subscription;
+            value.sources.insert("cockpit".into());
+        } else if matches!(self.proxy_account_for(usage), AccountMatch::Conflict) {
+            return Some(super::upstream_accounts::Owner { conflict: true, ..Default::default() });
+        }
+        if owner.is_none() && usage.billing_scope.as_deref() == Some("api") {
+            if let Some((accounts,_)) = self.quota.get(&usage.id).filter(|(accounts,_)| accounts.len()==1) {
+                owner = Some(super::upstream_accounts::Owner { account: accounts.first().unwrap().clone(), account_tool:"codex".into(), subscription: true, sources: BTreeSet::from(["api".into()]), conflict: false,quota_eligible:true });
+            }
+        }
+        if let Some(value) = &mut owner {
+            match self.native.account_for(usage) {
+                AccountMatch::Conflict => value.conflict = true,
+                AccountMatch::Verified(account) if account != value.account || usage.tool!=value.account_tool => value.conflict = true,
+                _ => {},
+            }
+        }
+        owner
     }
 
     pub(super) fn account_for(&self, usage: &UsageRecord) -> AccountMatch<'_> {
+        match self.native.account_for(usage){AccountMatch::None=>{},matched=>return matched}
         if !valid_usage(usage) {
             return AccountMatch::None;
         }
-        // A shared home/plan/reset timestamp identifies a possible quota pool,
-        // not the account that actually served this historical request.
-        self.proxy_account_for(usage)
+        match self.proxy_account_for(usage) {
+            AccountMatch::None => {},
+            matched => return matched,
+        }
+        match self.quota.get(&usage.id) {
+            Some((accounts,_)) if accounts.len()==1 => AccountMatch::Verified(accounts.first().unwrap()),
+            Some(_) => AccountMatch::Conflict,
+            None => AccountMatch::None,
+        }
     }
 
     fn proxy_account_for(&self, usage: &UsageRecord) -> AccountMatch<'_> {
@@ -356,6 +451,39 @@ mod tests {
           INSERT INTO request_logs VALUES(1,'r1',10000,2000,100,20,80,'gpt-6.1-sol',NULL,'actual',1);
           INSERT INTO request_diagnostics VALUES('r1','thread','root-thread');").unwrap();
         conn
+    }
+
+    #[test]
+    fn changed_source_evidence_invalidates_a_persisted_match_without_changing_the_request(){
+        let mut ledger=Connection::open_in_memory().unwrap();super::super::store::initialize(&ledger).unwrap();let source=source();
+        let usage=UsageRecord{id:"response:one".into(),tool:"codex".into(),session_id:"thread".into(),model:Some("gpt-6.1-sol".into()),timestamp_ms:12000,input_tokens:100,output_tokens:20,cache_read_tokens:80,..Default::default()};
+        ledger.execute("INSERT INTO monitor_requests VALUES('codex',?1,'codex:thread',12000,?2,'{\"usd\":5}')",params![usage.id,serde_json::to_string(&usage).unwrap()]).unwrap();
+        collect_from(&mut ledger,&source,"fixture",14000).unwrap();EvidenceIndex::load(&ledger).unwrap().persist_proxy_owners(&ledger).unwrap();
+        assert!(!super::super::upstream_accounts::owners(&ledger,None).unwrap()[&("codex".into(),usage.id.clone())].conflict);
+        source.execute("UPDATE request_logs SET output_tokens=21 WHERE id=1",[]).unwrap();
+        collect_from(&mut ledger,&source,"fixture",15000).unwrap();EvidenceIndex::load(&ledger).unwrap().persist_proxy_owners(&ledger).unwrap();
+        assert!(super::super::upstream_accounts::owners(&ledger,None).unwrap()[&("codex".into(),usage.id)].conflict);
+        assert_eq!(ledger.query_row("SELECT json_extract(cost,'$.usd') FROM monitor_requests",[],|r|r.get::<_,f64>(0)).unwrap(),5.);
+    }
+
+    #[test]
+    fn a_recreated_source_with_reused_ids_and_a_higher_max_preserves_previous_request_ownership(){
+        let mut ledger=Connection::open_in_memory().unwrap();super::super::store::initialize(&ledger).unwrap();let source=source();
+        for(id,session,time)in [("old","thread",12000),("new","new-thread",22000)] {
+            let usage=UsageRecord{id:format!("response:{id}"),tool:"codex".into(),session_id:session.into(),model:Some("gpt-6.1-sol".into()),timestamp_ms:time,input_tokens:100,output_tokens:20,cache_read_tokens:80,..Default::default()};
+            ledger.execute("INSERT INTO monitor_requests VALUES('codex',?1,?2,?3,?4,'{\"usd\":5}')",params![usage.id,format!("codex:{session}"),time,serde_json::to_string(&usage).unwrap()]).unwrap();
+        }
+        collect_from(&mut ledger,&source,"fixture",14000).unwrap();EvidenceIndex::load(&ledger).unwrap().persist_proxy_owners(&ledger).unwrap();
+        source.execute_batch("DELETE FROM request_logs;INSERT INTO request_logs VALUES(1,'replacement',20000,2000,100,20,80,'gpt-6.1-sol',NULL,'new-account',1);
+          INSERT INTO request_logs VALUES(2,'failed',23000,1,0,0,0,'gpt-6.1-sol',NULL,NULL,0);
+          INSERT INTO request_diagnostics VALUES('replacement','new-thread',NULL);").unwrap();
+        collect_from(&mut ledger,&source,"fixture",24000).unwrap();EvidenceIndex::load(&ledger).unwrap().persist_proxy_owners(&ledger).unwrap();
+        let owners=super::super::upstream_accounts::owners(&ledger,None).unwrap();
+        assert_eq!(owners[&("codex".into(),"response:old".into())].account,"account:actual");
+        assert!(!owners[&("codex".into(),"response:old".into())].conflict);
+        assert_eq!(owners[&("codex".into(),"response:new".into())].account,"account:new-account");
+        assert_eq!(collect_from(&mut ledger,&source,"fixture",24000).unwrap(),0);
+        assert_eq!(ledger.query_row("SELECT SUM(json_extract(cost,'$.usd')) FROM monitor_requests",[],|r|r.get::<_,f64>(0)).unwrap(),10.);
     }
 
     #[test]

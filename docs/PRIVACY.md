@@ -30,6 +30,10 @@ The reproduction helper uses a fresh browser context, permits its own loopback r
 
 ## 运行时 / Runtime
 
+本机采集到的账号名称、用户备注、请求用量与报价、额度轮次、费用记录及输出速率历史保存在应用自己的账本中，不随外部日志或账号文件清理而删除。自动名称只按明确账号 ID 对应；不会把用于读取名称的登录令牌、API 密钥或账号解密密钥保存进名称表。此类账本及真实账号截图属于私人资料，不纳入源码交接包。
+
+Collected account names, user remarks, usage and saved quotes, quota cycles, cost entries and output-rate history are kept in the application's own ledger when external logs or account files are removed. Automatic names use exact account IDs. Display-name storage does not retain login tokens, API keys or the account decryption key. Ledgers and real-account screenshots are private and excluded from source exports.
+
 应用按启用功能访问本地工具记录、账号/额度、应用账本及已配置服务；价格、汇率、更新和手动检查可涉及网络。源包不含这些用户数据，不表示运行应用无需权限或网络。
 
 Enabled features read local tool records, account/quota state, application ledgers and configured services. Pricing, exchange rates, updates and manual checks may use the network. Excluding user data from the archive does not make the running app data-free or network-free.

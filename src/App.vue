@@ -8,8 +8,9 @@ import { resolveRouteDocumentTitle } from '@/router/title'
 import AnnouncementPopup from '@/components/common/AnnouncementPopup.vue'
 import { useAppStore, useAuthStore, useSubscriptionStore, useAnnouncementStore, useAdminComplianceStore, useAdminSettingsStore } from '@/stores'
 import { updateFavicon } from '@/utils/branding'
-import { getActiveConnection, isDesktopRuntime } from '@/api/url'
+import { isDesktopRuntime, getActiveConnection } from '@/api/url'
 import { connectionScopeKey } from '@/stores/connectionScope'
+import { startMonitorUpstreams } from '@/api/monitorUpstreams'
 import DesktopTitleBar from '@/features/desktop/DesktopTitleBar.vue'
 
 const router = useRouter()
@@ -28,6 +29,7 @@ const remoteUserSession = computed(() => {
   return connection ? connection.type === 'sub2api' && connection.authMode === 'login' && connection.apiKey === authStore.token : !desktopRuntime
 })
 let announcementTimer: ReturnType<typeof setTimeout> | null = null
+let stopUpstreamSync: (() => void) | undefined
 
 function updateDocumentTitle() {
   const customMenuItems = [
@@ -64,7 +66,7 @@ watch(
 
 // Watch for authentication state and manage subscription data + announcements
 function onVisibilityChange() {
-  if (route.path !== '/usage-monitor' && document.visibilityState === 'visible' && remoteUserSession.value) {
+  if (!['/usage-monitor','/local-cost'].includes(route.path) && document.visibilityState === 'visible' && remoteUserSession.value) {
     announcementStore.fetchAnnouncements()
   }
 }
@@ -75,7 +77,7 @@ function onAdminComplianceRequired(event: Event) {
 }
 
 watch(
-  [() => remoteUserSession.value, () => route.path === '/usage-monitor', connectionScopeKey],
+  [() => remoteUserSession.value, () => ['/usage-monitor','/local-cost'].includes(route.path), connectionScopeKey],
   ([isAuthenticated, localMonitor], oldValue) => {
     if (announcementTimer) clearTimeout(announcementTimer)
     announcementTimer = null
@@ -102,7 +104,7 @@ watch(
         // New login: delay 3s then force fetch
         announcementTimer = setTimeout(() => {
           announcementTimer = null
-          if (route.path !== '/usage-monitor' && remoteUserSession.value) announcementStore.fetchAnnouncements(true)
+          if (!['/usage-monitor','/local-cost'].includes(route.path) && remoteUserSession.value) announcementStore.fetchAnnouncements(true)
         }, 3000)
       } else {
         // Page refresh restore (oldValue was undefined)
@@ -124,12 +126,13 @@ watch(
 
 // Route change trigger (throttled by store)
 router.afterEach(() => {
-  if (route.path !== '/usage-monitor' && remoteUserSession.value) {
+  if (!['/usage-monitor','/local-cost'].includes(route.path) && remoteUserSession.value) {
     announcementStore.fetchAnnouncements()
   }
 })
 
 onBeforeUnmount(() => {
+  stopUpstreamSync?.()
   if (announcementTimer) clearTimeout(announcementTimer)
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('admin-compliance-required', onAdminComplianceRequired)
@@ -153,6 +156,7 @@ watch(() => route.path, (_next, previous) => {
 watch(connectionScopeKey, () => { void initializeApplication() })
 
 onMounted(async () => {
+  if (desktopRuntime) stopUpstreamSync = startMonitorUpstreams()
   document.documentElement.classList.toggle('desktop-runtime', desktopRuntime)
   document.documentElement.classList.toggle('desktop-native-chrome', nativeMacChrome)
   window.addEventListener('admin-compliance-required', onAdminComplianceRequired)

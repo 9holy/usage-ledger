@@ -103,9 +103,12 @@ function seriesGradient(item: CostChartSeries, chart: Pick<ChartJS, 'ctx' | 'cha
 const chartData = computed<ChartData<'line'>>(() => ({
   labels: props.labels,
   datasets: props.series.slice(0, 3).map((item) => {
-    // 单点 series 显示点(pointRadius>0),多点折线不显示点(靠 hover)。
-    // cockpit 健康图只有 1 个持久采样点,pointRadius:0 + spanGaps:false 会让单点退化线不可见。
+    // Isolated samples need markers because gaps cannot form line segments.
     const finitePoints = item.data.filter((value) => value != null && Number.isFinite(value)).length
+    const isolatedPoints = item.data.map((value, index) => value != null && Number.isFinite(value)
+      && (item.data[index - 1] == null || !Number.isFinite(item.data[index - 1]))
+      && (item.data[index + 1] == null || !Number.isFinite(item.data[index + 1])))
+    const hasIsolatedPoints = isolatedPoints.some(Boolean)
     const peak = item.colorStops ? Math.max(0, ...item.data.map(value => value ?? 0)) : 0
     const peakIndex = peak > 0 ? item.data.indexOf(peak) : -1
     return {
@@ -116,8 +119,8 @@ const chartData = computed<ChartData<'line'>>(() => ({
       borderDash: item.dashed ? [5, 4] : [],
       borderWidth: item.dashed ? 1.4 : item.colorStops ? 2.4 : 1.8,
       fill: item.fill ? 'origin' : false,
-      pointRadius: item.colorStops ? item.data.map((_value, index) => index === peakIndex ? 5 : 3) : props.showValues || finitePoints <= 1 ? 3 : 0,
-      pointBackgroundColor: item.colorStops ? (context: ScriptableContext<'line'>) => seriesGradient(item, context.chart) : props.showValues ? item.color : undefined,
+      pointRadius: item.colorStops ? item.data.map((_value, index) => index === peakIndex ? 5 : 3) : props.showValues || finitePoints <= 1 ? 3 : hasIsolatedPoints ? isolatedPoints.map(isolated => isolated ? 3 : 0) : 0,
+      pointBackgroundColor: item.colorStops ? (context: ScriptableContext<'line'>) => seriesGradient(item, context.chart) : props.showValues || hasIsolatedPoints ? item.color : undefined,
       pointBorderColor: item.colorStops ? item.data.map((_value, index) => index === peakIndex ? '#eef3f0' : '#101413') : undefined,
       pointBorderWidth: item.colorStops ? 1.5 : 1,
       pointHoverRadius: 4,

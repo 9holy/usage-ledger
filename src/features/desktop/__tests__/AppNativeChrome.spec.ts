@@ -7,9 +7,12 @@ import { createI18n } from 'vue-i18n'
 import { parse } from 'vue/compiler-sfc'
 import App from '@/App.vue'
 import en from '@/i18n/locales/en/desktop'
+import { startMonitorUpstreams } from '@/api/monitorUpstreams'
 
 const runtime = vi.hoisted(() => ({ desktop: true }))
 vi.mock('@/api/url', () => ({ isDesktopRuntime: () => runtime.desktop, getActiveConnection: () => null }))
+vi.mock('@/stores/connection', () => ({ useConnectionStore: () => ({ active: null }) }))
+vi.mock('@/api/monitorUpstreams', () => ({ startMonitorUpstreams: vi.fn(() => vi.fn()) }))
 vi.mock('@/stores', () => ({
   useAppStore: () => ({ siteName: 'Usage Ledger', siteLogo: '', cachedPublicSettings: null, fetchPublicSettings: vi.fn() }),
   useAuthStore: () => ({ isAuthenticated: false, isAdmin: false }),
@@ -44,6 +47,7 @@ it.each([
   { label: 'Windows desktop', platform: 'Win32', desktop: true, native: false },
   { label: 'macOS browser', platform: 'MacIntel', desktop: false, native: false },
 ])('uses the correct chrome and safe-area mode for $label', async ({ platform, desktop, native }) => {
+  vi.mocked(startMonitorUpstreams).mockClear()
   runtime.desktop = desktop
   vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform)
   stylesheet = document.createElement('style')
@@ -64,6 +68,8 @@ it.each([
   const i18n = createI18n({ legacy: false, locale: 'en', messages: { en: { desktop: en } } })
   wrapper = mount(App, { attachTo: document.body, global: { plugins: [router, i18n] } })
   await flushPromises()
+  expect(startMonitorUpstreams).toHaveBeenCalledTimes(desktop ? 1 : 0)
+  const stop=vi.mocked(startMonitorUpstreams).mock.results.at(-1)?.value
 
   const frame = wrapper.get('.app-window')
   expect(frame.classes().includes('app-window--desktop')).toBe(desktop)
@@ -94,6 +100,7 @@ it.each([
 
   wrapper.unmount()
   wrapper = undefined
+  if (desktop) expect(stop).toHaveBeenCalledTimes(1)
   expect(document.documentElement.classList.contains('desktop-runtime')).toBe(false)
   expect(document.documentElement.classList.contains('desktop-native-chrome')).toBe(false)
   expect(document.querySelector('.modal-overlay')).toBeNull()

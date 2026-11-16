@@ -25,16 +25,16 @@ vi.mock('@/composables/useRoutePrefetch', () => ({ useRoutePrefetch: vi.fn() }))
 vi.mock('@/api/setup', () => ({ getSetupStatus: vi.fn() }))
 
 describe('local usage monitor route', () => {
-  it('allows direct navigation before remote restoration or authentication', async () => {
+  it.each(['/usage-monitor','/local-cost'])('allows %s before remote restoration or authentication', async path => {
     await import('@/router')
     i18n.global.setLocaleMessage('en', { desktop: desktopEn })
     const next = vi.fn()
-    const monitorRoute = mocks.routes.find((route) => route.path === '/usage-monitor')
-    const target = { path: '/usage-monitor', params: {}, meta: monitorRoute?.meta ?? {} }
+    const monitorRoute = mocks.routes.find((route) => route.path === path)
+    const target = { path, params: {}, meta: monitorRoute?.meta ?? {} }
     await mocks.guard!(target, {}, next)
     expect(next).toHaveBeenCalledWith()
     expect(mocks.connection).not.toHaveBeenCalled()
     expect(mocks.auth).not.toHaveBeenCalled()
-    expect(monitorRoute?.meta).toMatchObject({ requiresAuth: false, titleKey: 'desktop.pages.monitor' })
+    expect(monitorRoute?.meta).toMatchObject({ requiresAuth: false, titleKey: path === '/usage-monitor' ? 'desktop.pages.monitor' : 'desktop.localCost.title' })
   })
 })

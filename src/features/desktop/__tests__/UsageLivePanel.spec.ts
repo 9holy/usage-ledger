@@ -17,26 +17,26 @@ function snapshot(): MonitorSnapshot {
 }
 
 describe('UsageLivePanel', () => {
-  it('propagates unknown output through same-model cross-tool aggregation without losing its known lower bound', () => {
-    const data = snapshot()
-    const incomplete = { ...window(60, 90, false), outputComplete: false }
-    data.live!.windows = [incomplete]
-    data.live!.byModel = [
-      { tool: 'codex', model: 'shared-model', sessionKey: null, windows: [{ ...window(60, 60), outputComplete: true }] },
-      { tool: 'claude', model: 'shared-model', sessionKey: null, windows: [incomplete] },
-    ]
-    const wrapper = mount(UsageLivePanel, { props: { snapshot: data, tool: null } })
-    expect(wrapper.get('.global-rate strong').text()).toBe('输出不完整，速率未知')
-    const legend = wrapper.get('.spectrum-legend button')
-    expect(legend.get('b').text()).toContain('输出不完整，速率未知')
-    expect(legend.get('.spectrum-output').text()).toContain('150')
-    expect(legend.find('.fastest-label').exists()).toBe(false)
-    expect(wrapper.get('.model-spectrum').getComponent(Chart).props('data').datasets[0].data).toEqual([150])
+  it('renders Codex and Claude together and shares rate-window changes with the header', async () => {
+    const data=snapshot()
+    data.live!.windows=[window(60,900),window(300,900)]
+    data.live!.byTool=[{tool:'codex',model:null,sessionKey:null,windows:[window(60,600),window(300,600)]},{tool:'claude',model:null,sessionKey:null,windows:[window(60,300),window(300,300)]}]
+    data.rateSessions=['codex','claude'].map(tool=>({key:tool+':shared',tool,id:'shared',parentId:null,project:tool,model:tool+'-model',status:'active',startedAtMs:1,updatedAtMs:100000,totals:data.totals}))
+    data.live!.bySession=data.rateSessions.map(s=>({tool:s.tool,model:null,sessionKey:s.key,windows:data.live!.byTool.find(t=>t.tool===s.tool)!.windows}))
+    const wrapper=mount(UsageLivePanel,{props:{snapshot:data,tool:null,seconds:60}})
+    expect(wrapper.get('.global-rate strong').text()).toContain('15.00')
+    expect(wrapper.findAll('.rate-session')).toHaveLength(2)
+    expect(wrapper.findAll('.rate-session strong').map(r=>r.text())).toEqual(['10.00 Token/秒','5.00 Token/秒'])
+    await wrapper.get('[aria-label="速度统计时段"]').findAll('button')[1].trigger('click')
+    expect(wrapper.emitted('update:seconds')?.[0]).toEqual([300])
+    await wrapper.setProps({seconds:300})
+    expect(wrapper.get('.global-rate strong').text()).toContain('3.00')
+    expect(wrapper.findAll('.rate-session')).toHaveLength(2)
     wrapper.unmount()
   })
   it('indexes session windows once with first-match semantics and reacts to missing/null keys and new snapshots', async () => {
     const data = snapshot()
-    data.rateSessions = Array.from({ length: 24 }, (_, index) => ({ key: `codex:${index}`, tool: 'codex', id: String(index), parentId: null, project: null, model: 'gpt-6-astra', status: 'active', startedAtMs: 1, updatedAtMs: 100000, totals: data.totals }))
+    data.rateSessions = Array.from({ length: 24 }, (_, index) => ({ key: `codex:${index}`, tool: 'codex', id: String(index), parentId: null, project: null, model: 'gpt-6-astra', status: 'recent', startedAtMs: 1, updatedAtMs: 100000, totals: data.totals }))
     data.rateSessions.push({ ...data.rateSessions[0], key: 'missing', id: 'missing' })
     data.live!.bySession = data.rateSessions.slice(0, 24).map(session => ({ tool: 'codex', model: null, sessionKey: session.key, windows: [window(60, 60)] }))
     data.live!.bySession.push({ ...data.live!.bySession[0], windows: [window(60, 0)] }, { tool: 'codex', model: null, sessionKey: null, windows: [window(60, 600)] })
@@ -256,7 +256,7 @@ describe('UsageLivePanel', () => {
     expect(tooltip({ dataIndex: 0, datasetIndex: 0 })).toContain('15.00 Token/秒 · 只读到部分记录')
   })
 
-  it('hides a quiet session and shows it again when output resumes without changing global totals', async () => {
+  it('keeps a running session visible between usage reports and resumes numeric rates on real output', async () => {
     const data = snapshot()
     data.rateSessions = [{ key: 'codex:a', tool: 'codex', id: 'a', parentId: null, project: null, model: 'gpt-6-astra', status: 'running', startedAtMs: 1, updatedAtMs: 100000, totals: data.totals }]
     data.live!.bySession = [{ tool: 'codex', model: null, sessionKey: 'codex:a', windows: [window(60, 600)] }]
@@ -268,13 +268,13 @@ describe('UsageLivePanel', () => {
     quiet.live!.bySession = [{ ...data.live!.bySession[0], windows: [window(60, 0)] }]
     quiet.live!.byModel[0].windows = [window(60, 0)]
     await wrapper.setProps({ snapshot: quiet })
-    expect(wrapper.get('.global-rate strong').text()).toBe('暂无输出')
+    expect(wrapper.get('.global-rate strong').text()).toBe('运行中，等待用量回传')
     expect(wrapper.get('.global-rate').text()).toContain('这段时间还没有新的输出记录')
-    expect(wrapper.find('.rate-session').exists()).toBe(false)
-    expect(wrapper.get('.rate-sessions .empty').text()).toBe('这段时间还没有输出记录')
-    expect(wrapper.get('.spectrum-legend b').text()).toBe('暂无输出')
+    expect(wrapper.get('.rate-session strong').text()).toBe('运行中，等待用量回传')
+    expect(wrapper.find('.rate-sessions .empty').exists()).toBe(false)
+    expect(wrapper.find('.spectrum-legend b').exists()).toBe(false)
     expect(wrapper.find('.fastest-label').exists()).toBe(false)
-    expect(wrapper.get('.orbit-label strong').text()).toBe('暂无输出')
+    expect(wrapper.get('.orbit-label strong').text()).toBe('运行中，等待用量回传')
     expect(wrapper.find('.orbit-label>small').exists()).toBe(false)
     await wrapper.setProps({ snapshot: data })
     expect(wrapper.get('.rate-session strong').text()).toContain('10.00 Token/秒')
@@ -283,7 +283,7 @@ describe('UsageLivePanel', () => {
   it('does not keep a no-output session visible just because an older request had speed', async () => {
     const data = snapshot()
     const timestampMs = 60000
-    data.rateSessions = [{ key: 'codex:a', tool: 'codex', id: 'a', parentId: null, project: null, model: null, status: 'active', startedAtMs: 1, updatedAtMs: 100000, totals: data.totals,
+    data.rateSessions = [{ key: 'codex:a', tool: 'codex', id: 'a', parentId: null, project: null, model: null, status: 'idle', startedAtMs: 1, updatedAtMs: 100000, totals: data.totals,
       requestSpeed: { latest: { requestId: 'old', timestampMs, outputTokens: 100, durationMs: 2000, outputTokensPerSecond: 50, basis: 'measured_request', startedAtMs: null, completedAtMs: null, ttftMs: null, streamingDurationMs: null, streamingTokensPerSecond: null }, last10: { basis: null, validSamples: 0, totalSamples: 0, outputTokens: 0, durationMs: 0, outputTokensPerSecond: null }, byBasis: [] },
       latestCompletedTurn: { timing: { turnId: 'turn', startedAtMs: 1, completedAtMs: 1000, durationMs: 999, ttftMs: null, basis: 'whole_turn' }, outputTokens: 900, outputTokensPerSecond: 900 },
     }]
@@ -308,15 +308,31 @@ describe('UsageLivePanel', () => {
       windows: [window(60, index === 2 ? 60 : 0, index !== 1), window(300, index === 0 ? 600 : index === 2 ? 60 : 0, false)],
     }))
     const wrapper = mount(UsageLivePanel, { props: { snapshot: data, tool: null } })
-    expect(wrapper.findAll('.rate-session')).toHaveLength(1)
-    expect(wrapper.get('.rate-session .usage-state').text()).toContain('已完成')
-    await wrapper.get('.rate-session').trigger('click')
+    expect(wrapper.findAll('.rate-session')).toHaveLength(2)
+    expect(wrapper.findAll('.rate-session .usage-state')[1].text()).toContain('已完成')
+    await wrapper.findAll('.rate-session')[1].trigger('click')
     expect(wrapper.emitted('session')?.[0]?.[0]).toBe('codex:2')
     await wrapper.get('[aria-label="速度统计时段"]').findAll('button')[1].trigger('click')
     expect(wrapper.findAll('.rate-session')).toHaveLength(2)
     await wrapper.setProps({ tool: 'claude' })
     expect(wrapper.find('.rate-session').exists()).toBe(false)
     expect(data.rateSessions).toHaveLength(3)
+  })
+
+  it('retains both running tools without usage samples and respects the selected tool', async () => {
+    const data = snapshot()
+    data.live!.windows = [window(60, 0, false)]
+    data.live!.bySession = []
+    data.rateSessions = ['codex', 'claude'].map(tool => ({ key: `${tool}:new`, tool, id: 'new', parentId: null, project: null,
+      model: null, status: 'active', startedAtMs: 1, updatedAtMs: 100000, totals: { ...data.totals, requestCount: 0, outputTokensPerSecond: 0 } }))
+    const wrapper = mount(UsageLivePanel, { props: { snapshot: data, tool: null } })
+    expect(wrapper.findAll('.rate-session')).toHaveLength(2)
+    expect(wrapper.findAll('.rate-session strong').map(row => row.text())).toEqual(Array(2).fill('运行中，等待用量回传'))
+    expect(wrapper.get('.global-rate strong').text()).toBe('运行中，等待用量回传')
+    expect(wrapper.find('.rate-session strong small').exists()).toBe(false)
+    await wrapper.setProps({ tool: 'claude' })
+    expect(wrapper.findAll('.rate-session')).toHaveLength(1)
+    expect(wrapper.get('.rate-session').text()).toContain('Claude Code')
   })
 
   it('keeps loading, legacy rates and unavailable long windows distinct without invented coverage', async () => {

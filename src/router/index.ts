@@ -21,6 +21,11 @@ import { resolveRouteDocumentTitle } from './title'
  */
 const routes: RouteRecordRaw[] = [
   {
+    path: '/local-cost', name: 'LocalCost',
+    component: () => import('@/views/LocalCostView.vue'),
+    meta: { requiresAuth: false, title: 'Local Costs', titleKey: 'desktop.localCost.title' }
+  },
+  {
     path: '/usage-monitor',
     name: 'UsageMonitor',
     component: () => import('@/views/UsageMonitorView.vue'),
@@ -846,7 +851,7 @@ router.beforeEach(async (to, _from, next) => {
   navigationLoading.startNavigation()
 
   // Local monitoring must not restore or change a remote connection.
-  if (to.path === '/usage-monitor') {
+  if (to.path === '/usage-monitor' || to.path === '/local-cost') {
     document.title = resolveRouteDocumentTitle(to, '用量账本')
     next()
     return

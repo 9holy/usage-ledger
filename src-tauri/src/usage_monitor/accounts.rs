@@ -39,6 +39,7 @@ impl AccountSubscription {
 #[serde(rename_all = "camelCase")]
 struct AccountUsagePeriod {
     billing_totals: BTreeMap<String,Totals>,
+    source_coverage_incomplete: bool,
     start_ms: i64,
     end_ms: i64,
     observed_end_ms: i64,
@@ -49,6 +50,7 @@ impl AccountUsagePeriod {
     fn new(start_ms: i64, end_ms: i64, now_ms: i64) -> Self {
         Self {
             billing_totals:BTreeMap::new(),
+            source_coverage_incomplete:false,
             start_ms,
             end_ms,
             observed_end_ms: end_ms.min(now_ms),
@@ -61,8 +63,12 @@ impl AccountUsagePeriod {
     }
 
     fn add(&mut self,usage:&UsageRecord,totals:&Totals){
+        self.add_as(totals, super::billing::key(usage));
+    }
+
+    fn add_as(&mut self,totals:&Totals,kind:&str){
         store::merge_totals(&mut self.totals,totals);
-        store::merge_totals(self.billing_totals.entry(super::billing::key(usage).into()).or_default(),totals);
+        store::merge_totals(self.billing_totals.entry(kind.into()).or_default(),totals);
     }
 
     fn finish(&mut self){
@@ -141,6 +147,9 @@ struct AccountUsage {
     account_key: String,
     account_label: String,
     tool: String,
+    billing_kind: &'static str,
+    calendar_month: Option<AccountUsagePeriod>,
+    client_tools: BTreeSet<String>,
     attribution: &'static str,
     billing_account_verified: bool,
     verified_week_requests: i64,
@@ -169,6 +178,38 @@ pub struct AccountUsageReport {
     unassigned_by_tool: BTreeMap<String, Totals>,
     unlocated_totals: Totals,
     unlocated_by_tool: BTreeMap<String, Totals>,
+    api_usage: Option<ApiUsage>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiUsage {
+    week: AccountUsagePeriod,
+    month: Option<AccountUsagePeriod>,
+}
+
+fn read_api_usage(conn:&Connection,week_start:i64,now:i64,month_start:Option<i64>)->Result<Option<ApiUsage>,String>{
+    let mut api=ApiUsage{
+        week:AccountUsagePeriod::new(week_start,now,now),
+        month:month_start.map(|start|AccountUsagePeriod::new(start,now,now)),
+    };
+    let start=month_start.map_or(week_start,|start|start.min(week_start));
+    let mut query=conn.prepare("SELECT usage,cost FROM monitor_requests WHERE timestamp_ms>=?1 AND timestamp_ms<?2 AND json_extract(usage,'$.billingScope')='api'")
+        .map_err(|e|e.to_string())?;
+    let rows=query.query_map(params![start,now],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(|e|e.to_string())?;
+    for row in rows{
+        let (usage,cost)=row.map_err(|e|e.to_string())?;
+        let usage:UsageRecord=serde_json::from_str(&usage).map_err(|e|e.to_string())?;
+        if !usage.has_period_timestamp() { continue; }
+        let totals=weekly::saved_request_totals(&usage,&cost)?;
+        if api.week.contains(usage.timestamp_ms){api.week.add(&usage,&totals);}
+        if let Some(month)=api.month.as_mut().filter(|p|p.contains(usage.timestamp_ms)){month.add(&usage,&totals);}
+    }
+    api.week.finish();
+    if let Some(month)=&mut api.month{month.finish();}
+    let recorded=api.week.totals.request_count>0 || api.month.as_ref().is_some_and(|p|p.totals.request_count>0)
+        || conn.query_row("SELECT EXISTS(SELECT 1 FROM monitor_requests WHERE json_extract(usage,'$.billingScope')='api' AND timestamp_ms<?1)",[now],|r|r.get::<_,bool>(0)).map_err(|e|e.to_string())?;
+    Ok(recorded.then_some(api))
 }
 
 #[derive(Debug)]
@@ -228,7 +269,14 @@ impl Cycle {
         snapshot.observed_end_ms = snapshot
             .observed_end_ms
             .min(self.observed.saturating_add(1));
-        cycle.quota_snapshot = Some(snapshot);
+        let cutoff = if cycle.used_percent == Some(100.) {
+            cycle.exhausted_at_ms.unwrap_or(self.observed)
+        } else {
+            self.observed
+        }.saturating_add(1);
+        if !cycle.exhaustion_unknown && snapshot.observed_end_ms == cutoff {
+            cycle.quota_snapshot = Some(snapshot);
+        }
         cycle
     }
 }
@@ -461,6 +509,30 @@ fn latest_cycle(conn: &Connection, tool: &str, account: &str) -> Result<Option<C
     .map_err(|error| error.to_string())
 }
 
+pub(super) fn record_upstream_reset(conn:&Connection,account:&str,source:&str,event:&str,at:i64)->Result<bool,String>{
+    let key=format!("account_reset_event:{account}:{source}:{event}");
+    let inserted=conn.execute("INSERT OR IGNORE INTO monitor_state VALUES(?1,?2)",params![key,at.to_string()]).map_err(|e|e.to_string())?;
+    Ok(anchor_upstream_reset(conn,account,at)?||inserted>0)
+}
+
+pub(super) fn apply_saved_resets(conn:&Connection,account:&str)->Result<bool,String>{
+    let prefix=format!("account_reset_event:{account}");
+    let mut query=conn.prepare("SELECT CAST(data AS INTEGER) FROM monitor_state WHERE key>=?1 AND key<?2 ORDER BY CAST(data AS INTEGER)").map_err(|e|e.to_string())?;
+    let times=query.query_map(params![format!("{prefix}:"),format!("{prefix};")],|r|r.get::<_,i64>(0)).map_err(|e|e.to_string())?;
+    let mut changed=false;
+    for time in times{changed|=anchor_upstream_reset(conn,account,time.map_err(|e|e.to_string())?)?;}
+    Ok(changed)
+}
+
+fn anchor_upstream_reset(conn:&Connection,account:&str,at:i64)->Result<bool,String>{
+    let cycle:Option<(i64,i64)>=conn.query_row("SELECT id,start_ms FROM monitor_account_cycles WHERE tool='codex' AND account_key=?1 AND observed_ms>=?2 AND COALESCE(end_ms,reset_ms)>?2 AND reset_ms<=?3 ORDER BY start_ms LIMIT 1",params![account,at,at.saturating_add(WEEK+300_000)],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+    let Some((id,start))=cycle else{return Ok(false);};
+    if start==at{return Ok(false);}
+    conn.execute("UPDATE monitor_account_cycles SET end_ms=MIN(reset_ms,?3) WHERE tool='codex' AND account_key=?1 AND id<>?2 AND start_ms<?4 AND end_ms IS NOT NULL AND end_ms>?3",params![account,id,at,start]).map_err(|e|e.to_string())?;
+    conn.execute("UPDATE monitor_account_cycles SET start_ms=?2 WHERE id=?1",params![id,at]).map_err(|e|e.to_string())?;
+    Ok(true)
+}
+
 #[derive(Deserialize)]
 struct AuthFile {
     auth_mode: Option<String>,
@@ -635,6 +707,9 @@ pub(super) fn capture_subscription_dates(conn: &Connection) -> Result<(), String
     save_subscription_dates(conn, &read_local_subscriptions())
 }
 
+fn legacy_active_subscription() -> Option<bool> { Some(true) }
+fn legacy_monthly_subscription() -> Option<String> { Some("monthly".into()) }
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OfficialBillingCycle {
@@ -649,8 +724,23 @@ struct OfficialBillingCycle {
     error: Option<String>,
 }
 
-fn legacy_active_subscription() -> Option<bool> { Some(true) }
-fn legacy_monthly_subscription() -> Option<String> { Some("monthly".into()) }
+#[derive(Serialize,Deserialize)]
+#[serde(rename_all="camelCase")]
+struct UpstreamSubscription {
+    end_ms:i64,
+    checked_at_ms:i64,
+    source:String,
+}
+
+pub(super) fn save_upstream_subscription(conn:&Connection,account:&str,source:&str,end:i64,observed:i64)->Result<bool,String>{
+    if end<=0 || end>8_640_000_000_000_000 {return Err("Invalid upstream subscription expiry".into());}
+    let data=serde_json::to_string(&UpstreamSubscription{end_ms:end,checked_at_ms:observed,source:source.into()}).map_err(|e|e.to_string())?;
+    conn.execute("INSERT INTO monitor_state(key,data) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET data=excluded.data
+      WHERE json_extract(excluded.data,'$.checkedAtMs')>json_extract(monitor_state.data,'$.checkedAtMs')
+      AND (json_extract(excluded.data,'$.endMs') IS NOT json_extract(monitor_state.data,'$.endMs')
+        OR json_extract(excluded.data,'$.source') IS NOT json_extract(monitor_state.data,'$.source'))",
+      params![format!("account_upstream_subscription:{account}"),data]).map(|count|count>0).map_err(|e|e.to_string())
+}
 
 pub(super) fn subscription_check_due(conn: &Connection, account: &str, now: i64) -> Result<bool, String> {
     let saved: Option<String> = conn.query_row(
@@ -777,6 +867,16 @@ fn with_subscription_history(
         subscription.source = "official";
         subscription.error = saved.error;
     }
+    let mut statement=conn.prepare("SELECT key,data FROM monitor_state WHERE key GLOB 'account_upstream_subscription:*'").map_err(|e|e.to_string())?;
+    let rows=statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(|e|e.to_string())?;
+    for row in rows {
+        let(key,data)=row.map_err(|e|e.to_string())?;
+        let saved:UpstreamSubscription=serde_json::from_str(&data).map_err(|e|e.to_string())?;
+        let source=match saved.source.as_str(){"sub2api"=>"sub2api","cliproxy"=>"cliproxy",_=>return Err("Invalid upstream subscription source".into())};
+        result.accounts.entry(key.trim_start_matches("account_upstream_subscription:").to_owned()).or_insert(AccountSubscription{
+            end_ms:Some(saved.end_ms),checked_at_ms:Some(saved.checked_at_ms),source,..Default::default()
+        });
+    }
     Ok(result)
 }
 
@@ -822,14 +922,16 @@ fn subscription_month(subscription: &AccountSubscription, now: i64) -> Option<(i
 
 fn session_creators(
     conn: &Connection,
+    sessions:Option<&str>,
 ) -> Result<BTreeMap<(String, String), BTreeSet<String>>, String> {
-    let mut statement = conn.prepare(
+    let filter=if sessions.is_some(){" AND json_extract(state,'$.session.id') IN (SELECT value FROM json_each(?1))"}else{""};
+    let mut statement = conn.prepare(&format!(
         "SELECT tool,json_extract(state,'$.session.id'),json_extract(state,'$.quota_account_id')
          FROM monitor_files WHERE json_type(state,'$.session.id')='text'
-           AND json_extract(state,'$.quota_identity_error') IS NULL",
-    ).map_err(|error| error.to_string())?;
+           AND json_extract(state,'$.quota_identity_error') IS NULL{filter}",
+    )).map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map(rusqlite::params_from_iter(sessions), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -850,13 +952,58 @@ fn session_creators(
     Ok(creators)
 }
 
+fn request_owner(evidence:&super::request_accounts::EvidenceIndex,creators:&BTreeMap<(String,String),BTreeSet<String>>,usage:&UsageRecord)->(Option<String>,bool){
+    match evidence.account_for(usage){
+        super::request_accounts::AccountMatch::Verified(account)=>(Some(account.to_owned()),true),
+        super::request_accounts::AccountMatch::Conflict=>(None,false),
+        super::request_accounts::AccountMatch::None=>(creators.get(&(usage.tool.clone(),usage.session_id.clone())).filter(|owners|owners.len()==1).and_then(|owners|owners.first().cloned()),false),
+    }
+}
+
+fn unverified_source(usage:&UsageRecord)->&'static str{
+    match usage.billing_scope.as_deref(){Some("subscription")=>"direct",Some("api")=>"api",_=>"unknown"}
+}
+
+#[cfg(test)]
+pub(super) fn request_memberships(conn:&Connection,requests:&[UsageRecord])->Result<Vec<(String,String,String)>,String>{
+    Ok(request_assignments(conn,requests)?.into_iter().map(|(tool,id,account,_)|(tool,id,account)).collect())
+}
+
+pub(super) fn request_assignments(conn:&Connection,requests:&[UsageRecord])->Result<Vec<(String,String,String,String)>,String>{
+    let evidence=super::request_accounts::EvidenceIndex::load_for_requests(conn,requests)?;
+    let sessions=serde_json::to_string(&requests.iter().map(|r|r.session_id.as_str()).collect::<BTreeSet<_>>()).map_err(|e|e.to_string())?;
+    let creators=session_creators(conn,Some(&sessions))?;
+    Ok(requests.iter().map(|usage|{
+        let owner=evidence.upstream_owner(usage);
+        let source=owner.as_ref().filter(|owner|!owner.conflict).map(|owner|owner.sources.iter().cloned().collect::<Vec<_>>().join("+")).unwrap_or_else(||unverified_source(usage).into());
+        let key=if let Some(owner)=owner {
+            if owner.conflict { if usage.billing_scope.as_deref()==Some("api"){"api:all".into()}else{"unassigned".into()} }
+            else {super::quota::report_account_key(&owner.account_tool,&owner.account)}
+        }else if usage.billing_scope.as_deref()==Some("api"){"api:all".into()}else{
+            request_owner(&evidence,&creators,usage).0.map(|raw|super::quota::report_account_key(&usage.tool,&raw)).unwrap_or_else(||"unassigned".into())
+        };
+        (usage.tool.clone(),usage.id.clone(),key,source)
+    }).collect())
+}
+
+#[cfg(test)]
 fn read(
     conn: &Connection,
     week_start: i64,
     now: i64,
     subscriptions: &LocalSubscriptions,
 ) -> Result<AccountUsageReport, String> {
-    store::validate_token_totals(conn)?;
+    read_with_usage(conn, week_start, now, subscriptions, None, |_, _, _, _| {})
+}
+
+fn read_with_usage(
+    conn: &Connection,
+    week_start: i64,
+    now: i64,
+    subscriptions: &LocalSubscriptions,
+    month_start: Option<i64>,
+    mut consume: impl FnMut(&str, &str, &UsageRecord, &Totals),
+) -> Result<AccountUsageReport, String> {
     let current_account = if subscriptions.error.is_none() && subscriptions.accounts.len() == 1 {
         subscriptions.accounts.keys().next()
     } else {
@@ -865,16 +1012,25 @@ fn read(
     let subscriptions = with_subscription_history(conn, subscriptions)?;
     let evidence = super::request_accounts::EvidenceIndex::load(conn)?;
     let verified_bounds = evidence.account_bounds();
-    let rows = super::quota::account_rows(conn)?;
+    let mut pending=BTreeMap::<(String,String),Vec<i64>>::new();
+    let mut query=conn.prepare("SELECT CASE WHEN account_tool='' THEN tool ELSE account_tool END,account_key,timestamp_ms
+      FROM monitor_upstream_receipts WHERE (monitor_id IS NULL OR conflicted) AND subscription AND quota_eligible AND account_key<>''").map_err(|e|e.to_string())?;
+    let pending_rows=query.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?))).map_err(|e|e.to_string())?;
+    for row in pending_rows {let(tool,account,time)=row.map_err(|e|e.to_string())?;pending.entry((tool,account)).or_default().push(time);}
+    let pending=pending.into_iter().map(|((tool,account),times)|(super::quota::report_account_key(&tool,&account),times)).collect::<BTreeMap<_,_>>();
+    let mut rows=Vec::new();
+    for tool in ["codex","claude","antigravity","deepseek-harness"] {
+        for(raw,id,_)in super::quota::account_identity_rows(conn,tool)?{rows.push((tool.to_owned(),raw,id));}
+    }
+    rows.sort_by(|a,b|(&a.0,a.2).cmp(&(&b.0,b.2)));
     let mut accounts = Vec::new();
     let mut current_account_key = None;
     let mut indices = BTreeMap::new();
     let mut ranges = vec![(week_start, now)];
     let mut report_identities = BTreeMap::new();
-    for row in rows {
-        let (tool, raw_account, _id, label) = row;
+    for (tool, raw_account, _id) in rows {
         if !report_identities.contains_key(&tool) {
-            report_identities.insert(tool.clone(), super::quota::account_report_identities(conn, &tool)?);
+            report_identities.insert(tool.clone(), super::quota::account_identity_report(conn, &tool)?.accounts);
         }
         let subscription = if tool == "codex" {
             subscriptions
@@ -887,6 +1043,8 @@ fn read(
         };
         let month = subscription_month(&subscription, now)
             .map(|(start, end)| AccountUsagePeriod::new(start, end, now));
+        let calendar_fallback=month_start.map(|start|AccountUsagePeriod::new(start,now,now));
+        let reporting_month=month.as_ref().or(calendar_fallback.as_ref());
         let verified_history = (tool=="codex").then(|| verified_bounds.get(&raw_account)).flatten()
             .map(|(start,end)| AccountUsagePeriod::new(*start,*end,now));
         let mut cycle_statement = conn
@@ -907,7 +1065,7 @@ fn read(
             let quota = cycle.quota_report(now);
             ranges.push((quota.period.start_ms, quota.period.observed_end_ms));
             quota_cycles.push(quota);
-            if let Some(month) = month.as_ref().filter(|month| {
+            if let Some(month) = reporting_month.filter(|month| {
                 cycle.start < month.observed_end_ms
                     && cycle.end.unwrap_or(cycle.reset) > month.start_ms
             }) {
@@ -925,14 +1083,20 @@ fn read(
             .and_then(|identities| identities.get(&raw_account))
             .cloned()
             .unwrap_or_else(|| (format!("{tool}:{raw_account}"), format!("Account {_id}")));
+        let billing_kind=if quota_cycles.is_empty() && subscription.start_ms.is_none() && evidence.account_is_api_only(&tool,&raw_account){"api"}else{"subscription"};
+        let calendar_month=if billing_kind=="api" || month.is_none(){calendar_fallback}else{None};
+        if let Some(month)=&calendar_month{ranges.push((month.start_ms,month.observed_end_ms));}
         if tool == "codex" && current_account == Some(&raw_account) {
             current_account_key = Some(account_key.clone());
         }
         indices.insert((tool.clone(), raw_account.clone()), accounts.len());
         accounts.push(AccountUsage {
             account_key,
-            account_label: label.unwrap_or(default_label),
+            account_label: default_label,
             tool,
+            billing_kind,
+            calendar_month,
+            client_tools:BTreeSet::new(),
             attribution: "session_creator",
             // Session creation metadata does not identify the account used after a sign-in change.
             billing_account_verified: false,
@@ -956,11 +1120,13 @@ fn read(
             unsegmented_month_billing_totals:BTreeMap::new(),
         });
     }
-    let creators = session_creators(conn)?;
+    let creators = session_creators(conn,None)?;
     let mut unassigned_week = Totals::default();
     let mut unassigned_by_tool = BTreeMap::<String, Totals>::new();
     let mut unlocated_totals = Totals::default();
     let mut unlocated_by_tool = BTreeMap::<String, Totals>::new();
+    let mut recent_upstream:Option<(i64,usize)>=None;
+    let mut api_usage:Option<ApiUsage>=None;
     ranges.retain(|(start, end)| start < end);
     ranges.sort_unstable();
     let mut merged: Vec<(i64, i64)> = Vec::new();
@@ -1012,55 +1178,79 @@ fn read(
             store::merge_totals(unlocated_by_tool.entry(tool).or_default(), &totals);
             continue;
         }
-        let index = match evidence.account_for(&usage) {
-            super::request_accounts::AccountMatch::Verified(account) => indices.get(&(tool.clone(), account.to_owned())),
-            _ => None,
-        };
+        let upstream = evidence.upstream_owner(&usage);
+        let source = upstream.as_ref().filter(|owner|!owner.conflict).map(|owner|owner.sources.iter().cloned().collect::<Vec<_>>().join("+"))
+            .unwrap_or_else(||unverified_source(&usage).into());
+        if usage.billing_scope.as_deref()==Some("api") {
+            if week_start<=time && time<now {
+                api_usage.get_or_insert_with(||ApiUsage{week:AccountUsagePeriod::new(week_start,now,now),month:None}).week.add(&usage,&totals);
+            }
+            if upstream.as_ref().is_none_or(|owner|owner.conflict) {
+                if week_start<=time && time<now {
+                consume("api:all", &source, &usage, &totals);
+                }
+                continue;
+            }
+        }
+        let quota_tool=upstream.as_ref().map_or(usage.tool.as_str(),|owner|owner.account_tool.as_str());
+        let quota_eligible = usage.billing_scope.as_deref()!=Some("api") || upstream.as_ref().is_some_and(|owner|!owner.conflict&&owner.subscription&&owner.quota_eligible)
+            && !(quota_tool=="codex"&&usage.model.as_deref().is_some_and(|model|model.ends_with("-spark")));
+        let (owner_tool,account_key, verified) = if let Some(owner)=upstream {
+            if owner.conflict {(tool,None,false)}else{(owner.account_tool,Some(owner.account),true)}
+        } else {let(account,verified)=request_owner(&evidence,&creators,&usage);(tool,account,verified)};
+        let index = account_key.and_then(|account| indices.get(&(owner_tool, account))).filter(|_| verified);
         let Some(index) = index else {
             // A creator is useful provenance for a conversation, never proof of
             // the login that paid for a later request. References are a subset
             // of unassigned records and must not be added to confirmed totals.
             if week_start <= time && time < now {
                 store::merge_totals(&mut unassigned_week, &totals);
-                store::merge_totals(unassigned_by_tool.entry(tool.clone()).or_default(), &totals);
+                store::merge_totals(unassigned_by_tool.entry(usage.tool.clone()).or_default(), &totals);
+                consume("unassigned", &source, &usage, &totals);
             }
-            if let Some(reference) = creators.get(&(tool.clone(), usage.session_id.clone()))
+            if let Some(reference) = creators.get(&(usage.tool.clone(), usage.session_id.clone()))
                 .filter(|creators| creators.len() == 1).and_then(|creators| creators.first())
-                .and_then(|creator| indices.get(&(tool, creator.clone()))) {
+                .and_then(|creator| indices.get(&(usage.tool.clone(), creator.clone()))) {
                 accounts[*reference].creator_reference.add(time, &usage, &totals);
             }
             continue;
         };
         let account = &mut accounts[*index];
-        {
+        if verified && usage.billing_scope.as_deref()==Some("api") && time>=now-30*60_000 && time<=now && recent_upstream.is_none_or(|(previous,_)|time>previous){recent_upstream=Some((time,*index));}
+        if let Some(month)=account.calendar_month.as_mut().filter(|month|month.contains(time)){month.add(&usage,&totals);}
+        if verified {
             if let Some(history) = account.verified_history.as_mut().filter(|range|range.contains(time)) {
                 history.add(&usage,&totals);
             }
         }
         if account.calendar_week.contains(time) {
+            if !account.client_tools.contains(&usage.tool){account.client_tools.insert(usage.tool.clone());}
             account.calendar_week.add(&usage,&totals);
-            account.verified_week_requests += 1;
+            consume(&account.account_key, &source, &usage, &totals);
+            if verified { account.verified_week_requests += 1; }
+            else { account.creator_reference_week_requests += 1; }
         }
+        let quota_kind = if usage.billing_scope.as_deref()==Some("api") && quota_eligible {"subscription"}else{super::billing::key(&usage)};
         if let Some(cycle) = account
             .quota_cycles
             .iter_mut()
-            .find(|cycle| cycle.period.contains(time))
+            .find(|cycle| quota_eligible && cycle.period.contains(time))
         {
-            cycle.period.add(&usage,&totals);
+            cycle.period.add_as(&totals,quota_kind);
             if let Some(snapshot) = cycle
                 .quota_snapshot
                 .as_mut()
                 .filter(|snapshot| snapshot.contains(time))
             {
-                snapshot.add(&usage,&totals);
+                snapshot.add_as(&totals,quota_kind);
             }
         }
-        if let Some(month) = account
-            .subscription_month
-            .as_mut()
-            .filter(|month| month.contains(time))
-        {
-            month.add(&usage,&totals);
+        let in_month=match account.subscription_month.as_mut(){
+            Some(month) if month.contains(time)=>{month.add(&usage,&totals);true},
+            Some(_)=>false,
+            None=>account.calendar_month.as_ref().is_some_and(|month|month.contains(time)),
+        };
+        if in_month {
             if let Some(cycle) = account
                 .month_cycles
                 .iter_mut()
@@ -1076,6 +1266,13 @@ fn read(
     for account in &mut accounts {
         account.creator_reference.finish(now);
         account.creator_reference_week_requests = account.creator_reference.calendar_week.totals.request_count;
+        account.billing_account_verified = account.calendar_week.totals.request_count > 0
+            || account.subscription_month.as_ref().is_some_and(|period| period.totals.request_count > 0)
+            || account.calendar_month.as_ref().is_some_and(|period| period.totals.request_count > 0)
+            || account.quota_cycles.iter().any(|cycle| cycle.period.totals.request_count > 0);
+        if account.billing_account_verified { account.attribution = "request_evidence_with_creator_reference"; }
+        if account.calendar_week.billing_totals.get("subscription").is_some_and(|totals|totals.request_count>0){account.billing_kind="subscription";}
+        if let Some(month)=&mut account.calendar_month{month.finish();}
         if let Some(history) = &mut account.verified_history {
             history.finish();
             if history.totals.request_count > 0 {
@@ -1089,8 +1286,10 @@ fn read(
         }
         for cycle in &mut account.quota_cycles {
             cycle.period.finish();
+            if let Some(times)=pending.get(&account.account_key){cycle.period.source_coverage_incomplete=times.iter().any(|time|cycle.period.contains(*time));}
             if let Some(snapshot) = &mut cycle.quota_snapshot {
                 snapshot.finish();
+                if let Some(times)=pending.get(&account.account_key){snapshot.source_coverage_incomplete=times.iter().any(|time|snapshot.contains(*time));}
             }
         }
         account.current_cycle = account
@@ -1113,6 +1312,8 @@ fn read(
     store::finish_totals(&mut unassigned_week);
     store::finish_totals(&mut unlocated_totals);
     for totals in unassigned_by_tool.values_mut().chain(unlocated_by_tool.values_mut()) { store::finish_totals(totals); }
+    if current_account_key.is_none(){current_account_key=recent_upstream.map(|(_,index)|accounts[index].account_key.clone());}
+    if let Some(api)=&mut api_usage {api.week.finish();}
     Ok(AccountUsageReport {
         collected_at_ms: now,
         week_start_ms: week_start,
@@ -1122,6 +1323,7 @@ fn read(
         unassigned_by_tool,
         unlocated_totals,
         unlocated_by_tool,
+        api_usage,
     })
 }
 
@@ -1129,7 +1331,11 @@ fn read(
 pub async fn usage_monitor_accounts(
     week_start_ms: i64,
     now_ms: i64,
+    month_start_ms: Option<i64>,
 ) -> Result<AccountUsageReport, String> {
+    if month_start_ms.is_some_and(|start|start<0 || start>now_ms || now_ms-start>32*DAY){
+        return Err("Invalid API usage month".into());
+    }
     if week_start_ms < 0
         || now_ms <= 0
         || week_start_ms > now_ms
@@ -1143,15 +1349,114 @@ pub async fn usage_monitor_accounts(
         let transaction = conn
             .unchecked_transaction()
             .map_err(|error| error.to_string())?;
-        read(
+        let mut report=read_with_usage(
             &transaction,
             week_start_ms,
             now_ms,
             &read_local_subscriptions(),
-        )
+            month_start_ms,
+            |_,_,_,_|{},
+        )?;
+        report.api_usage=read_api_usage(&transaction,week_start_ms,now_ms,month_start_ms)?;
+        Ok(report)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+pub(super) struct LocalCostUsage {
+    pub id:String,
+    pub label:String,
+    pub tool:String,
+    pub billing_kind:&'static str,
+    pub client_tools:BTreeSet<String>,
+    pub totals:Totals,
+    pub verified_requests:i64,
+    pub reference_requests:i64,
+    pub billing_counts:BTreeMap<String,i64>,
+    pub periods:Option<LocalCostPeriods>,
+    pub analytics:super::local_cost::UsageAnalytics,
+    pub sources:BTreeMap<String,super::local_cost::UsageAnalytics>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+pub(super) struct LocalCostPeriods {
+    subscription:AccountSubscription,
+    current_cycle:Option<AccountUsageCycle>,
+    previous_cycle:Option<AccountUsageCycle>,
+    quota_cycles:Vec<AccountUsageCycle>,
+    subscription_month:Option<AccountUsagePeriod>,
+    calendar_month:Option<AccountUsagePeriod>,
+    billing_account_verified:bool,
+    verified_history:Option<AccountUsagePeriod>,
+    month_cycles:Vec<AccountUsageCycle>,
+    unsegmented_month:Totals,
+}
+
+#[cfg(test)]
+pub(super) fn local_cost_usage(conn:&Connection,start:i64,end:i64)->Result<(Vec<LocalCostUsage>,super::local_cost::UsageAnalytics,Option<String>),String>{
+    local_cost_usage_with_month(conn,start,end,None)
+}
+
+pub(super) fn local_cost_usage_with_month(conn:&Connection,start:i64,end:i64,month_start:Option<i64>)->Result<(Vec<LocalCostUsage>,super::local_cost::UsageAnalytics,Option<String>),String>{
+    let mut groups=BTreeMap::<String,super::local_cost::UsageAnalyticsBuilder>::new();
+    let mut billing_counts=BTreeMap::<String,BTreeMap<String,i64>>::new();
+    let mut sources=BTreeMap::<String,BTreeMap<String,super::local_cost::UsageAnalyticsBuilder>>::new();
+    let mut all=super::local_cost::UsageAnalyticsBuilder::default();
+    let mut samples=super::local_cost::observed_samples(conn,start,end)?;
+    let coverage=super::live::history_coverage(conn,start,end)?;
+    let first=if start==0 {conn.query_row("SELECT COALESCE(MIN(timestamp_ms),?1) FROM monitor_requests",[end],|row|row.get::<_,i64>(0)).map_err(|error|error.to_string())?}else{start};
+    let history_start=if start==0{first/60_000*60_000}else{(start+59_999)/60_000*60_000};
+    let bucket=((end-first+239)/240).max(3_600_000);
+    let report=read_with_usage(conn,start,end,&read_local_subscriptions(),month_start,|id,source,usage,totals|{
+        *billing_counts.entry(id.into()).or_default().entry(super::billing::key(usage).into()).or_default()+=1;
+        all.add(usage,totals,first,bucket);
+        groups.entry(id.into()).or_default().add(usage,totals,first,bucket);
+        sources.entry(id.into()).or_default().entry(source.into()).or_default().add(usage,totals,first,bucket);
+        if let Some(samples)=samples.remove(&(usage.tool.clone(),usage.id.clone())){
+            all.observe(&usage.tool,&samples,history_start,bucket);groups.get_mut(id).unwrap().observe(&usage.tool,&samples,history_start,bucket);
+            sources.get_mut(id).unwrap().get_mut(source).unwrap().observe(&usage.tool,&samples,history_start,bucket);
+        }
+    })?;
+    // Output history uses observation time even when the request falls outside this period.
+    if !samples.is_empty(){
+        let keys=serde_json::to_string(&samples.keys().collect::<Vec<_>>()).map_err(|e|e.to_string())?;
+        let mut query=conn.prepare("SELECT usage FROM monitor_requests WHERE (tool,id) IN
+            (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?1))").map_err(|e|e.to_string())?;
+        let rows=query.query_map([keys],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?;
+        let requests=rows.map(|row|serde_json::from_str::<UsageRecord>(&row.map_err(|e|e.to_string())?).map_err(|e|e.to_string())).collect::<Result<Vec<_>,String>>()?;
+        for(tool,id,account,source)in request_assignments(conn,&requests)?{
+            let output=&samples[&(tool.clone(),id)];
+            all.observe(&tool,output,history_start,bucket);
+            groups.entry(account.clone()).or_default().observe(&tool,output,history_start,bucket);
+            sources.entry(account).or_default().entry(source).or_default().observe(&tool,output,history_start,bucket);
+        }
+    }
+    let current=report.current_account_key;
+    let mut rows=report.accounts.into_iter().map(|a|{
+        let analytics=groups.remove(&a.account_key).unwrap_or_default().finish(&coverage,end);
+        let billing_counts=billing_counts.remove(&a.account_key).unwrap_or_default();
+        let account_sources=sources.remove(&a.account_key).unwrap_or_default().into_iter().map(|(source,builder)|(source,builder.finish(&coverage,end))).collect();
+        LocalCostUsage{
+            id:a.account_key,label:a.account_label,tool:a.tool,billing_kind:a.billing_kind,client_tools:a.client_tools,totals:a.calendar_week.totals,
+            verified_requests:a.verified_week_requests,reference_requests:a.creator_reference_week_requests,
+            billing_counts,
+            periods:Some(LocalCostPeriods{subscription:a.subscription,current_cycle:a.current_cycle,previous_cycle:a.previous_cycle,quota_cycles:a.quota_cycles,subscription_month:a.subscription_month,calendar_month:a.calendar_month,billing_account_verified:a.billing_account_verified,verified_history:a.verified_history,month_cycles:a.month_cycles,unsegmented_month:a.unsegmented_month}),
+            analytics,
+            sources:account_sources,
+        }
+    }).collect::<Vec<_>>();
+    let api=groups.remove("api:all").unwrap_or_default().finish(&coverage,end);
+    let api_clients=api.client_tools();
+    rows.push(LocalCostUsage{id:"api:all".into(),label:"API".into(),tool:"api".into(),billing_kind:"api",client_tools:api_clients,totals:api.totals.clone(),verified_requests:api.totals.request_count,reference_requests:0,billing_counts:billing_counts.remove("api:all").unwrap_or_default(),periods:None,analytics:api,sources:sources.remove("api:all").unwrap_or_default().into_iter().map(|(source,builder)|(source,builder.finish(&coverage,end))).collect()});
+    if report.unassigned_week.request_count>0 || groups.contains_key("unassigned") {
+        let analytics=groups.remove("unassigned").unwrap_or_default().finish(&coverage,end);let clients=analytics.client_tools();
+        rows.push(LocalCostUsage{id:"unassigned".into(),label:"unassigned".into(),tool:"unknown".into(),billing_kind:"unknown",client_tools:clients,totals:report.unassigned_week,verified_requests:0,reference_requests:0,billing_counts:billing_counts.remove("unassigned").unwrap_or_default(),periods:None,analytics,sources:sources.remove("unassigned").unwrap_or_default().into_iter().map(|(source,builder)|(source,builder.finish(&coverage,end))).collect()});
+    }
+    Ok((rows,all.finish(&coverage,end),current))
 }
 
 #[cfg(test)]
@@ -1224,7 +1529,7 @@ mod tests {
 
     fn request(conn: &Connection, id: &str, session: &str, stamp: i64, cost: Value) {
         unverified_request(conn, id, session, stamp, cost);
-        if let Some(creators) = session_creators(conn).unwrap().get(&("codex".into(), session.into())) {
+        if let Some(creators) = session_creators(conn, None).unwrap().get(&("codex".into(), session.into())) {
             if let [creator] = creators.iter().collect::<Vec<_>>().as_slice() {
                 prove_request(conn, id, creator);
             }
@@ -1262,6 +1567,34 @@ mod tests {
             .into(),
             error: None,
         }
+    }
+
+    #[test]
+    fn local_cost_details_keep_account_models_api_and_cycles_isolated() {
+        let conn=database();
+        account(&conn,1,"a"); account(&conn,2,"b");
+        session(&conn,"path-a","a",Some("a"),None);
+        session(&conn,"path-b","b",Some("b"),None);
+        for(id,session,time,model)in [("a-request","a",1000,"model-a"),("b-request","b",2000,"model-b"),("api-request","a",3000,"model-api")] {
+            if id=="api-request" { unverified_request(&conn,id,session,time,json!({"usd":1,"evidence":{"currency":"USD","mode":"fast"}})); }
+            else { request(&conn,id,session,time,json!({"usd":1,"evidence":{"currency":"USD","mode":"fast"}})); }
+            conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.model',?2) WHERE id=?1",params![id,model]).unwrap();
+            conn.execute("UPDATE monitor_request_account_evidence SET model=?2 WHERE model=?1", params![format!("fixture-model:{id}"),model]).unwrap();
+        }
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope','api') WHERE id='api-request'",[]).unwrap();
+        conn.execute("INSERT INTO monitor_account_cycles(tool,account_key,slot,window_minutes,start_ms,reset_ms,observed_ms,used_percent,attribution_verified) VALUES('codex','account:a','secondary',10080,0,10000,4000,20,1)",[]).unwrap();
+        let ids=super::super::quota::account_report_identities(&conn,"codex").unwrap();
+        let (rows,all,_)=local_cost_usage(&conn,0,5000).unwrap();
+        let a=serde_json::to_value(rows.iter().find(|row|row.id==ids["account:a"].0).unwrap()).unwrap();
+        let b=serde_json::to_value(rows.iter().find(|row|row.id==ids["account:b"].0).unwrap()).unwrap();
+        let api=serde_json::to_value(rows.iter().find(|row|row.id=="api:all").unwrap()).unwrap();
+        assert_eq!(a["analytics"]["models"][0]["model"],"model-a");
+        assert_eq!(b["analytics"]["models"][0]["model"],"model-b");
+        assert_eq!(api["analytics"]["models"][0]["model"],"model-api");
+        assert_eq!(api["periods"],Value::Null);
+        assert_eq!(a["periods"]["currentCycle"]["usedPercent"],20.);
+        assert_eq!(a["periods"]["currentCycle"]["totals"]["requestCount"],1);
+        assert_eq!(serde_json::to_value(all).unwrap()["totals"]["requestCount"],3);
     }
 
     fn observe(conn: &Connection, stamp: i64, reset: i64, used: f64) {
@@ -1384,6 +1717,68 @@ mod tests {
         assert_eq!(json["accounts"][0]["billingAccountVerified"], false);
         assert!(json["accounts"][0]["previousCycle"].is_null());
         assert!(json.to_string().find("account:a").is_none());
+    }
+
+    #[test]
+    fn api_account_is_a_cross_tool_summary_not_a_quota_account_or_an_additional_global_charge() {
+        let conn=database();
+        let month=time("2026-11-01T00:00:00+08:00");
+        let week=month-4*DAY;
+        let now=month+DAY;
+        for(id,tool,at,scope,cost)in [
+            ("old-api","codex",month-DAY,Some("api"),10.),
+            ("codex-api","codex",month+100,Some("api"),20.),
+            ("claude-api","claude",month+200,Some("api"),30.),
+            ("subscription","codex",month+300,Some("subscription"),100.),
+            ("unknown","claude",month+400,None,200.),
+        ]{
+            let usage=UsageRecord{id:id.into(),tool:tool.into(),session_id:"s".into(),timestamp_ms:at,billing_scope:scope.map(str::to_owned),..Default::default()};
+            conn.execute("INSERT INTO monitor_requests VALUES(?1,?2,?3,?4,?5,?6)",params![tool,id,format!("{tool}:s"),at,serde_json::to_string(&usage).unwrap(),json!({"usd":cost}).to_string()]).unwrap();
+        }
+        let api=read_api_usage(&conn,week,now,Some(month)).unwrap().unwrap();
+        assert_eq!((api.week.totals.request_count,api.week.totals.priced_cost_usd),(3,60.));
+        assert_eq!((api.month.as_ref().unwrap().totals.request_count,api.month.as_ref().unwrap().totals.priced_cost_usd),(2,50.));
+        assert_eq!(api.month.as_ref().unwrap().start_ms,month);
+        let report=read(&conn,week,now,&LocalSubscriptions::default()).unwrap();
+        assert!(report.accounts.is_empty());
+        assert_eq!((report.unassigned_week.request_count,report.unassigned_week.priced_cost_usd),(2,300.));
+        assert_eq!(report.api_usage.as_ref().unwrap().week.totals.priced_cost_usd,60.);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_quotas",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(read_api_usage(&conn,now,now+DAY,None).unwrap().unwrap().week.totals.request_count,0);
+        assert!(read_api_usage(&database(),week,now,Some(month)).unwrap().is_none());
+    }
+
+    #[test]
+    fn proven_upstream_accounts_own_api_calls_without_adding_the_api_activity_subtotal_twice() {
+        let conn=database();
+        account(&conn,1,"a");
+        account(&conn,2,"actual");
+        session(&conn,"history","reused",Some("a"),None);
+        let start=time("2026-11-01T00:00:00Z");
+        for (id,amount) in [("subscription",7.),("api",50.),("proven-api",3.),("legacy",2.)] {
+            if id=="api" || id=="proven-api" { unverified_request(&conn,id,"reused",start+1000,json!({"usd":amount})); }
+            else { request(&conn,id,"reused",start+1000,json!({"usd":amount})); }
+        }
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope',CASE id WHEN 'subscription' THEN 'subscription' ELSE 'api' END) WHERE id!='legacy'",[]).unwrap();
+        conn.execute("INSERT INTO monitor_codex_quota_accounts VALUES('fixture',?1,'pro','account:actual',?2,2)",params![start+WEEK,start]).unwrap();
+        conn.execute("INSERT INTO monitor_request_quota_evidence VALUES('proven-api','fixture',?1,'pro')",[start+WEEK]).unwrap();
+        observe(&conn,start+2000,start+WEEK,20.);
+        let report=read(&conn,start,start+3000,&subscriptions(start,Some(start+30*DAY))).unwrap();
+        let creator=&report.accounts[0];
+        assert_eq!(creator.calendar_week.totals.priced_cost_usd,9.);
+        assert_eq!(creator.subscription_month.as_ref().unwrap().totals.priced_cost_usd,9.);
+        assert_eq!(creator.current_cycle.as_ref().unwrap().period.totals.priced_cost_usd,9.);
+        assert_eq!(report.accounts[1].calendar_week.totals.priced_cost_usd,3.);
+        assert_eq!((report.unassigned_week.request_count,report.unassigned_week.priced_cost_usd),(0,0.));
+        let api=&report.api_usage.as_ref().unwrap().week.totals;
+        assert_eq!((api.request_count,api.priced_cost_usd),(2,53.));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_request_quota_evidence",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|r|r.get::<_,i64>(0)).unwrap(),4);
+        let requests=conn.prepare("SELECT usage FROM monitor_requests").unwrap().query_map([],|r|r.get::<_,String>(0)).unwrap().map(|r|serde_json::from_str::<UsageRecord>(&r.unwrap()).unwrap()).collect::<Vec<_>>();
+        let memberships=request_memberships(&conn,&requests).unwrap();
+        assert_eq!(memberships.iter().find(|(_,id,_)|id=="proven-api").unwrap().2,super::super::quota::report_account_key("codex","account:actual"));
+        assert_eq!(memberships.iter().filter(|(_,_,key)|key=="api:all").count(),1);
+        assert_eq!(report.accounts.iter().map(|a|a.calendar_week.totals.priced_cost_usd).sum::<f64>()+report.unassigned_week.priced_cost_usd+50.,62.);
     }
 
     #[test]
@@ -2103,6 +2498,47 @@ mod tests {
     }
 
     #[test]
+    fn proven_reset_card_anchors_the_current_cycle_without_claiming_an_old_unknown_week(){
+        let conn=database();account(&conn,1,"a");session(&conn,"a","a",Some("a"),None);
+        let inferred=time("2026-11-16T01:48:56Z");
+        let redeemed=inferred-42_000;
+        observe(&conn,inferred+DAY,inferred+WEEK,20.);
+        request(&conn,"after-card-before-inferred-start","a",redeemed+1000,json!({"usd":3.}));
+        assert!(record_upstream_reset(&conn,"account:a","sub2api","audit-1",redeemed).unwrap());
+        assert!(!record_upstream_reset(&conn,"account:a","sub2api","audit-1",redeemed).unwrap());
+        let report=read(&conn,inferred,inferred+2*DAY,&LocalSubscriptions::default()).unwrap();
+        let cycle=report.accounts[0].current_cycle.as_ref().unwrap();
+        assert_eq!((cycle.period.start_ms,cycle.period.totals.priced_cost_usd),(redeemed,3.));
+        record_upstream_reset(&conn,"account:a","sub2api","unobserved-old-week",redeemed-2*WEEK).unwrap();
+        assert_eq!(latest_cycle(&conn,"codex","account:a").unwrap().unwrap().start,redeemed);
+        let pending=database();account(&pending,1,"a");
+        record_upstream_reset(&pending,"account:a","sub2api","arrived-before-quota",redeemed).unwrap();
+        observe(&pending,inferred+DAY,inferred+WEEK,20.);
+        assert!(apply_saved_resets(&pending,"account:a").unwrap());
+        assert_eq!(latest_cycle(&pending,"codex","account:a").unwrap().unwrap().start,redeemed);
+    }
+
+    #[test]
+    fn calendar_month_keeps_pre_reset_usage_when_subscription_dates_are_unreported(){
+        let conn=database();account(&conn,1,"a");session(&conn,"a","a",Some("a"),None);
+        let start=time("2026-11-01T00:00:00Z");
+        let reset_card=start+DAY;
+        let now=reset_card+2*DAY;
+        observe(&conn,reset_card+DAY,reset_card+WEEK,20.);
+        request(&conn,"before-card","a",start+DAY/2,json!({"usd":5.}));
+        request(&conn,"after-card","a",reset_card+DAY,json!({"usd":3.}));
+        let report=read_with_usage(&conn,reset_card,now,&LocalSubscriptions::default(),Some(start),|_,_,_,_|{}).unwrap();
+        let account=&report.accounts[0];
+        assert!(account.subscription_month.is_none());
+        assert_eq!(account.calendar_month.as_ref().unwrap().totals.priced_cost_usd,8.);
+        assert_eq!(account.month_cycles.len(),1);
+        assert_eq!(account.month_cycles[0].period.totals.priced_cost_usd,3.);
+        assert_eq!(account.unsegmented_month.priced_cost_usd,5.);
+        assert_eq!(account.unsegmented_month.request_count,1);
+        assert_eq!(account.month_cycles.iter().map(|cycle|cycle.period.totals.priced_cost_usd).sum::<f64>()+account.unsegmented_month.priced_cost_usd,8.);
+    }
+
+    #[test]
     fn quota_snapshot_pairs_amount_with_inclusive_observation_without_freezing_live_totals() {
         let conn = database();
         account(&conn, 1, "a");
@@ -2157,17 +2593,15 @@ mod tests {
         assert_eq!(json["quotaSnapshot"]["totals"]["requestCount"], 2);
 
         let capped = read(&conn, start, observed, &subscriptions(start, None)).unwrap();
-        let snapshot = capped.accounts[0]
+        let capped_cycle = capped.accounts[0]
             .current_cycle
             .as_ref()
-            .unwrap()
-            .quota_snapshot
-            .as_ref()
             .unwrap();
-        assert_eq!(
-            (snapshot.observed_end_ms, snapshot.totals.priced_cost_usd),
-            (observed, 1.)
-        );
+        assert!(capped_cycle.quota_snapshot.is_none());
+        assert_eq!((capped_cycle.period.observed_end_ms,capped_cycle.period.totals.priced_cost_usd),(observed,1.));
+
+        let historical = read(&conn, start, observed - 1, &subscriptions(start, None)).unwrap();
+        assert!(historical.accounts[0].current_cycle.as_ref().unwrap().quota_snapshot.is_none());
 
         observe(&conn, observed + 5, start + WEEK, 20.);
         let newer = read(&conn, start, observed + 10, &subscriptions(start, None)).unwrap();
@@ -3214,7 +3648,7 @@ mod tests {
         let before = read(&conn,0,now,&LocalSubscriptions::default()).unwrap();
         super::super::request_accounts::collect_from(&mut conn,&source,&source_path.to_string_lossy(),now).unwrap();
         let evidence = super::super::request_accounts::EvidenceIndex::load(&conn).unwrap();
-        let creators = session_creators(&conn).unwrap();
+        let creators = session_creators(&conn,None).unwrap();
         let mut verified = 0;
         let mut reassigned = 0;
         let mut newly_attributed = 0;
@@ -3239,6 +3673,7 @@ mod tests {
         let after = read(&conn,0,now,&LocalSubscriptions::default()).unwrap();
         let total = |report: &AccountUsageReport| {
             let mut totals = report.unassigned_week.clone();
+            if let Some(api)=&report.api_usage {store::merge_totals(&mut totals,&api.week.totals);}
             for account in &report.accounts { store::merge_totals(&mut totals,&account.calendar_week.totals); }
             store::finish_totals(&mut totals);
             totals
@@ -3288,7 +3723,11 @@ mod tests {
         initialize(&conn).unwrap();
         let report = read(&conn, week, now, &read_local_subscriptions()).unwrap();
         let mut assigned = report.unassigned_week.clone();
+        if let Some(api)=&report.api_usage {store::merge_totals(&mut assigned,&api.week.totals);}
         for account in &report.accounts {
+            for period in [Some(&account.calendar_week),account.subscription_month.as_ref(),account.current_cycle.as_ref().map(|cycle|&cycle.period)].into_iter().flatten(){
+                assert!(!period.billing_totals.contains_key("api"),"API calls leaked into subscription-account amounts");
+            }
             store::merge_totals(&mut assigned, &account.calendar_week.totals);
         }
         store::finish_totals(&mut assigned);
@@ -3341,7 +3780,15 @@ mod tests {
             }
         };
         same(&assigned, &global);
+        if let Some(api)=&report.api_usage {
+            let direct=read_api_usage(&conn,week,now,None).unwrap().unwrap();
+            same(&api.week.totals,&direct.week.totals);
+        }
         for account in &report.accounts {
+            for cycle in account.quota_cycles.iter().chain(&account.month_cycles){
+                assert!(!cycle.period.billing_totals.contains_key("api"));
+                if let Some(snapshot)=&cycle.quota_snapshot{assert!(!snapshot.billing_totals.contains_key("api"));}
+            }
             if let Some(month) = &account.subscription_month {
                 let mut parts = account.unsegmented_month.clone();
                 for cycle in &account.month_cycles {
@@ -3362,7 +3809,7 @@ mod tests {
         println!(
             "{}",
             json!({"collectedAtMs":now,"weekStartMs":week,"accounts":accounts,
-            "unassignedWeek":report.unassigned_week,"globalWeek":global})
+            "unassignedWeek":report.unassigned_week,"apiUsage":report.api_usage,"globalWeek":global})
         );
     }
     #[test]

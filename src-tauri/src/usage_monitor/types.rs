@@ -450,6 +450,7 @@ pub struct RecordedOutputBucket {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveSnapshot {
+    pub(super) current_rates: Vec<super::current_rate::CurrentRate>,
     pub sampled_at_ms: i64,
     pub collection_updated_at_ms: i64,
     pub basis: &'static str,
@@ -502,6 +503,7 @@ pub struct TurnSummary {
 
 #[derive(Clone, Debug, Default)]
 pub struct MonitorPeriod {
+    pub billing_scope: Option<String>,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
     pub model: Option<String>,
@@ -515,6 +517,8 @@ pub struct UsageBreakdown {
     pub tool: String,
     pub model: Option<String>,
     pub totals: Totals,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub speeds: Vec<WeightedRequestSpeed>,
 }
 
 #[derive(Serialize)]
@@ -538,6 +542,10 @@ pub struct MonitorAnalysis {
     pub tool_overview: Vec<UsageBreakdown>,
     pub by_model: Vec<UsageBreakdown>,
     pub timeline: Vec<UsageBucket>,
+    pub observed_timeline: Vec<LiveBucket>,
+    pub api_expense: Option<super::local_cost::ApiExpense>,
+    pub cny_per_usd: Option<f64>,
+    pub cost_error: Option<String>,
     pub available_models: Vec<String>,
     pub sessions: Vec<SessionSummary>,
     pub session_count: usize,

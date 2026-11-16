@@ -1,4 +1,4 @@
-use super::{store, types::*};
+use super::types::*;
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +12,15 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS monitor_live_coverage (
         source TEXT NOT NULL,tool TEXT NOT NULL,start_ms INTEGER NOT NULL,end_ms INTEGER NOT NULL,
         open INTEGER NOT NULL,PRIMARY KEY(source,tool,start_ms));
-        CREATE INDEX IF NOT EXISTS monitor_live_coverage_end ON monitor_live_coverage(end_ms);",
+        CREATE INDEX IF NOT EXISTS monitor_live_coverage_end ON monitor_live_coverage(end_ms);
+        CREATE TABLE IF NOT EXISTS monitor_output_history (
+          tool TEXT NOT NULL,id TEXT NOT NULL,bucket_ms INTEGER NOT NULL,output_tokens INTEGER NOT NULL,
+          PRIMARY KEY(tool,id,bucket_ms));
+        CREATE INDEX IF NOT EXISTS monitor_output_history_time ON monitor_output_history(bucket_ms);
+        CREATE TABLE IF NOT EXISTS monitor_coverage_history (
+          source TEXT NOT NULL,tool TEXT NOT NULL,start_ms INTEGER NOT NULL,end_ms INTEGER NOT NULL,
+          PRIMARY KEY(source,tool,start_ms));
+        CREATE INDEX IF NOT EXISTS monitor_coverage_history_end ON monitor_coverage_history(end_ms);",
     )
     .map_err(|error| error.to_string())
 }
@@ -77,17 +85,42 @@ impl CoverageWriter {
 }
 
 pub fn prune(conn: &Connection, now: i64) -> Result<(), String> {
-    conn.execute(
+    let tx=rusqlite::Transaction::new_unchecked(conn,rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO monitor_output_history(tool,id,bucket_ms,output_tokens)
+        SELECT o.tool,o.id,o.observed_ms/60000*60000,SUM(o.output_tokens) FROM monitor_observations o
+        JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id
+        WHERE o.observed_ms<?1 AND COALESCE(json_extract(r.usage,'$.usageBasis'),'')!='legacy_initial_cumulative'
+        GROUP BY o.tool,o.id,o.observed_ms/60000
+        ON CONFLICT(tool,id,bucket_ms) DO UPDATE SET output_tokens=monitor_output_history.output_tokens+excluded.output_tokens",[now-RETENTION_MS]).map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO monitor_coverage_history(source,tool,start_ms,end_ms)
+        SELECT source,tool,start_ms,end_ms FROM monitor_live_coverage WHERE end_ms<?1
+        ON CONFLICT(source,tool,start_ms) DO UPDATE SET end_ms=MAX(monitor_coverage_history.end_ms,excluded.end_ms)",[now-RETENTION_MS]).map_err(|e|e.to_string())?;
+    tx.execute(
         "DELETE FROM monitor_observations WHERE observed_ms<?1",
         [now - RETENTION_MS],
     )
     .map_err(|error| error.to_string())?;
-    conn.execute(
+    tx.execute("DELETE FROM monitor_current_rates WHERE observed_ms<?1",[now-60_000]).map_err(|e|e.to_string())?;
+    tx.execute(
         "DELETE FROM monitor_live_coverage WHERE end_ms<?1",
         [now - RETENTION_MS],
     )
     .map_err(|error| error.to_string())?;
-    Ok(())
+    tx.commit().map_err(|e|e.to_string())
+}
+
+pub(super) fn history_coverage(conn:&Connection,start:i64,end:i64)->Result<BTreeMap<String,Vec<(i64,i64)>>,String>{
+    let mut query=conn.prepare("SELECT tool,start_ms,end_ms FROM monitor_live_coverage WHERE end_ms>?1 AND start_ms<?2
+      UNION ALL SELECT tool,start_ms,end_ms FROM monitor_coverage_history WHERE end_ms>?1 AND start_ms<?2").map_err(|e|e.to_string())?;
+    let rows=query.query_map(params![start,end],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).map_err(|e|e.to_string())?;
+    let mut spans=BTreeMap::<String,Vec<(i64,i64)>>::new();
+    for row in rows{let(tool,start,end)=row.map_err(|e|e.to_string())?;spans.entry(tool).or_default().push((start,end));}
+    for value in spans.values_mut(){*value=merge_spans(std::mem::take(value));}Ok(spans)
+}
+
+pub(super) fn history_bucket(spans:&BTreeMap<String,Vec<(i64,i64)>>,tool:Option<&str>,start:i64,end:i64,tokens:i64)->LiveBucket{
+    let covered_ms=covered(spans,tool,start,end);let complete=source_complete(spans,tool,start,end);
+    LiveBucket{start_ms:start,end_ms:end,observed_output_tokens:tokens,output_tokens:(covered_ms==end-start&&complete).then_some(tokens),covered_ms,source_complete:complete,output_complete:true}
 }
 
 fn merge_spans(mut spans: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
@@ -230,6 +263,8 @@ fn minute_buckets(
 fn recorded_timeline(
     conn: &Connection,
     now: i64,
+    billing_scope: Option<&str>,
+    request_keys:Option<&str>,
 ) -> Result<
     (
         Vec<RecordedOutputBucket>,
@@ -264,13 +299,15 @@ fn recorded_timeline(
                     THEN json_extract(usage,'$.outputTokens') END AS output
             FROM monitor_requests
             WHERE timestamp_ms>=?1 AND timestamp_ms<?2
+                AND (?3 IS NULL OR json_extract(usage,'$.billingScope')=?3)
+                AND (?4 IS NULL OR (tool,id) IN (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?4)))
                 AND COALESCE(json_extract(usage,'$.usageBasis'),'') NOT IN ('legacy_initial_cumulative','legacy_cumulative_delta')
                 AND NOT EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='timestamp')
         ) SELECT tool,minute,COALESCE(SUM(output),0),COUNT(*),COUNT(*)-COUNT(output)
             FROM requests GROUP BY tool,minute",
     ).map_err(|error| error.to_string())?;
     let rows = query
-        .query_map(params![start, now], |row| {
+        .query_map(params![start, now,billing_scope,request_keys], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)? as usize,
@@ -297,13 +334,31 @@ fn recorded_timeline(
     Ok((global, by_tool))
 }
 
+#[cfg(test)]
 pub fn read(
     conn: &Connection,
     now: i64,
     started: i64,
     updated: i64,
 ) -> Result<LiveSnapshot, String> {
-    store::validate_token_totals(conn)?;
+    read_scoped(conn,now,started,updated,None)
+}
+
+pub(super) fn read_scoped(
+    conn:&Connection,
+    now:i64,
+    started:i64,
+    updated:i64,
+    billing_scope:Option<&str>,
+) -> Result<LiveSnapshot,String> {
+    read_filtered(conn,now,started,updated,billing_scope,None,None)
+}
+
+pub(super) fn read_requests(conn:&Connection,now:i64,started:i64,updated:i64,keys:&str,tool:Option<&str>)->Result<LiveSnapshot,String>{
+    read_filtered(conn,now,started,updated,None,Some(keys),tool)
+}
+
+fn read_filtered(conn:&Connection,now:i64,started:i64,updated:i64,billing_scope:Option<&str>,request_keys:Option<&str>,tool_scope:Option<&str>)->Result<LiveSnapshot,String>{
     let mut spans: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
     let mut query = conn
         .prepare("SELECT tool,start_ms,end_ms,open FROM monitor_live_coverage WHERE end_ms>?1")
@@ -342,9 +397,14 @@ pub fn read(
         .into_iter()
         .map(|tool| (tool.into(), [0; 60]))
         .collect();
-    let mut query=conn.prepare("SELECT o.tool,r.session_key,json_extract(r.usage,'$.model'),o.observed_ms,o.output_tokens,(json_type(r.usage,'$.outputTokens') IS 'integer' AND NOT EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='output_tokens')) FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND COALESCE(json_extract(r.usage,'$.usageBasis'),'') NOT IN ('legacy_initial_cumulative','legacy_cumulative_delta')").map_err(|error|error.to_string())?;
+    let mut query=conn.prepare("SELECT o.tool,r.session_key,json_extract(r.usage,'$.model'),o.observed_ms,o.output_tokens,
+        (json_type(r.usage,'$.outputTokens') IS 'integer' AND NOT EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='output_tokens'))
+        FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id AND r.session_key=o.session_key
+        WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND (?3 IS NULL OR json_extract(r.usage,'$.billingScope')=?3)
+        AND (?4 IS NULL OR (o.tool,o.id) IN (SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?4)))
+        AND COALESCE(json_extract(r.usage,'$.usageBasis'),'') NOT IN ('legacy_initial_cumulative','legacy_cumulative_delta')").map_err(|error|error.to_string())?;
     let rows = query
-        .query_map(params![now - 60 * MINUTE, now], |row| {
+        .query_map(params![now - 60 * MINUTE, now,billing_scope,request_keys], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -379,7 +439,7 @@ pub fn read(
         tool_minutes_unknown.entry(tool.clone()).or_insert([false; 60])[index] |= !output_known;
         tool_minutes.entry(tool).or_insert([0; 60])[index] += tokens;
     }
-    let timeline = minute_buckets(minutes, minutes_unknown, &spans, now, None);
+    let timeline = minute_buckets(minutes, minutes_unknown, &spans, now, tool_scope);
     let timeline_by_tool = tool_minutes
         .into_iter()
         .map(|(tool, minutes)| {
@@ -391,16 +451,17 @@ pub fn read(
         .iter()
         .map(|bucket| bucket.observed_output_tokens)
         .max();
-    let (recorded_timeline, recorded_timeline_by_tool) = recorded_timeline(conn, now)?;
+    let (recorded_timeline, recorded_timeline_by_tool) = recorded_timeline(conn, now,billing_scope,request_keys)?;
     let tool_coverage: BTreeMap<_, _> = by_tool
         .keys()
         .map(|tool| (tool.clone(), windows(&Counts::default(), &spans, now, Some(tool))))
         .collect();
     Ok(LiveSnapshot {
+        current_rates: super::current_rate::read(conn,now,started,billing_scope,request_keys,tool_scope)?,
         sampled_at_ms: now,
         collection_updated_at_ms: updated,
         basis: "collector_observed_output",
-        windows: windows(&global, &spans, now, None),
+        windows: windows(&global, &spans, now, tool_scope),
         by_tool: by_tool
             .into_iter()
             .map(|(tool, counts)| LiveGroup {
@@ -443,21 +504,27 @@ mod tests {
     use super::*;
     use crate::usage_monitor::store;
     #[test]
-    fn coverage_recovery_within_one_millisecond_does_not_stop_collection() {
-        let conn = Connection::open_in_memory().unwrap();
-        store::initialize(&conn).unwrap();
-        let mut writer = CoverageWriter::new("jsonl");
-        writer.observe(&conn, "codex", 1000, true).unwrap();
-        writer.observe(&conn, "codex", 1000, false).unwrap();
-        writer.observe(&conn, "codex", 1000, true).unwrap();
-        writer.observe(&conn, "codex", 2000, true).unwrap();
-        let spans: Vec<(i64, i64, bool)> = conn.prepare(
-            "SELECT start_ms,end_ms,open FROM monitor_live_coverage WHERE source='jsonl' AND tool='codex'"
-        ).unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
-            .collect::<Result<_, _>>().unwrap();
-        assert_eq!(spans, [(1000, 2000, true)]);
+    fn pruning_archives_output_and_coverage_atomically_without_duplicating_history(){
+        let mut conn=Connection::open_in_memory().unwrap();store::initialize(&conn).unwrap();
+        usage(&mut conn,"saved","codex","session",Some("model"),70_000,600);
+        usage(&mut conn,"baseline","codex","session",Some("model"),80_000,9000);
+        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.usageBasis','legacy_initial_cumulative') WHERE id='baseline'",[]).unwrap();
+        conn.execute("INSERT INTO monitor_live_coverage VALUES('fixture','codex',60000,120000,0)",[]).unwrap();
+        conn.execute("INSERT INTO monitor_live_coverage VALUES('fixture','*',60000,120000,0)",[]).unwrap();
+        let now=RETENTION_MS+121_000;
+        conn.execute_batch("CREATE TRIGGER reject_archive BEFORE INSERT ON monitor_coverage_history BEGIN SELECT RAISE(ABORT,'fixture');END;").unwrap();
+        assert!(prune(&conn,now).is_err());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_output_history",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        conn.execute_batch("DROP TRIGGER reject_archive;").unwrap();
+        for _ in 0..2{prune(&conn,now).unwrap();}
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(conn.query_row("SELECT SUM(output_tokens) FROM monitor_output_history",[],|r|r.get::<_,i64>(0)).unwrap(),600);
+        let samples=super::super::local_cost::observed_samples(&conn,60_000,120_000).unwrap();assert_eq!(samples[&("codex".into(),"saved".into())],vec![(60_000,600)]);assert_eq!(samples.len(),1);
+        let bucket=history_bucket(&history_coverage(&conn,60_000,120_000).unwrap(),Some("codex"),60_000,120_000,600);
+        assert_eq!(bucket.covered_ms,60_000);assert_eq!(bucket.output_tokens,Some(600));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|r|r.get::<_,i64>(0)).unwrap(),2);
     }
-
     #[test]
     fn shared_coverage_keeps_each_groups_counts_and_unknown_windows() {
         let now = 400_000;
@@ -480,34 +547,64 @@ mod tests {
     }
 
     #[test]
-    fn unknown_output_keeps_observed_lower_bound_without_an_exact_live_rate() {
-        let now=7_200_000;
+    fn api_scope_filters_live_models_tools_sessions_and_history_with_the_same_request_evidence() {
         let mut conn=Connection::open_in_memory().unwrap();
         store::initialize(&conn).unwrap();
-        for source in ["*","codex","claude","antigravity","deepseek-harness"] {
-            conn.execute("INSERT INTO monitor_live_coverage(source,tool,start_ms,end_ms,open) VALUES('fixture',?1,?2,?3,0)",params![source,now-3_600_000,now]).unwrap();
+        let now=1_000_000;
+        for(tool,id,model,scope,tokens)in [
+            ("codex","a","gpt-6.1-sol",Some("api"),600),
+            ("codex","s","gpt-6-astra",Some("subscription"),900),
+            ("claude","c","claude-opus-5-5",Some("api"),300),
+            ("claude","u","claude-sonnet-5-5",None,200),
+        ]{
+            usage(&mut conn,id,tool,"same-session",Some(model),now-100,tokens);
+            conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope',?3) WHERE tool=?1 AND id=?2",params![tool,id,scope]).unwrap();
         }
-        usage(&mut conn,"known","claude","known-session",Some("model"),now-1000,60);
-        for (id,lower_bound) in [("partial",7),("fully-unknown",0)] {
-            let record=UsageRecord{id:id.into(),tool:"codex".into(),session_id:"uncertain-session".into(),model:Some("model".into()),timestamp_ms:now-500,output_tokens:lower_bound,unknown_fields:vec!["output_tokens".into()],..Default::default()};
-            let tx=conn.transaction().unwrap();
-            store::save_usage_with_catalog(&tx,&record,0,now-500,&crate::model_catalog::CatalogSnapshot::default()).unwrap();
-            tx.commit().unwrap();
+        for tool in ["*","codex","claude"]{
+            conn.execute("INSERT INTO monitor_live_coverage VALUES('fixture',?1,?2,?3,1)",params![tool,now-300000,now]).unwrap();
         }
-        let result=read(&conn,now,0,now).unwrap();
-        assert_eq!(result.windows[0].observed_output_tokens,67);
-        assert!(result.windows[0].output_tokens_per_second.is_none());
-        assert_eq!(serde_json::to_value(&result.windows[0]).unwrap()["outputComplete"],false);
-        let codex=result.by_tool.iter().find(|row|row.tool.as_deref()==Some("codex")).unwrap();
-        let claude=result.by_tool.iter().find(|row|row.tool.as_deref()==Some("claude")).unwrap();
-        assert!(codex.windows[0].output_tokens_per_second.is_none());
-        assert_eq!(claude.windows[0].output_tokens_per_second,Some(1.));
-        assert!(result.timeline.last().unwrap().output_tokens.is_none());
-        assert_eq!(result.timeline.last().unwrap().observed_output_tokens,67);
-        assert_eq!(serde_json::to_value(result.timeline.last().unwrap()).unwrap()["outputComplete"],false);
-        assert_eq!(result.timeline_by_tool["claude"].last().unwrap().output_tokens,Some(60));
-        // Zero reported output remains different from absent output, and unrelated groups stay exact.
-        assert_eq!(result.timeline_by_tool["antigravity"].last().unwrap().output_tokens,Some(0));
+        let api=read_scoped(&conn,now,0,now,Some("api")).unwrap();
+        assert_eq!((api.windows[0].observed_output_tokens,api.windows[0].output_tokens_per_second),(900,Some(15.)));
+        assert_eq!(api.by_model.len(),2);
+        assert!(api.by_model.iter().any(|r|r.model.as_deref()==Some("gpt-6.1-sol")));
+        assert!(!api.by_model.iter().any(|r|r.model.as_deref()==Some("gpt-6-astra")));
+        assert_eq!(api.by_session.len(),2);
+        assert_eq!(api.recorded_timeline.iter().map(|b|b.known_output_tokens).sum::<i64>(),900);
+        for groups in [&api.by_tool,&api.by_model,&api.by_session]{assert_eq!(groups.iter().map(|g|g.windows[0].observed_output_tokens).sum::<i64>(),900);}
+        assert_eq!(read(&conn,now,0,now).unwrap().windows[0].observed_output_tokens,2000);
+    }
+
+    #[test]
+    fn codex_and_buffered_claude_outputs_share_one_window_without_overwrite_or_loss() {
+        let mut conn=Connection::open_in_memory().unwrap();
+        store::initialize(&conn).unwrap();
+        let now=1_000_000;
+        let tx=conn.transaction().unwrap();
+        for tool in ["*","codex","claude"] {
+            tx.execute("INSERT INTO monitor_live_coverage VALUES('fixture',?1,?2,?3,1)",params![tool,now-300000,now]).unwrap();
+        }
+        let catalog=crate::model_catalog::CatalogSnapshot::default();
+        for (tool,model,stamp,output) in [("codex","gpt-6.1-sol",now-100,600),("claude","claude-opus-5-5",now-66000,300)] {
+            let record=UsageRecord{id:"shared-id".into(),tool:tool.into(),session_id:"shared-session".into(),model:Some(model.into()),timestamp_ms:stamp,output_tokens:output,..Default::default()};
+            store::save_usage_with_catalog(&tx,&record,now-120000,now-50,&catalog).unwrap();
+            let mut repeated=record.clone();
+            repeated.timestamp_ms=now-20;
+            store::save_usage_with_catalog(&tx,&repeated,now-120000,now-10,&catalog).unwrap();
+        }
+        let old=UsageRecord{id:"old".into(),tool:"claude".into(),session_id:"shared-session".into(),timestamp_ms:now-120001,output_tokens:9999,..Default::default()};
+        store::save_usage_with_catalog(&tx,&old,now-120000,now-5,&catalog).unwrap();
+        tx.commit().unwrap();
+        let live=read(&conn,now,0,now).unwrap();
+        assert_eq!(live.windows[0].observed_output_tokens,900);
+        assert_eq!(live.windows[0].output_tokens_per_second,Some(15.));
+        assert_eq!(live.by_session.len(),2);
+        assert!(live.by_session.iter().any(|r|r.session_key.as_deref()==Some("claude:shared-session")));
+        for tool in ["codex","claude"] {
+            let row=live.by_tool.iter().find(|r|r.tool.as_deref()==Some(tool)).unwrap();
+            assert_eq!(row.windows[0].observed_output_tokens,if tool=="codex"{600}else{300});
+        }
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_observations",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|r|r.get::<_,i64>(0)).unwrap(),3);
     }
 
     fn usage(

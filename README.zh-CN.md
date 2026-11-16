@@ -2,7 +2,9 @@
 
 # 用量账本
 
-**版本 0.2.39 · AI 用量监控与成本工作台 · English / 中文**
+**版本 0.2.51 · AI 用量监控与成本工作台 · English / 中文**
+
+本地账号成本、采购渠道、费用记录和 API 成本设置已整合进用量监控，详见[本版说明](docs/release/0.2.51.md)。
 
 用量账本是一款桌面应用，用于了解 AI 工具的使用情况，以及背后账号和服务的成本。它把本地用量监控与 Sub2API、CLIProxyAPI、Cockpit 的成本工作台放在同一应用中。
 
@@ -13,6 +15,8 @@
 - 按账号额度轮次查看用量，而不与自然周统计混淆。
 - 对照用量参考价值、采购成本、费用、退款与损失。
 - 在把总数当作完整结果之前，发现缺失记录或缺失单价。
+- 已采集用量、账号名称、额度轮次和输出速率历史保存在软件账本，清理外部日志后仍可查看，详见[本地历史与账号信息](docs/release/0.2.51.md)。
+- 同时查看原始美元用量金额和人民币合计，采用[用量监控的信息图与成本展示](docs/release/0.2.51.md)。
 
 软件计算的金额基于可取得的用量、价格与自定义成本设置，属于估算，不是服务商账单，也不是实际付款凭证。
 
@@ -20,17 +24,9 @@
 
 ## 获取应用
 
-0.2.39 补齐三端成本、用量监控、账号与账目的源码核验，修复平台额度字段、精确窗口、连接切换、采购档案、同邮箱历史归属和财务读取，保留本项目自己的成本公式。变更及证据见[双语发布说明](docs/release/0.2.39.md)和[接口与日志核验报告](docs/data-channel-completion-2026-11-07.md)。
+在 [GitHub Releases](https://github.com/9holy/usage-ledger/releases/latest) 下载最新通过验证的安装包：Windows 选择 `windows_x64-setup.exe`，M 芯片 Mac 选择 `macos_arm64.dmg`，Intel Mac 选择 `macos_x64.dmg`。新版本会在三个平台构建和启动检查通过后发布。
 
-[用量账本 v0.2.39 Release 页面](https://github.com/9holy/usage-ledger/releases/tag/v0.2.39)会在发布检查与三个平台的构建全部通过后提供以下下载：
-
-- Windows x64 安装包：[Usage-Ledger_0.2.39_windows_x64-setup.exe](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_windows_x64-setup.exe)。
-- macOS Apple Silicon 预览：[Usage-Ledger_0.2.39_macos_arm64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_arm64.dmg)。
-- macOS Intel 预览：[Usage-Ledger_0.2.39_macos_x64.dmg](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/Usage-Ledger_0.2.39_macos_x64.dmg)。
-
-源码提交和构建证据见 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/BUILD-INFO.json)，文件校验值见 [SHA256SUMS.txt](https://github.com/9holy/usage-ledger/releases/download/v0.2.39/SHA256SUMS.txt)。仅提供手动下载；本版不提供 updater `.sig` 文件、`latest.json` 自动更新清单或便携 EXE。
-
-Windows 升级时先备份重要数据，从托盘完全退出应用，再运行新安装包覆盖现有安装，保留原应用数据；不要为了更新先卸载或删除账本。Mac 退出应用后选择匹配处理器的 DMG，替换 `/Applications` 中的应用。现有数据目录继续使用，必要的数据库升级和有证据的修复在启动时执行。
+源码与构建信息见 Release 附带的 [BUILD-INFO.json](https://github.com/9holy/usage-ledger/releases/latest/download/BUILD-INFO.json) 和校验文件。安装包手动下载，不提供便携 EXE 或应用内自动更新。
 
 | 平台 | 支持状态 |
 | --- | --- |
@@ -158,11 +154,23 @@ macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer I
 
 百分比归零本身不能证明新轮次开始。在已确认达到 100% 的额度边界之后，额外积分用量与该轮包含额度的金额分开统计，但仍计入适用的月累计。
 
-预测要求当前有效、经过核验的账号归属和额度证据，并按**同一时间戳**配对同一账号、同一周期的额度百分比与订阅用量。历史快照保留原时间，但陈旧、过期、撤销或不完整的证据不支持当前预测。部分已定价金额会明确标注并计数；未定价部分显示可读原因。预测不是最终费用承诺。
+预测会按**同一时间戳**配对同一账号、同一周期的额度百分比与累计额度。较旧但仍有效的配对会连同时间戳保留。部分已定价金额会明确标注并计数；未定价部分显示可读原因。预测不是最终费用承诺。
 
 ### 采购成本与费率
 
 在**成本账本**记录财务事件；在账号成本控制中设置采购金额、币种、计费周期与起算时间。保存前确认当前账号、来源及覆盖日期。
+
+直接登录的账号可在**成本工作台 → 本地数据 → 本地成本**中查看，无需连接 Sub2API、CLIProxyAPI 或 Cockpit。在财务记录中选择账号名称，填写购买或续费金额及有效期；退款、封停损失关联原购买记录。账号状态由你手动设置，登录失败不会自动判成封号。
+
+账号表显示买价、期间成本、剩余价值、实际倍率和每百万 Token 成本。倍率使用同一时段的成本与已识别用量估值，按汇率统一币种。未录入买价时保持待录入；价格或账号归属不完整时只显示参考倍率。实际投入和用量估值分开显示。
+
+**资产总览**展示账号使用价值、订阅费用、API 消费和已确认损失。账号表支持搜索、筛选、排序，行内按钮可直接查看记录或录入该账号费用；**费用记录**和 **API 价格**有独立标签页。总览倍率只纳入所选期间同时有成本与用量的账号。
+
+**用量与额度**展示所选账号已记录的额度百分比、重置时间、按同一采样推算的周额度总金额、订阅月累计和历史轮次。模型明细包含输入/输出、缓存读写、计价覆盖及按已记录耗时计算的速率；耗时缺失时保持未提供。模型和走势复用原有账号归属判定，API 仍统一统计，图表中的记录缺口保留为空。
+
+**采购渠道**按录入的渠道筛选真实财务记录和期间成本。买价、退款及损失需要真实录入，客户端日志不会提供实际付款信息。额度显示源记录时间，待更新时标明保留的是上次配对推算。
+
+**API** 在“API 价格与汇率”中录入带生效时间的模型单价，或对已保存的美元用量报价设置倍率；缓存读取和写入可分开计价。缺价调用保持未知，充值另记支出，不与计算消费重复相加。设置不会改写历史用量报价和订阅额度轮次。
 
 用量成本根据可取得的上游记录和软件价格/成本设置计算。已录入财务事件、分摊后的订阅费用、剩余预付、退款、损失与用量参考价值不是同一个量。来源显示的用户计费不自动等于你的采购成本。
 
@@ -214,7 +222,7 @@ macOS 目标仍为预览版。安装包使用 ad-hoc 签名，没有 Developer I
 
 ### Windows
 
-安装 Node.js 22 LTS（至少 22.12.0）或兼容更新版本、pnpm 9.15.9、MSVC 工具链的 Rust stable、Visual Studio C++ Build Tools 和 WebView2 Runtime。
+安装 Node.js 22 LTS 或兼容更新版本、pnpm 9.15.9、MSVC 工具链的 Rust stable、Visual Studio C++ Build Tools 和 WebView2 Runtime。
 
 ~~~powershell
 git clone https://github.com/9holy/usage-ledger.git
@@ -245,13 +253,7 @@ pnpm desktop:test:mac
 pnpm desktop:build:mac
 ~~~
 
-构建脚本默认生成通用 app/DMG。[macOS 指南](docs/platforms/macos.md)还介绍单架构目标与签名限制；发布包分别使用 Apple Silicon 与 Intel 目标。默认通用目标、macOS 13 运行行为、Finder/Dock 与完整 GUI 流程、真实账号使用不在自动化验证范围内。
-
-### 发布检查
-
-主[仓库工作流](.github/workflows/ci.yml)先运行前端、headless 与依赖检查，再执行 Windows x64、macOS Apple Silicon、macOS Intel 的原生测试和安装包构建。推送 `main` 后，只有全部必要检查、构建和包验证成功才发布对应版本的 GitHub Release。实际结果以 Release 的 `BUILD-INFO.json` 及关联 Actions 记录为准；这些流程说明不表示尚在等待的构建已经通过。
-
-独立的 [Mac 预览工作流](.github/workflows/macos-test.yml)仍由 `test/macos-*` 分支触发，只上传测试产物，不发布 Release。公开安装包仍需手动下载；两个工作流都不生成已签名的自动更新清单。
+构建脚本默认生成通用 app/DMG。[macOS 指南](docs/platforms/macos.md)还介绍单架构目标与签名限制。默认通用目标尚未验证。macOS 13 运行行为、Finder/Dock 与完整 GUI 流程、真实账号使用尚未检查。源码和构建来源见 Release 附带的 `BUILD-INFO.json`。构建工作流不会发布 GitHub Release；本版仅提供手动下载。
 
 ## 文档与许可
 
@@ -259,10 +261,7 @@ pnpm desktop:build:mac
   全部为虚构 DEMO 数据，不是真实账号账单。
 - [DeepSeek Harness 接入说明](docs/integrations/deepseek-harness.md)。
 - [macOS 构建与测试指南](docs/platforms/macos.md)。
-- [0.2.39 发布说明](docs/release/0.2.39.md)。
-- [2026-11-07 审核与验证报告](docs/audit-2026-11-07.md)。
-- [2026-11-07 用量统计与账号归属专项复核](docs/monitor-accuracy-audit-2026-11-07.md)。
-- [2026-11-07 第三轮复审：并发、账号证据与账本准确性](docs/re-review-2026-11-07.md)。
+- [0.2.25 发布说明](docs/release/0.2.25.md)。
 - [隐私说明](docs/PRIVACY.md)。
 - [第三方来源与许可](THIRD_PARTY_NOTICES.md)及[许可文本](LICENSES/)。
 

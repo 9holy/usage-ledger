@@ -3,39 +3,15 @@ import i18n from '@/i18n'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { invoke } from '@tauri-apps/api/core'
 import { isDesktopRuntime } from '@/api/url'
-import { monitorWeekBounds, getUsageMonitorWeekly, monitorContext, monitorMode, monitorAmount, monitorScenarioLabel, monitorCacheCoverage, monitorKnownTokenTotal, monitorTokenCoverage, monitorRequestCountLabel, monitorIsUnitemizedRecord, type MonitorTotals } from '../usageMonitor'
+import { monitorWeekBounds, getUsageMonitorWeekly, monitorContext, monitorMode, monitorAmount, monitorScenarioLabel, monitorCacheCoverage } from '../usageMonitor'
 import { getUsageMonitorSnapshot, getUsageMonitorAnalysis, getUsageMonitorSession, groupMonitorTurns, monitorCost, monitorTotalCost, monitorPriceSummary, monitorAutomaticPriceSummary, monitorAutomaticMode, monitorRequestAutomaticPrice, monitorRatio, monitorToken, monitorRequestCost, monitorUnquotedRequests, monitorSingleQuotes, type MonitorRequest, type PriceEvidence, type MonitorStoredPriceSummary } from '../usageMonitor'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('@/api/url', () => ({ isDesktopRuntime: vi.fn(() => true) }))
 
 describe('usage monitor client', () => {
-  it('keeps unknown aggregate fields, known subtotals and measured zero distinct', () => {
-    const totals = { requestCount: 3, inputTokens: 0, outputTokens: 20, totalTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, inputUnknownRequests: 3, outputUnknownRequests: 1, cacheReadUnknownRequests: 3, cacheWriteUnknownRequests: 0 } as MonitorTotals
-    expect(monitorKnownTokenTotal(totals, 'inputTokens')).toBeNull()
-    expect(monitorKnownTokenTotal(totals, 'cacheReadTokens')).toBeNull()
-    expect(monitorKnownTokenTotal(totals, 'outputTokens')).toBe(20)
-    expect(monitorKnownTokenTotal(totals, 'cacheWriteTokens')).toBe(0)
-    expect(monitorKnownTokenTotal(totals, 'totalTokens')).toBe(20)
-    expect(monitorTokenCoverage(totals, 'outputTokens')).toBe('已知小计 · 2 / 3 条记录提供此字段')
-    expect(monitorTokenCoverage(totals, 'inputTokens')).toBe('')
-    expect(monitorTokenCoverage(totals, 'cacheWriteTokens')).toBe('')
-    expect(monitorKnownTokenTotal({ ...totals, outputTokens: 0, totalTokens: 0, outputUnknownRequests: 3 }, 'totalTokens')).toBeNull()
-    expect(monitorKnownTokenTotal({ ...totals, inputUnknownRequests: 0 }, 'inputTokens')).toBe(0)
-    expect(monitorKnownTokenTotal(undefined, 'inputTokens')).toBeNull()
-    i18n.global.locale.value = 'en'
-    expect(monitorTokenCoverage(totals, 'outputTokens')).toBe('Known subtotal · 2 / 3 records provide this field')
-  })
-
-  it('never calls unsplit cumulative records an exact request count', () => {
-    const totals = { requestCount: 3, unitemizedRecords: 2 } as MonitorTotals
-    expect(monitorRequestCountLabel(totals)).toBe('3 条用量记录，含 2 条未拆分累计；实际请求次数未知')
-    expect(monitorRequestCountLabel({ ...totals, unitemizedRecords: 0 })).toBe('3 次请求')
-    expect(monitorIsUnitemizedRecord({ usageBasis: 'legacy_initial_cumulative' })).toBe(true)
-    expect(monitorIsUnitemizedRecord({ usageBasis: 'legacy_cumulative_delta' })).toBe(true)
-    expect(monitorIsUnitemizedRecord({ usageBasis: 'legacy_last_token_usage' })).toBe(false)
-    i18n.global.locale.value = 'en'
-    expect(monitorRequestCountLabel(totals)).toBe('3 usage records, including 2 unsplit cumulative records; the actual request count is unknown')
+  it('uses matched server request evidence when client mode was not recorded',()=>{
+    expect(monitorAutomaticMode({mode:null,modeBasis:'unknown',requestedMode:null,timestampMs:1000,runtimeMode:{mode:'standard',conflicted:false,observedAtMs:11000,source:'upstream_request_record'}})).toEqual({mode:'standard',basis:'runtime_mode'})
   })
   it('localizes display helpers while preserving raw model names, precision, zero and unknown values', () => {
     i18n.global.locale.value = 'en'

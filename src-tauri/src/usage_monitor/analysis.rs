@@ -12,6 +12,8 @@ pub(super) struct UsageRow {
     pub timestamp_ms: i64,
     pub period_locatable: bool,
     pub totals: Totals,
+    pub timing: Option<RequestTiming>,
+    pub output_known: bool,
 }
 
 // Project stored evidence to small numeric records; never reprice or load response bodies.
@@ -87,7 +89,9 @@ fn project_usage(
         EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='output_tokens'),
         EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='cache_read_tokens'),
         EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='cache_write_tokens'),
-        COALESCE(json_extract(r.usage,'$.usageBasis'),'') IN ('legacy_initial_cumulative','legacy_cumulative_delta')
+        COALESCE(json_extract(r.usage,'$.usageBasis'),'') IN ('legacy_initial_cumulative','legacy_cumulative_delta'),
+        json_extract(r.usage,'$.requestTiming'),
+        NOT EXISTS(SELECT 1 FROM json_each(r.usage,'$.unknownFields') WHERE value='output_tokens')
         FROM monitor_requests r";
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -130,6 +134,10 @@ fn project_usage(
     if let Some(model) = &period.model {
         clauses.push("json_extract(r.usage,'$.model')=?");
         values.push(Value::Text(model.clone()));
+    }
+    if let Some(scope) = &period.billing_scope {
+        clauses.push(if scope=="unknown" {"COALESCE(json_extract(r.usage,'$.billingScope'),'unknown')=?"} else {"json_extract(r.usage,'$.billingScope')=?"});
+        values.push(Value::Text(scope.clone()));
     }
     let condition = if clauses.is_empty() {
         String::new()
@@ -201,6 +209,8 @@ fn project_usage(
                     timestamp_ms: r.get(4)?,
                     period_locatable: r.get(28)?,
                     totals,
+                    timing: None,
+                    output_known: r.get(35)?,
                 },
                 scenarios,
                 r.get::<_, Option<f64>>(21)?,
@@ -211,6 +221,7 @@ fn project_usage(
                 r.get::<_, Option<String>>(23)?,
                 r.get::<_, bool>(24)?,
                 r.get::<_, Option<String>>(25)?,
+                r.get::<_, Option<String>>(34)?,
             ))
         })
         .map_err(|e| e.to_string())?;
@@ -226,7 +237,9 @@ fn project_usage(
             evidence_mode,
             requested_ambiguous,
             runtime,
+            timing,
         ) = row.map_err(|e| e.to_string())?;
+        row.timing = timing.map(|json| serde_json::from_str(&json)).transpose().map_err(|e| e.to_string())?;
         row.totals.scenarios = serde_json::from_str(&scenarios).map_err(|e| e.to_string())?;
         row.totals.price_summary = store::price_summary(
             usd,
@@ -317,6 +330,7 @@ pub fn read(
     let mut unlocated_totals = Totals::default();
     let mut unlocated_by_tool = BTreeMap::<String, Totals>::new();
     let mut by_model = BTreeMap::<(String, Option<String>), Totals>::new();
+    let mut model_speeds = BTreeMap::<(String, Option<String>), BTreeMap<String, WeightedRequestSpeed>>::new();
     let mut by_tool = BTreeMap::<String, Totals>::new();
     let mut tool_overview: BTreeMap<String, Totals> =
         ["codex", "claude", "antigravity", "deepseek-harness"]
@@ -363,6 +377,15 @@ pub fn read(
             return;
         }
         store::merge_totals(&mut totals, &row.totals);
+        if let Some(timing) = row.timing.filter(|timing| !timing.basis.is_empty()) {
+            let speeds = model_speeds.entry((row.tool.clone(), row.model.clone())).or_default();
+            let speed = speeds.entry(timing.basis.clone()).or_insert_with(|| WeightedRequestSpeed { basis: Some(timing.basis.clone()), ..Default::default() });
+            speed.total_samples += 1;
+            let usage = UsageRecord { output_tokens: row.totals.output_tokens, request_timing: Some(timing), ..Default::default() };
+            if row.output_known {
+                if let Some(sample) = store::speed_sample(&usage) { store::add_speed(speed, &sample); }
+            }
+        }
         store::merge_totals(
             by_model.entry((row.tool.clone(), row.model)).or_default(),
             &row.totals,
@@ -412,9 +435,14 @@ pub fn read(
     sessions.sort_by_key(|session| std::cmp::Reverse(session.meta.updated_at_ms));
     let session_count = sessions.len();
     let mut sessions: Vec<_> = sessions.into_iter().skip(offset).take(limit).collect();
-    store::enrich_session_outputs(conn, &mut [&mut sessions])?;
+    store::enrich_session_outputs_scoped(conn, &mut [&mut sessions],period.billing_scope.as_deref())?;
+    if period.billing_scope.is_some() && period.model.is_none() {
+        for session in &mut sessions {
+            session.meta.model=session.recent_request.as_ref().and_then(|request|request.model.clone());
+        }
+    }
     let mut latest = BTreeMap::new();
-    for source in ["codex", "claude", "antigravity", "deepseek-harness"] {
+    for source in ["codex", "claude", "antigravity", "deepseek-harness","api"] {
         let stamp: Option<i64> = conn
             .query_row(
                 "SELECT MAX(timestamp_ms) FROM monitor_requests WHERE tool=?1 AND timestamp_ms>0 AND NOT EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='timestamp') AND COALESCE(json_extract(usage,'$.usageBasis'),'') NOT IN ('legacy_initial_cumulative','legacy_cumulative_delta')",
@@ -424,6 +452,19 @@ pub fn read(
             .map_err(|e| e.to_string())?;
         latest.insert(source.to_owned(), stamp);
     }
+    // Rate history follows observation time, including requests that began before this period.
+    let history_start = (start + 59_999) / 60_000 * 60_000;
+    let history_end = end / 60_000 * 60_000;
+    let history_width = (width + 59_999) / 60_000 * 60_000;
+    let coverage = super::live::history_coverage(conn, history_start, history_end)?;
+    let mut observed = BTreeMap::<i64, i64>::new();
+    for samples in super::local_cost::observed_samples_scoped(conn, history_start, history_end, tool, period)?.into_values() {
+        for (time, tokens) in samples { *observed.entry((time - history_start) / history_width).or_default() += tokens; }
+    }
+    let observed_timeline = (0..((history_end - history_start).max(0) + history_width - 1) / history_width).map(|index| {
+        let begin = history_start + index * history_width;
+        super::live::history_bucket(&coverage, tool, begin, (begin + history_width).min(history_end), observed.get(&index).copied().unwrap_or(0))
+    }).collect();
     Ok(MonitorAnalysis {
         start_ms: period.start_ms,
         end_ms: end,
@@ -431,6 +472,10 @@ pub fn read(
         unlocated_totals,
         unlocated_by_tool,
         timeline,
+        observed_timeline,
+        api_expense: None,
+        cny_per_usd: None,
+        cost_error: None,
         available_models: models.into_iter().collect(),
         sessions,
         session_count,
@@ -443,6 +488,7 @@ pub fn read(
                     tool,
                     model: None,
                     totals,
+                    speeds: Vec::new(),
                 }
             })
             .collect(),
@@ -454,6 +500,7 @@ pub fn read(
                     tool,
                     model: None,
                     totals,
+                    speeds: Vec::new(),
                 }
             })
             .collect(),
@@ -462,6 +509,7 @@ pub fn read(
             .map(|((tool, model), mut totals)| {
                 store::finish_totals(&mut totals);
                 UsageBreakdown {
+                    speeds: model_speeds.remove(&(tool.clone(), model.clone())).unwrap_or_default().into_values().collect(),
                     tool,
                     model,
                     totals,
@@ -471,194 +519,54 @@ pub fn read(
     })
 }
 
-
 #[cfg(test)]
-mod audit_accuracy_tests {
+mod tests {
     use super::*;
     use rusqlite::params;
-    use serde_json::json;
-
-    fn insert(conn: &Connection, id: &str, tool: &str, timestamp: i64, input: i64, unknown: &[&str], basis: &str, cost: serde_json::Value) -> UsageRecord {
-        let usage = UsageRecord {
-            id: id.into(), tool: tool.into(), session_id: "session".into(), turn_id: id.into(),
-            timestamp_ms: timestamp, input_tokens: input, output_tokens: input / 10,
-            cache_read_tokens: input / 2, model: Some(format!("model-{tool}")),
-            unknown_fields: unknown.iter().map(|field| (*field).into()).collect(),
-            usage_basis: basis.into(), ..Default::default()
-        };
-        let key = format!("{tool}:session");
-        let meta = SessionMeta { tool: tool.into(), id: "session".into(), status: "idle".into(), updated_at_ms: timestamp, ..Default::default() };
-        conn.execute("INSERT OR IGNORE INTO monitor_sessions(key,tool,meta,totals,updated_ms) VALUES(?1,?2,?3,?4,?5)",
-            params![key,tool,serde_json::to_string(&meta).unwrap(),serde_json::to_string(&Totals::default()).unwrap(),timestamp]).unwrap();
-        conn.execute("INSERT INTO monitor_requests(tool,id,session_key,timestamp_ms,usage,cost) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![tool,id,key,timestamp,serde_json::to_string(&usage).unwrap(),cost.to_string()]).unwrap();
-        usage
-    }
 
     #[test]
-    fn legacy_scenario_currency_matches_saved_account_and_weekly_totals() {
-        let conn = Connection::open_in_memory().unwrap();
+    fn model_expenses_and_rates_follow_scope_but_history_uses_observation_time() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::ledger_db::migrate(&mut conn).unwrap();
         store::initialize(&conn).unwrap();
-        let mut saved = Totals::default();
-        for (id,cost) in [
-            ("legacy-usd",json!({"scenarios":[{"mode":"standard","amount":2.5,"evidence":{}}]})),
-            ("explicit-cny",json!({"scenarios":[{"mode":"standard","amount":20.,"evidence":{"currency":"CNY"}}]})),
+        for (id, tool, model, scope, time, output, duration) in [
+            ("a", "codex", "m", "api", 120_000, 10, 1_000),
+            ("b", "codex", "m", "api", 180_000, 90, 9_000),
+            ("sub", "codex", "m", "subscription", 180_000, 900, 1_000),
+            ("other-tool", "claude", "m", "api", 180_000, 400, 1_000),
+            ("other-model", "codex", "other", "api", 180_000, 500, 1_000),
+            ("earlier", "codex", "m", "api", 30_000, 30, 1_000),
         ] {
-            let usage = insert(&conn,id,"codex",1000,100,&[],"provider_reported",cost.clone());
-            store::merge_totals(&mut saved,&super::super::weekly::saved_request_totals(&usage,&cost.to_string()).unwrap());
-        }
-        let mut projected = Totals::default();
-        each_usage(&conn,None,None,&MonitorPeriod::default(),|row| store::merge_totals(&mut projected,&row.totals)).unwrap();
-        store::finish_totals(&mut projected);
-        store::finish_totals(&mut saved);
-        assert_eq!(serde_json::to_value(&projected).unwrap(),serde_json::to_value(saved).unwrap());
-        assert_eq!((projected.request_count,projected.total_tokens),(2,220));
-        assert_eq!(projected.price_summary.by_currency["USD"].standard_subtotal,2.5);
-        assert_eq!(projected.price_summary.by_currency["CNY"].standard_subtotal,20.);
-    }
-
-    #[test]
-    fn bounded_periods_exclude_unlocated_usage_and_all_time_keeps_it_once() {
-        let conn = Connection::open_in_memory().unwrap();
-        store::initialize(&conn).unwrap();
-        for (id,tool,time,input,unknown,basis) in [
-            ("known","codex",1000,100,vec![],"provider_reported"),
-            ("outside","codex",3000,200,vec![],"provider_reported"),
-            ("missing-time","codex",1500,300,vec!["timestamp"],"provider_reported"),
-            ("future-mtime","claude",5000,400,vec!["timestamp"],"assistant_message_usage"),
-            ("old-cumulative","codex",1200,500,vec!["per_request_input_tokens"],"legacy_initial_cumulative"),
-            ("cumulative-delta","codex",1300,600,vec!["per_request_input_tokens"],"legacy_cumulative_delta"),
-        ] {
-            insert(&conn,id,tool,time,input,&unknown,basis,json!({"usd":1.}));
-        }
-        let period=MonitorPeriod{start_ms:Some(900),end_ms:Some(2000),..Default::default()};
-        let bounded=read(&conn,None,&period,"",None,false,0,100,2000).unwrap();
-        assert_eq!((bounded.totals.request_count,bounded.totals.total_tokens),(1,110));
-        assert_eq!(bounded.timeline.iter().map(|bucket|bucket.totals.total_tokens).sum::<i64>(),110);
-        let data=serde_json::to_value(&bounded).unwrap();
-        assert_eq!(data["unlocatedTotals"]["requestCount"],4);
-        assert_eq!(data["unlocatedTotals"]["totalTokens"],1980);
-        assert_eq!(data["unlocatedTotals"]["unitemizedRecords"],2);
-        assert_eq!(data["unlocatedByTool"]["codex"]["totalTokens"],1540);
-        assert_eq!(data["unlocatedByTool"]["claude"]["totalTokens"],440);
-        let all=read(&conn,None,&MonitorPeriod{end_ms:Some(2000),..Default::default()},"",None,false,0,100,2000).unwrap();
-        assert_eq!((all.totals.request_count,all.totals.total_tokens),(5,2090));
-        assert_eq!(all.by_tool.iter().map(|row|row.totals.total_tokens).sum::<i64>(),2090);
-        assert_eq!(all.by_model.iter().map(|row|row.totals.total_tokens).sum::<i64>(),2090);
-        assert_eq!(all.timeline.iter().map(|row|row.totals.total_tokens).sum::<i64>(),110);
-        let selected=read(&conn,Some("codex"),&MonitorPeriod{model:Some("model-codex".into()),..period.clone()},"",None,false,0,100,2000).unwrap();
-        let data=serde_json::to_value(selected).unwrap();
-        assert_eq!(data["unlocatedTotals"]["totalTokens"],1540);
-        assert!(data["unlocatedByTool"].get("claude").is_none());
-        let mut period_rows=0;
-        each_usage_in_sessions(&conn,&["codex:session".into()],&period,|_|period_rows+=1).unwrap();
-        assert_eq!(period_rows,1);
-        let mut all_time_rows=0;
-        each_usage_in_sessions(&conn,&["codex:session".into()],&MonitorPeriod{end_ms:Some(2000),..Default::default()},|_|all_time_rows+=1).unwrap();
-        assert_eq!(all_time_rows,4,"the all-time detail must retain unknown/cumulative records just like the overview");
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|row|row.get::<_,i64>(0)).unwrap(),6);
-    }
-
-    #[test]
-    fn projections_keep_unknown_token_fields_and_unitemized_record_counts() {
-        let conn=Connection::open_in_memory().unwrap();
-        store::initialize(&conn).unwrap();
-        let cost=json!({"usd":null,"reason":"incomplete_token_breakdown"});
-        let usage=insert(&conn,"unknown","codex",1000,0,&["input_tokens","output_tokens","cache_read_tokens","cache_write_tokens"],"legacy_initial_cumulative",cost.clone());
-        let mut projected=Totals::default();
-        each_usage(&conn,None,None,&MonitorPeriod::default(),|row|store::merge_totals(&mut projected,&row.totals)).unwrap();
-        let saved=super::super::weekly::saved_request_totals(&usage,&cost.to_string()).unwrap();
-        assert_eq!(serde_json::to_value(&projected).unwrap(),serde_json::to_value(saved).unwrap());
-        let data=serde_json::to_value(projected).unwrap();
-        for field in ["unitemizedRecords","inputUnknownRequests","outputUnknownRequests","cacheReadUnknownRequests","cacheWriteUnknownRequests"] {
-            assert_eq!(data[field],1,"lost completeness field {field}");
-        }
-        assert_eq!(data["requestCount"],1);
-        assert_eq!(data["inputTokens"],0);
-    }
-
-    #[test]
-    fn unsafe_persisted_totals_fail_before_analysis_or_live_can_publish_a_number() {
-        let conn = Connection::open_in_memory().unwrap();
-        store::initialize(&conn).unwrap();
-        insert(&conn, "large", "codex", 1000, 100, &[], "provider_reported", json!({"usd": 1.}));
-        // This is a legacy/corrupt database path: bypass the new checked write API.
-        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.inputTokens',?1)",
-            [store::MAX_EXACT_TOKENS]).unwrap();
-        let period = MonitorPeriod { start_ms: Some(900), end_ms: Some(2000), ..Default::default() };
-        assert!(read(&conn,None,&period,"",None,false,0,100,2000).err().unwrap().contains("exact"));
-        assert!(super::super::live::read(&conn,2000,0,2000).err().unwrap().contains("exact"));
-        conn.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.inputTokens',100,'$.outputTokens',-1)", []).unwrap();
-        assert!(read(&conn,None,&period,"",None,false,0,100,2000).is_err());
-        assert!(super::super::live::read(&conn,2000,0,2000).is_err());
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests",[],|row|row.get::<_,i64>(0)).unwrap(),1,
-            "a read-time integrity failure must preserve source records for repair");
-    }
-
-    #[test]
-    fn mixed_updates_replays_moves_and_deletes_conserve_all_aggregate_views() {
-        let mut conn=Connection::open_in_memory().unwrap();store::initialize(&conn).unwrap();
-        let catalog=crate::model_catalog::CatalogSnapshot::default();
-        let mut expected=Vec::new();
-        for i in 0..96i64 {
-            let mut record=UsageRecord {
-                id:format!("audit-{}",i/4),tool:["codex","claude","antigravity","deepseek-harness"][(i%4) as usize].into(),
-                session_id:format!("session-{}",i%7),turn_id:format!("turn-{i}"),timestamp_ms:1000+i,
-                model:Some("not-in-any-audit-price-catalog".into()),model_basis:"response_model".into(),
-                input_tokens:100+i*5,cache_read_tokens:20+i,output_tokens:i%17,
-                usage_basis:if i%17==0{"legacy_initial_cumulative"}else{"provider_reported"}.into(),
+            let usage = UsageRecord {
+                id: id.into(), tool: tool.into(), model: Some(model.into()), billing_scope: Some(scope.into()),
+                timestamp_ms: time, input_tokens: 100, output_tokens: output, requested_mode: Some("standard".into()),
+                request_timing: Some(RequestTiming { basis: "request".into(), duration_ms: Some(duration), ..Default::default() }),
                 ..Default::default()
             };
-            if i%11==0 {record.input_tokens=0;record.cache_read_tokens=0;record.unknown_fields.push("input_tokens".into());}
-            if i%13==0 {record.output_tokens=0;record.unknown_fields.push("output_tokens".into());}
-            if i%19==0 {record.unknown_fields.push("timestamp".into());}
-            let tx=conn.transaction().unwrap();
-            store::save_usage_with_catalog(&tx,&record,i64::MAX,2000,&catalog).unwrap();
-            if i%2==0 {
-                if !record.unknown_fields.iter().any(|field|field=="input_tokens") {record.input_tokens+=37;}
-                if !record.unknown_fields.iter().any(|field|field=="output_tokens") {record.output_tokens+=5;}
-                record.timestamp_ms+=500;
-                if i%5==0 {record.session_id="moved-session".into();}
-                store::save_usage_with_catalog(&tx,&record,i64::MAX,2000,&catalog).unwrap();
-            }
-            // A repeated identical row must not add another request, token, or completeness flag.
-            store::save_usage_with_catalog(&tx,&record,i64::MAX,2000,&catalog).unwrap();
-            if i%6==0 {store::delete_request(&tx,&record.tool,&record.id).unwrap();} else {expected.push(record);}
-            tx.commit().unwrap();
+            conn.execute("INSERT INTO monitor_requests VALUES(?1,?2,'session',?3,?4,?5)", params![tool, id, time, serde_json::to_string(&usage).unwrap(), r#"{"usd":10,"evidence":{"currency":"USD","mode":"standard"}}"#]).unwrap();
         }
-        let cached=store::sum_sessions(&store::sessions(&conn,None,3000).unwrap());
-        let mut projected=Totals::default();
-        each_usage(&conn,None,None,&MonitorPeriod::default(),|row|store::merge_totals(&mut projected,&row.totals)).unwrap();
-        store::finish_totals(&mut projected);
-        assert_eq!(serde_json::to_value(&cached).unwrap(),serde_json::to_value(&projected).unwrap(),"cached session totals must match the independent request projection");
-        assert_eq!(projected.request_count,80);
-        assert_eq!(projected.input_tokens,expected.iter().map(|row|row.input_tokens).sum::<i64>());
-        assert_eq!(projected.output_tokens,expected.iter().map(|row|row.output_tokens).sum::<i64>());
-        assert_eq!(projected.cache_read_tokens,expected.iter().map(|row|row.cache_read_tokens).sum::<i64>());
-        assert_eq!(projected.total_tokens,expected.iter().map(|row|row.input_tokens+row.output_tokens).sum::<i64>());
-        let data=serde_json::to_value(&projected).unwrap();
-        assert_eq!(data["inputUnknownRequests"],expected.iter().filter(|row|row.unknown_fields.iter().any(|field|field=="input_tokens")).count());
-        assert_eq!(data["outputUnknownRequests"],expected.iter().filter(|row|row.unknown_fields.iter().any(|field|field=="output_tokens")).count());
-        assert_eq!(data["unitemizedRecords"],expected.iter().filter(|row|row.usage_basis=="legacy_initial_cumulative").count());
-        let mut saved=Totals::default();
-        for record in &expected {
-            let cost:String=conn.query_row("SELECT cost FROM monitor_requests WHERE tool=?1 AND id=?2",params![record.tool,record.id],|row|row.get(0)).unwrap();
-            store::merge_totals(&mut saved,&super::super::weekly::saved_request_totals(record,&cost).unwrap());
-        }
-        store::finish_totals(&mut saved);
-        assert_eq!(serde_json::to_value(&projected).unwrap(),serde_json::to_value(saved).unwrap(),"weekly/account projection must retain the same totals and unknowns");
-        store::initialize(&conn).unwrap();
-        let reopened=store::sum_sessions(&store::sessions(&conn,None,3000).unwrap());
-        assert_eq!(serde_json::to_value(cached).unwrap(),serde_json::to_value(reopened).unwrap(),"startup supplement must be idempotent");
-        let period=MonitorPeriod{start_ms:Some(1000),end_ms:Some(1600),..Default::default()};
-        let result=read(&conn,None,&period,"",None,false,0,100,3000).unwrap();
-        let located:Vec<_>=expected.iter().filter(|row|row.usage_basis!="legacy_initial_cumulative"&&!row.unknown_fields.iter().any(|field|field=="timestamp")).collect();
-        assert_eq!(result.totals.request_count,located.len() as i64);
-        assert_eq!(result.totals.total_tokens,located.iter().map(|row|row.input_tokens+row.output_tokens).sum::<i64>());
-        for grouped in [&result.by_tool,&result.by_model,&result.tool_overview] {
-            assert_eq!(grouped.iter().map(|row|row.totals.total_tokens).sum::<i64>(),result.totals.total_tokens);
-            assert_eq!(grouped.iter().map(|row|row.totals.request_count).sum::<i64>(),result.totals.request_count);
-        }
-        assert_eq!(result.timeline.iter().map(|row|row.totals.total_tokens).sum::<i64>(),result.totals.total_tokens);
+        conn.execute_batch("INSERT INTO monitor_output_history VALUES('codex','earlier',120000,600);
+          INSERT INTO monitor_observations VALUES('codex','b','session',190000,90);
+          INSERT INTO monitor_observations VALUES('codex','sub','session',190000,900);
+          INSERT INTO monitor_observations VALUES('claude','other-tool','session',190000,400);
+          INSERT INTO monitor_observations VALUES('codex','other-model','session',190000,500);
+          INSERT INTO monitor_coverage_history VALUES('test','codex',60000,180000);
+          INSERT INTO monitor_coverage_history VALUES('test','*',60000,180000);").unwrap();
+        let period = MonitorPeriod { start_ms: Some(60_000), end_ms: Some(240_000), model: Some("m".into()), billing_scope: Some("api".into()), ..Default::default() };
+        let result = read(&conn, Some("codex"), &period, "", None, false, 0, 100, 240_000).unwrap();
+        assert_eq!((result.totals.request_count, result.totals.output_tokens), (2, 100));
+        assert_eq!(result.by_model.len(), 1);
+        let speed = &result.by_model[0].speeds[0];
+        assert_eq!((speed.valid_samples, speed.duration_ms, speed.output_tokens_per_second), (2, 10_000, Some(10.)));
+        let history = &result.observed_timeline[0];
+        assert_eq!((history.observed_output_tokens, history.covered_ms, history.output_tokens), (690, 120_000, None));
+        let settings: super::super::local_cost::Settings = serde_json::from_value(serde_json::json!({
+            "cnyPerUsd": 7, "accounts": {}, "apiRules": [{ "model": null, "startMs": 0, "currency": "USD", "multiplier": 0.2 }]
+        })).unwrap();
+        let expense = super::super::local_cost::api_expense_scoped(&conn, 60_000, 240_000, &settings, Some("codex"), &period).unwrap();
+        assert_eq!((expense.priced_requests, expense.missing_requests, expense.by_currency["USD"]), (2, 0, 4.));
+        let subscription = MonitorPeriod { billing_scope: Some("subscription".into()), ..period };
+        let expense = super::super::local_cost::api_expense_scoped(&conn, 60_000, 240_000, &settings, Some("codex"), &subscription).unwrap();
+        assert_eq!(expense.priced_requests + expense.missing_requests, 0);
     }
 }

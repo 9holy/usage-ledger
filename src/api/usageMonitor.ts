@@ -27,7 +27,7 @@ export interface RuntimeModeEvidence {
   mode: string | null
   conflicted: boolean
   observedAtMs: number
-  source: 'codex_turn_feedback_tag'
+  source: 'codex_turn_feedback_tag' | 'upstream_request_record'
 }
 
 export interface MonitorTotals {
@@ -298,6 +298,7 @@ export interface RecordedOutputBucket {
 }
 
 export interface LiveSnapshot {
+  currentRates?: Array<{ tool: string; model: string | null; sessionKey: string; outputTokensPerSecond: number; sampledAtMs: number; intervalMs: number }>
   sampledAtMs: number
   collectionUpdatedAtMs: number
   basis: string
@@ -327,6 +328,7 @@ export interface MonitorSessionDetail {
 }
 
 export interface MonitorAnalysisQuery extends MonitorSessionFilters {
+  billingScope?: 'api' | 'subscription' | 'unknown'
   tool: string | null
   startMs: number | null
   endMs: number
@@ -344,12 +346,23 @@ export interface MonitorAnalysis {
   unlocatedByTool?: Record<string, MonitorTotals>
   byTool: Array<{ tool: string; model: null; totals: MonitorTotals }>
   toolOverview?: Array<{ tool: string; model: string | null; totals: MonitorTotals }>
-  byModel: Array<{ tool: string; model: string | null; totals: MonitorTotals }>
+  byModel: MonitorModelUsage[]
   timeline: Array<{ startMs: number; endMs: number; totals: MonitorTotals }>
+  observedTimeline?: LiveBucket[]
+  apiExpense?: import('./localCost').LocalCostReport['apiExpense'] | null
+  cnyPerUsd?: number | null
+  costError?: string | null
   availableModels: string[]
   sessions: MonitorSession[]
   sessionCount: number
   latestRequestAtMs: Record<string, number | null>
+}
+
+export interface MonitorModelUsage {
+  tool: string
+  model: string | null
+  totals: MonitorTotals
+  speeds?: Array<{ basis: string | null; validSamples: number; totalSamples: number; outputTokens: number; durationMs: number; outputTokensPerSecond: number | null }>
 }
 
 export interface MonitorWeeklyUsage {
@@ -457,9 +470,9 @@ export interface MonitorQuotaReport {
   sources: Array<{ tool: string; source: string; sourceInstance?: string | null; status: string; error: string | null; scopeNote?: string | null; coverage?: { registeredFiles: number; metadataErrors: number; scopesReported: number; scopesUnreported: number; tailErrors: number } | null }>
 }
 
-export function getUsageMonitorWeekly(startMs: number, endMs: number, forecastEndMs?: number): Promise<MonitorWeeklyUsage> {
+export function getUsageMonitorWeekly(startMs: number, endMs: number, forecastEndMs?: number, billingScope?: 'api'): Promise<MonitorWeeklyUsage> {
   if (!isDesktopRuntime()) return Promise.reject(new Error('全局用量监控需要桌面端'))
-  return invoke('usage_monitor_weekly', { startMs, endMs, ...(forecastEndMs == null ? {} : { forecastEndMs }) })
+  return invoke('usage_monitor_weekly', { startMs, endMs, ...(forecastEndMs == null ? {} : { forecastEndMs }), ...(billingScope ? {billingScope} : {}) })
 }
 
 export function getUsageMonitorQuotas(): Promise<MonitorQuotaReport> {
@@ -519,6 +532,7 @@ export function monitorIsUnitemizedRecord(record: Pick<MonitorRequest, 'usageBas
 }
 
 export interface MonitorRequestFilters {
+  billingScope?: 'api' | 'subscription' | 'unknown'
   includeDescendants?: boolean
   startMs?: number | null
   endMs?: number
@@ -530,6 +544,7 @@ export interface MonitorRequestFilters {
 export const MONITOR_PAGE_SIZE = 100
 
 export interface MonitorSessionFilters {
+  billingScope?: 'api' | 'subscription' | 'unknown'
   search?: string
   status?: 'all' | 'active' | 'history'
   unpricedOnly?: boolean
@@ -618,7 +633,7 @@ export function monitorAutomaticMode(request: MonitorAutomaticModeInput): Pick<M
   if (request.unknownFields?.includes('requested_mode_ambiguous')) return { mode: null, basis: 'unknown' }
   if (request.runtimeMode?.conflicted) return { mode: null, basis: 'unknown' }
   const start = request.requestTiming?.startedAtMs
-  const runtimeAsOf = request.runtimeMode != null && !request.unknownFields?.includes('timestamp')
+  const runtimeAsOf = request.runtimeMode?.source==='upstream_request_record' || request.runtimeMode != null && !request.unknownFields?.includes('timestamp')
     && (request.timestampMs == null || request.runtimeMode.observedAtMs <= request.timestampMs)
     && (start == null || request.runtimeMode.observedAtMs <= start)
   const runtime = runtimeAsOf ? recognizedQuoteMode(request.runtimeMode?.mode) : null
@@ -737,6 +752,7 @@ export function monitorMode(mode: string): string {
 }
 
 export function monitorContext(value: string): string {
+  if(value==='source_recorded_charge')return t('usageMonitor.text.upstreamCharge')
   if (value === 'subscription_no_long_context_surcharge') return t('usageMonitor.text.subscriptionContextExempt')
   if (value === 'base' || value === 'standard') return t('usageMonitor.format.regularContext')
   if (value === 'full published context window') return t('usageMonitor.format.fullContext')

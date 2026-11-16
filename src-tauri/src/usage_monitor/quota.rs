@@ -91,6 +91,32 @@ pub struct QuotaObservation {
     stale_after_ms: i64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamQuota {
+    pub slot: String,
+    pub window_minutes: i64,
+    pub used_percent: f64,
+    pub observed_at_ms: i64,
+    pub resets_at_ms: i64,
+}
+
+pub(super) fn save_upstream_codex(conn:&Connection,account:&str,label:&str,source:&str,quota:&UpstreamQuota,now:i64)->Result<bool,String>{
+    if !matches!(quota.slot.as_str(),"primary"|"secondary") || !matches!(quota.window_minutes,300|10080)
+        || !quota.used_percent.is_finite() || !(0. ..=100.).contains(&quota.used_percent)
+        || quota.observed_at_ms<=0 || quota.observed_at_ms>now+60_000 || quota.resets_at_ms<=quota.observed_at_ms {
+        return Err("Invalid upstream quota snapshot".into());
+    }
+    let before=conn.total_changes();
+    save(conn,&QuotaObservation{
+        tool:"codex".into(),account_key:account.into(),account_label:Some(label.into()),attribution:"account".into(),
+        limit_id:"codex".into(),slot:quota.slot.clone(),window_minutes:Some(quota.window_minutes),window_seconds:Some(quota.window_minutes * 60),reset_after_seconds:None,provider_status:None,plan:None,
+        model_id:None,pool_label:None,observed_at_ms:Some(quota.observed_at_ms),resets_at_ms:Some(quota.resets_at_ms),
+        used_percent:Some(quota.used_percent),credits:None,source:source.into(),billing_account_verified:Some(true),source_error:None,stale_after_ms:300_000,
+    })?;
+    Ok(conn.total_changes()!=before)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaSnapshot {
@@ -215,52 +241,107 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
     // Earlier releases attributed local quota observations to a conversation
     // creator (or a matching reset timestamp). Preserve these rows for diagnosis,
     // but never let them masquerade as authenticated account snapshots.
+    super::codex_quota_accounts::initialize(conn)?;
     conn.execute("UPDATE monitor_quotas SET data=json_set(data,
         '$.billing_account_verified',json('false'),'$.attribution','unattributed',
         '$.source_error','unverified_historical_account_quota')
         WHERE tool='codex' AND json_extract(data,'$.source')='codex_local_log'
-          AND json_extract(data,'$.attribution')='account'", [])
+          AND json_extract(data,'$.attribution')='account'
+          AND NOT EXISTS(SELECT 1 FROM monitor_codex_quota_accounts a
+            WHERE a.account_key=monitor_quotas.account_key AND a.reset_ms=json_extract(data,'$.resets_at_ms')
+              AND a.plan=json_extract(data,'$.plan'))", [])
         .map_err(|e| e.to_string())?;
+    super::account_names::initialize(conn)?;
     super::accounts::initialize(conn)?;
     if let Some(transaction) = transaction { transaction.commit().map_err(|e| e.to_string())?; }
     Ok(())
 }
 
-pub(super) fn account_rows(conn: &Connection) -> Result<Vec<(String, String, i64, Option<String>)>, String> {
-    let mut statement = conn.prepare(
-        "WITH identities(tool,account_key) AS (
-            SELECT tool,account_key FROM monitor_quotas WHERE json_extract(data,'$.attribution')='account'
-            UNION SELECT 'codex',account_key FROM monitor_request_account_evidence
-            UNION SELECT tool,'account:'||json_extract(state,'$.quota_account_id') FROM monitor_files
-              WHERE json_extract(state,'$.quota_identity_error') IS NULL
-                AND json_type(state,'$.session.id')='text'
-                AND json_type(state,'$.quota_account_id')='text'
-                AND TRIM(json_extract(state,'$.quota_account_id'))<>'')
-         SELECT i.tool,i.account_key,COALESCE(MIN(q.id),0),MIN(json_extract(q.data,'$.account_label'))
-         FROM identities i LEFT JOIN monitor_quotas q ON q.tool=i.tool AND q.account_key=i.account_key
-           AND json_extract(q.data,'$.attribution')='account'
-         GROUP BY i.tool,i.account_key ORDER BY i.tool,COALESCE(MIN(q.id),0),i.account_key"
-    ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
-}
-
-fn private_account_identity(tool: &str, key: &str, number: i64) -> (String, String) {
-    let digest = format!("{:x}", md5::compute(key.as_bytes()));
-    (format!("{tool}:account-{}", &digest[..12]),
-        if number > 0 { format!("Account {number}") } else { format!("Account {}", &digest[..6]) })
-}
-
+#[cfg(test)]
 pub(super) fn account_report_identities(
     conn: &Connection,
     tool: &str,
 ) -> Result<BTreeMap<String, (String, String)>, String> {
-    Ok(account_rows(conn)?.into_iter().filter(|(found, _, _, _)| found == tool)
-        .map(|(_, key, number, _)| {
-            let identity = private_account_identity(tool, &key, number);
-            (key, identity)
-        }).collect())
+    Ok(account_identity_report(conn,tool)?.accounts)
+}
+
+pub(super) struct AccountIdentityReport {
+    pub accounts:BTreeMap<String,(String,String)>,
+    pub warnings:Vec<String>,
+}
+pub(super) fn report_account_key(tool:&str,key:&str)->String{
+    let digest=format!("{:x}",md5::compute(key.as_bytes()));format!("{tool}:account-{}",&digest[..12])
+}
+pub(super) fn account_identity_rows(conn:&Connection,tool:&str)->Result<Vec<(String,i64,Option<String>)>,String>{
+    let mut statement = conn
+        .prepare("SELECT account_key,MIN(id),MIN(json_extract(data,'$.account_label')) FROM monitor_quotas WHERE tool=?1
+            AND json_extract(data,'$.attribution')='account'
+            GROUP BY account_key
+            UNION ALL SELECT account_key,0,NULL FROM monitor_request_account_evidence e WHERE ?1='codex'
+              AND NOT EXISTS(SELECT 1 FROM monitor_quotas q WHERE q.tool=?1 AND q.account_key=e.account_key)
+            GROUP BY account_key
+            UNION ALL SELECT account_key,0,NULL FROM monitor_account_profiles p WHERE tool=?1
+              AND NOT EXISTS(SELECT 1 FROM monitor_quotas q WHERE q.tool=?1 AND q.account_key=p.account_key)
+              AND NOT EXISTS(SELECT 1 FROM monitor_request_account_evidence e WHERE ?1='codex' AND e.account_key=p.account_key)
+            ORDER BY 1")
+        .map_err(|error| error.to_string())?;
+    let mut keys = statement
+        .query_map([tool], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?,row.get::<_,Option<String>>(2)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for key in super::request_identity::native_accounts(conn,tool)?{
+        if !keys.iter().any(|(existing,_,_)|existing==&key){keys.push((key,0,None));}
+    }
+    let mut creators = conn.prepare("SELECT DISTINCT 'account:'||json_extract(state,'$.quota_account_id') FROM monitor_files
+        WHERE tool=?1 AND json_extract(state,'$.quota_identity_error') IS NULL
+          AND json_type(state,'$.session.id')='text' AND json_type(state,'$.quota_account_id')='text'
+          AND TRIM(json_extract(state,'$.quota_account_id'))<>''").map_err(|e| e.to_string())?;
+    for key in creators.query_map([tool], |r| r.get::<_,String>(0)).map_err(|e| e.to_string())? {
+        let key = key.map_err(|e| e.to_string())?;
+        if !keys.iter().any(|(existing,_,_)| existing==&key) { keys.push((key,0,None)); }
+    }
+    keys.sort_by(|a,b|a.0.cmp(&b.0));
+    Ok(keys)
+}
+
+pub(super) fn known_report_account(conn:&Connection,key:&str)->Result<bool,String>{
+    let Some((tool,_))=key.split_once(':')else{return Ok(false)};
+    if !["codex","claude","antigravity","deepseek-harness"].contains(&tool){return Ok(false);}
+    Ok(account_identity_rows(conn,tool)?.iter().any(|(raw,_,_)|report_account_key(tool,raw)==key))
+}
+
+pub(super) fn account_identity_keys(conn:&Connection,tool:&str)->Result<std::collections::BTreeSet<String>,String>{
+    Ok(account_identity_rows(conn,tool)?.into_iter().map(|(key,_,_)|key).collect())
+}
+
+pub(super) fn account_identity_report(conn:&Connection,tool:&str)->Result<AccountIdentityReport,String>{
+    let keys=account_identity_rows(conn,tool)?;
+    let wanted=keys.iter().map(|(key,_,_)|key.clone()).collect();
+    let names=super::account_names::resolve(conn,tool,&wanted)?;
+    let aliases=super::account_names::aliases(conn)?;
+    let accounts=keys
+        .into_iter()
+        .map(|(key, number,stored)| {
+            let digest = format!("{:x}", md5::compute(key.as_bytes()));
+            let report_key=report_account_key(tool,&key);
+            let actual=names.labels.get(&key).cloned().or(stored);
+            let label=match (aliases.get(&report_key),actual){
+                (Some(alias),Some(actual))if alias!=&actual=>format!("{alias} · {actual}"),
+                (Some(alias),_)=>alias.clone(),
+                (None,Some(actual))=>actual,
+                (None,None)=>if number>0{format!("Account {number}")}else{format!("Account {}",&digest[..6])},
+            };
+            (
+                key,
+                (
+                    report_key,
+                    label,
+                ),
+            )
+        })
+        .collect();
+    Ok(AccountIdentityReport{accounts,warnings:names.warnings})
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {
@@ -939,29 +1020,19 @@ pub fn collect_offline(conn: &Connection) -> Result<(), String> {
             },
         };
         if status == "error" {
-            // Keep a failed source historical even after the user selects a
-            // different root and the aggregate source-status entry changes.
-            // A later successful save clears only this scope's error metadata.
-            conn.execute(
-                "UPDATE monitor_quotas SET data=json_set(data,'$.source_error',
-                    COALESCE(json_extract(data,'$.source_error'),?1))
-                 WHERE tool=?2 AND json_extract(data,'$.source')='cockpit_snapshot'
-                   AND ((?3='local' AND account_key LIKE 'cockpit:%' AND account_key NOT LIKE 'cockpit:instance:%')
-                     OR (?3<>'local' AND substr(account_key,1,length(?4))=?4))",
-                params!["Cockpit source refresh failed; previous readings remain historical",
-                    tool, instance, format!("cockpit:instance:{instance}:")],
-            ).map_err(|error| error.to_string())?;
+            conn.execute("UPDATE monitor_quotas SET data=json_set(data,'$.source_error',
+                COALESCE(json_extract(data,'$.source_error'),?1))
+                WHERE tool=?2 AND json_extract(data,'$.source')='cockpit_snapshot'
+                  AND ((?3='local' AND account_key LIKE 'cockpit:%' AND account_key NOT LIKE 'cockpit:instance:%')
+                    OR (?3<>'local' AND substr(account_key,1,length(?4))=?4))",
+                params!["Cockpit source refresh failed; previous readings remain historical",tool,instance,format!("cockpit:instance:{instance}:")]).map_err(|e| e.to_string())?;
         }
         if status != "available" {
-            conn.execute(
-                "DELETE FROM monitor_quota_samples WHERE quota_id IN
-                (SELECT id FROM monitor_quotas WHERE tool=?1
-                  AND ((?2='local' AND account_key LIKE 'cockpit:%' AND account_key NOT LIKE 'cockpit:instance:%')
-                    OR (?2<>'local' AND substr(account_key,1,length(?3))=?3))
-                  AND (?4 OR json_extract(data,'$.source_error') IS NOT NULL))",
-                params![tool, instance, format!("cockpit:instance:{instance}:"), status == "error"],
-            )
-            .map_err(|e| e.to_string())?;
+            conn.execute("DELETE FROM monitor_quota_samples WHERE quota_id IN (SELECT id FROM monitor_quotas WHERE tool=?1
+                AND ((?2='local' AND account_key LIKE 'cockpit:%' AND account_key NOT LIKE 'cockpit:instance:%')
+                  OR (?2<>'local' AND substr(account_key,1,length(?3))=?3))
+                AND (?4 OR json_extract(data,'$.source_error') IS NOT NULL))",
+                params![tool,instance,format!("cockpit:instance:{instance}:"),status=="error"]).map_err(|e| e.to_string())?;
         }
         sources.push(QuotaSourceStatus {
             tool: tool.into(),
@@ -1028,8 +1099,11 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
     let official_checks = official_codex_checks(conn)?;
     let report_identities = ["codex", "claude", "antigravity", "deepseek-harness"]
         .into_iter()
-        .map(|tool| account_report_identities(conn, tool).map(|ids| (tool, ids)))
+        .map(|tool| account_identity_report(conn, tool).map(|ids| (tool, ids)))
         .collect::<Result<BTreeMap<_, _>, _>>()?;
+    for(tool,identity)in &report_identities {
+        if !identity.warnings.is_empty(){sources.push(QuotaSourceStatus{tool:(*tool).into(),source:"local_account_names".into(),source_instance:None,status:"partial".into(),error:Some(identity.warnings.join("; ")),coverage:None,scope_note:None});}
+    }
     let mut stmt = conn
         .prepare(
             "SELECT id,data
@@ -1078,24 +1152,24 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
                         && cockpit_account_in_scope(&observation.account_key, s.source_instance.as_deref().unwrap_or("local")))))
                 .and_then(|s| s.error.clone())
         });
-        let stale = stale || source_error.is_some();
+        let source_missing=observation.source!="codex_official_usage"&&sources.iter().any(|s|s.tool==observation.tool&&s.source==observation.source&&matches!(s.status.as_str(),"error"|"not_reported")
+            && (observation.source!="cockpit_snapshot"||cockpit_account_in_scope(&observation.account_key,s.source_instance.as_deref().unwrap_or("local"))));
+        let stale = stale || source_error.is_some() || source_missing;
         if observation.source == "codex_official_usage" && source_error.is_none()
             && observation.observed_at_ms.is_some_and(|time| now_ms.saturating_sub(time) <= observation.stale_after_ms)
             && (!expired || observation.credits.is_some()
                 || observation.provider_status.as_ref().is_some_and(QuotaProviderStatus::has_evidence))
-        {
-            // Quota resets expire the window, not separately reported account
-            // credits/status from the same successful, recent response.
-            official_current_evidence = true;
-        }
+        { official_current_evidence = true; }
         let depletion = depletion(conn, id, &observation, stale, source_error.is_some())?;
         let (report_key, default_label) = report_identities
             .get(observation.tool.as_str())
-            .and_then(|ids| ids.get(&observation.account_key))
+            .and_then(|ids| ids.accounts.get(&observation.account_key))
             .cloned()
             .unwrap_or_else(|| {
                 if observation.account_key.starts_with("account:") || observation.account_key.starts_with("cockpit:") {
-                    return private_account_identity(&observation.tool, &observation.account_key, 0);
+                    let key = report_account_key(&observation.tool, &observation.account_key);
+                    let digest = format!("{:x}", md5::compute(observation.account_key.as_bytes()));
+                    return (key, format!("Account {}", &digest[..6]));
                 }
                 (
                     format!("{}:{}", observation.tool, observation.account_key),
@@ -1114,7 +1188,7 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
                 _ => None,
             }),
             account_key: report_key,
-            account_label: observation.account_label.unwrap_or(default_label),
+            account_label: default_label,
             tool: observation.tool,
             attribution: observation.attribution,
             limit_id: observation.limit_id,
@@ -1170,7 +1244,7 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
                 c.metadata_errors, c.tail_errors
             )
         });
-    let reported = quotas.iter().any(|q| q.tool == "codex");
+    let reported = quotas.iter().any(|q| q.tool == "codex" && q.source == "codex_local_log");
     let partial = coverage
         .as_ref()
         .is_some_and(|c| c.scopes_unreported + c.metadata_errors + c.tail_errors > 0);
@@ -1190,6 +1264,11 @@ pub fn read(conn: &Connection, now_ms: i64) -> Result<QuotaReport, String> {
         coverage,
         scope_note: Some("One-time bounded tails cover reported scopes only; unreported scopes are not assumed unlimited.".into()),
     });
+    for source in ["sub2api","cliproxy"] {
+        if quotas.iter().any(|quota|quota.source==source) && !sources.iter().any(|saved|saved.source==source) {
+            sources.push(QuotaSourceStatus{tool:"codex".into(),source:source.into(),source_instance:None,status:"available".into(),error:None,coverage:None,scope_note:None});
+        }
+    }
     Ok(QuotaReport {
         collected_at_ms: now_ms,
         quotas,

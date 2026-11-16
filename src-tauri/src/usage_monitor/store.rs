@@ -29,6 +29,7 @@ pub(super) fn validate_token_totals(conn: &Connection) -> Result<(), String> {
 }
 
 pub fn initialize(conn: &Connection) -> Result<(), String> {
+    super::current_rate::initialize(conn)?;
     super::billing::initialize(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS monitor_sessions (
@@ -43,6 +44,7 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
          CREATE INDEX IF NOT EXISTS monitor_requests_turn ON monitor_requests(session_key,json_extract(usage,'$.turnId'));
          CREATE INDEX IF NOT EXISTS monitor_requests_time ON monitor_requests(timestamp_ms);
          CREATE INDEX IF NOT EXISTS monitor_requests_tool_time ON monitor_requests(tool,timestamp_ms);
+         CREATE INDEX IF NOT EXISTS monitor_requests_billing_time ON monitor_requests(json_extract(usage,'$.billingScope'),timestamp_ms);
          CREATE INDEX IF NOT EXISTS monitor_requests_token_totals ON monitor_requests(
            json_extract(usage,'$.inputTokens'),json_extract(usage,'$.outputTokens'),
            json_extract(usage,'$.cacheReadTokens'),json_extract(usage,'$.cacheWriteTokens'),
@@ -63,6 +65,7 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
             signature TEXT NOT NULL, state TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS monitor_sources (
             root TEXT PRIMARY KEY, data TEXT NOT NULL);
+         CREATE INDEX IF NOT EXISTS monitor_files_session_identity ON monitor_files(json_extract(state,'$.session.id'));
          CREATE TABLE IF NOT EXISTS monitor_observations (
             tool TEXT NOT NULL, id TEXT NOT NULL, session_key TEXT NOT NULL,
             observed_ms INTEGER NOT NULL, output_tokens INTEGER NOT NULL);
@@ -70,7 +73,9 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
          CREATE INDEX IF NOT EXISTS monitor_observations_request ON monitor_observations(tool,id,session_key,observed_ms);",
     ).map_err(|e| e.to_string())?;
     super::quota::initialize(conn)?;
+    super::request_identity::initialize(conn)?;
     super::live::initialize(conn)?;
+    super::upstream_accounts::initialize(conn)?;
     supplement_cache_cohort(conn)?;
     supplement_completeness(conn)?;
     supplement_usage_quality(conn)?;
@@ -115,6 +120,9 @@ fn migrate_codex_response_namespace(conn: &Connection) -> Result<(), String> {
         tx.execute("INSERT OR IGNORE INTO monitor_request_quota_evidence SELECT ?2,home,reset_ms,plan FROM monitor_request_quota_evidence WHERE id=?1", params![old,id])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM monitor_request_quota_evidence WHERE id=?1", [&old]).map_err(|e| e.to_string())?;
+        tx.execute("UPDATE monitor_request_identity SET id=?2 WHERE tool='codex' AND id=?1", params![old,id]).map_err(|e| e.to_string())?;
+        tx.execute("UPDATE monitor_upstream_receipts SET monitor_id=?2 WHERE tool='codex' AND monitor_id=?1", params![old,id]).map_err(|e| e.to_string())?;
+        tx.execute("UPDATE monitor_current_rates SET id=?2 WHERE tool='codex' AND id=?1", params![old,id]).map_err(|e| e.to_string())?;
     }
     let observations = {
         let mut query = tx.prepare("SELECT DISTINCT id,session_key FROM monitor_observations WHERE tool='codex' AND id LIKE 'response:%'")
@@ -531,7 +539,7 @@ fn supplement_completeness(conn: &Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let (done,legacy_complete,legacy_price):(bool,bool,bool) = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='completeness_totals_v4'),EXISTS(SELECT 1 FROM monitor_state WHERE key='completeness_totals_v2'),EXISTS(SELECT 1 FROM monitor_state WHERE key='completeness_totals_v3')",
+            "SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='completeness_totals_v4') AND EXISTS(SELECT 1 FROM monitor_state WHERE key='completeness_totals_v5'),EXISTS(SELECT 1 FROM monitor_state WHERE key='completeness_totals_v2'),EXISTS(SELECT 1 FROM monitor_state WHERE key='completeness_totals_v3')",
             [],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         )
@@ -655,7 +663,7 @@ fn supplement_completeness(conn: &Connection) -> Result<(), String> {
             tx.execute("UPDATE monitor_sessions SET totals=json_set(totals,'$.automaticPriceSummary',json(?2)) WHERE key=?1",params![key,serde_json::to_string(&total.automatic_price_summary).map_err(|error|error.to_string())?]).map_err(|error|error.to_string())?;
         }
         tx.execute(
-            "INSERT OR REPLACE INTO monitor_state(key,data) VALUES('completeness_totals_v2','1'),('completeness_totals_v3','1'),('completeness_totals_v4','1')",
+            "INSERT OR REPLACE INTO monitor_state(key,data) VALUES('completeness_totals_v2','1'),('completeness_totals_v3','1'),('completeness_totals_v4','1'),('completeness_totals_v5','1')",
             [],
         )
         .map_err(|error| error.to_string())?;
@@ -708,6 +716,7 @@ fn runtime_mode_for_usage(
     usage: &UsageRecord,
     evidence: RuntimeModeEvidence,
 ) -> Option<RuntimeModeEvidence> {
+    if evidence.source=="upstream_request_record"{return Some(evidence);}
     let known_time = !usage
         .unknown_fields
         .iter()
@@ -761,7 +770,7 @@ pub fn apply_runtime_mode_batch(
     observations: &[RuntimeModeObservation],
     next_cursor: &RuntimeModeCursor,
 ) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     apply_runtime_mode_batch_in_transaction(&tx, source_path, observations, next_cursor)?;
     tx.commit().map_err(|error| error.to_string())
 }
@@ -1344,11 +1353,10 @@ pub(super) fn remove_snapshot_request(
             params![tool, id],
         )
         .map_err(|e| e.to_string())?;
-        if tool == "codex" {
-            // Matching cardinality can change solely because an obsolete peer
-            // disappeared, even when the retained request is an unchanged replay.
-            super::billing::invalidate_proxy_matches(tx)?;
-        }
+        tx.execute("DELETE FROM monitor_output_history WHERE tool=?1 AND id=?2",params![tool,id]).map_err(|e|e.to_string())?;
+        let unlinked=tx.execute("UPDATE monitor_upstream_receipts SET monitor_id=NULL WHERE tool=?1 AND monitor_id=?2",params![tool,id]).map_err(|e|e.to_string())?;
+        if unlinked>0 {tx.execute("INSERT OR IGNORE INTO monitor_state VALUES('upstream_usage_pending','1')",[]).map_err(|e|e.to_string())?;}
+        if tool == "codex" { super::billing::invalidate_proxy_matches(tx)?; }
     }
     Ok(())
 }
@@ -1375,7 +1383,7 @@ pub fn save_usage_with_catalog(
     observed_ms: i64,
     catalog: &crate::model_catalog::CatalogSnapshot,
 ) -> Result<(), String> {
-    save_usage_impl(tx, incoming, live_after_ms, observed_ms, catalog, true)
+    save_usage_impl(tx, incoming, live_after_ms, observed_ms, catalog, true, None)
 }
 
 /// Complete snapshot samples replace prior evidence, unlike partial stream chunks.
@@ -1386,7 +1394,11 @@ pub(super) fn save_snapshot_usage_with_catalog(
     observed_ms: i64,
     catalog: &crate::model_catalog::CatalogSnapshot,
 ) -> Result<(), String> {
-    save_usage_impl(tx, incoming, live_after_ms, observed_ms, catalog, false)
+    save_usage_impl(tx, incoming, live_after_ms, observed_ms, catalog, false, None)
+}
+
+pub(super) fn save_source_usage(tx:&Transaction<'_>,incoming:&UsageRecord,live_after_ms:i64,observed_ms:i64,catalog:&crate::model_catalog::CatalogSnapshot,quote:Option<&CostEstimate>)->Result<(),String>{
+    save_usage_impl(tx,incoming,live_after_ms,observed_ms,catalog,false,quote)
 }
 
 fn enrich_usage_partial(merged: &mut UsageRecord, known: &UsageRecord) -> Result<(), String> {
@@ -1504,6 +1516,7 @@ fn save_usage_impl(
     observed_ms: i64,
     catalog: &crate::model_catalog::CatalogSnapshot,
     enrich_partial: bool,
+    quote_override:Option<&CostEstimate>,
 ) -> Result<(), String> {
     let superseded: bool = tx
         .prepare_cached("SELECT EXISTS(SELECT 1 FROM monitor_aliases WHERE tool=?1 AND id=?2)")
@@ -1579,9 +1592,12 @@ fn save_usage_impl(
     let usage = &merged;
     let json = serde_json::to_string(usage).map_err(|e| e.to_string())?;
     if let Some((ref u, _)) = old {
-        if serde_json::to_string(u).map_err(|e| e.to_string())? == json {
+        if quote_override.is_none() && serde_json::to_string(u).map_err(|e| e.to_string())? == json {
             return clamp_output_observations(tx, usage);
         }
+    }
+    if usage.tool=="codex"&&usage.billing_scope.is_none(){
+        tx.prepare_cached("INSERT OR IGNORE INTO monitor_state VALUES('proxy_identity_pending','1')").map_err(|e|e.to_string())?.execute([]).map_err(|e|e.to_string())?;
     }
     let key = session_key(&usage.tool, &usage.session_id);
     let exists: bool = tx
@@ -1607,10 +1623,10 @@ fn save_usage_impl(
         )?;
     }
     let prior_output = old.as_ref().map_or(0, |(u, _)| u.output_tokens);
-    let api_cost = old
+    let api_cost = quote_override.cloned().or_else(||old
         .as_ref()
         .filter(|(known, _)| same_pricing_inputs(known, usage))
-        .map(|(_, cost)| cost.clone())
+        .map(|(_, cost)| cost.clone()))
         .unwrap_or_else(|| pricing::estimate_with_catalog(usage, catalog));
     let original_api=if old.as_ref().is_some_and(|(known,_)|same_pricing_inputs(known,usage)) {
         super::billing::original_api(tx,&usage.tool,&usage.id)?
@@ -1618,8 +1634,9 @@ fn save_usage_impl(
         tx.execute("DELETE FROM monitor_original_api_quotes WHERE tool=?1 AND id=?2",params![usage.tool,usage.id]).map_err(|e|e.to_string())?;
         None
     };
-    let api_cost=original_api.as_ref().map(|json|serde_json::from_str(json)).transpose().map_err(|e|e.to_string())?.unwrap_or(api_cost);
+    let api_cost=if let Some(quote)=quote_override{quote.clone()}else{original_api.as_ref().map(|json|serde_json::from_str(json)).transpose().map_err(|e|e.to_string())?.unwrap_or(api_cost)};
     let cost=super::billing::price(tx,usage,&api_cost,original_api.as_deref())?;
+    let current_rate = super::current_rate::sample(usage, old.as_ref().map(|(usage,_)|usage));
     if let Some((u, c)) = old {
         adjust(tx, &u, &c, -1)?;
     }
@@ -1627,9 +1644,8 @@ fn save_usage_impl(
         ON CONFLICT(tool,id) DO UPDATE SET session_key=excluded.session_key,timestamp_ms=excluded.timestamp_ms,usage=excluded.usage,cost=excluded.cost").map_err(|e|e.to_string())?
         .execute(params![usage.tool,usage.id,key,usage.timestamp_ms,json,serde_json::to_string(&cost).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
     adjust(tx, usage, &cost, 1)?;
-    if usage.tool == "codex" {
-        super::billing::invalidate_proxy_matches(tx)?;
-    }
+    super::upstream_accounts::bind_request(tx, usage)?;
+    if usage.tool == "codex" { super::billing::invalidate_proxy_matches(tx)?; }
     let delta = usage.output_tokens - prior_output;
     if delta < 0 {
         retract_output_observations(tx, &usage.tool, &usage.id, None, -delta)?;
@@ -1649,10 +1665,12 @@ fn save_usage_impl(
         && !usage.unknown_fields.iter().any(|f| f == "timestamp")
         && output_time >= live_after_ms
         && output_time <= observed_ms + 5_000
-        && output_time >= observed_ms - 60_000
+        // Claude may flush a completed block more than a minute after its stamped start.
+        && (usage.tool == "claude" || output_time >= observed_ms - 60_000)
     {
         tx.prepare_cached("INSERT INTO monitor_observations(tool,id,session_key,observed_ms,output_tokens) VALUES(?1,?2,?3,?4,?5)").map_err(|e| e.to_string())?
             .execute(params![usage.tool,usage.id,key,observed_ms,delta.max(0)]).map_err(|e| e.to_string())?;
+        super::current_rate::observe(tx,usage,&key,current_rate,output_time,observed_ms)?;
     }
     clamp_output_observations(tx, usage)
 }
@@ -1719,7 +1737,7 @@ pub(super) fn finish_totals(t: &mut Totals) {
     }
 }
 
-fn speed_sample(usage: &UsageRecord) -> Option<RequestSpeedSample> {
+pub(super) fn speed_sample(usage: &UsageRecord) -> Option<RequestSpeedSample> {
     let timing = usage.request_timing.as_ref()?;
     let duration = timing.duration_ms.filter(|duration| *duration > 0)?;
     if timing.basis.is_empty()
@@ -1747,7 +1765,7 @@ fn speed_sample(usage: &UsageRecord) -> Option<RequestSpeedSample> {
             .map(|duration| usage.output_tokens as f64 * 1_000. / duration as f64),
     })
 }
-fn add_speed(total: &mut WeightedRequestSpeed, sample: &RequestSpeedSample) {
+pub(super) fn add_speed(total: &mut WeightedRequestSpeed, sample: &RequestSpeedSample) {
     total.valid_samples += 1;
     total.output_tokens += sample.output_tokens;
     total.duration_ms += sample.duration_ms;
@@ -1757,10 +1775,11 @@ fn add_speed(total: &mut WeightedRequestSpeed, sample: &RequestSpeedSample) {
 fn request_summary(
     conn: &Connection,
     key: &str,
+    billing_scope: Option<&str>,
 ) -> Result<(Option<RecentRequest>, RequestSpeed), String> {
-    let mut query=conn.prepare_cached("SELECT usage FROM monitor_requests WHERE session_key=?1 ORDER BY timestamp_ms DESC,id DESC LIMIT 10").map_err(|error|error.to_string())?;
+    let mut query=conn.prepare_cached("SELECT usage FROM monitor_requests WHERE session_key=?1 AND (?2 IS NULL OR COALESCE(json_extract(usage,'$.billingScope'),'unknown')=?2) ORDER BY timestamp_ms DESC,id DESC LIMIT 10").map_err(|error|error.to_string())?;
     let rows = query
-        .query_map([key], |row| row.get::<_, String>(0))
+        .query_map(params![key,billing_scope], |row| row.get::<_, String>(0))
         .map_err(|error| error.to_string())?;
     let mut recent = None;
     let mut speed = RequestSpeed::default();
@@ -1819,7 +1838,7 @@ fn request_summary(
         _ => Some("mixed_request_timing_bases".into()),
     };
     if speed.latest.is_none() {
-        let json:Option<String>=conn.query_row("SELECT usage FROM monitor_requests WHERE session_key=?1 AND json_extract(usage,'$.requestTiming.durationMs')>0 AND COALESCE(json_extract(usage,'$.requestTiming.basis'),'')!='' AND NOT EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='output_tokens') ORDER BY timestamp_ms DESC,id DESC LIMIT 1",[key],|row|row.get(0)).optional().map_err(|error|error.to_string())?;
+        let json:Option<String>=conn.query_row("SELECT usage FROM monitor_requests WHERE session_key=?1 AND (?2 IS NULL OR COALESCE(json_extract(usage,'$.billingScope'),'unknown')=?2) AND json_extract(usage,'$.requestTiming.durationMs')>0 AND COALESCE(json_extract(usage,'$.requestTiming.basis'),'')!='' AND NOT EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='output_tokens') ORDER BY timestamp_ms DESC,id DESC LIMIT 1",params![key,billing_scope],|row|row.get(0)).optional().map_err(|error|error.to_string())?;
         if let Some(json) = json {
             speed.latest =
                 speed_sample(&serde_json::from_str(&json).map_err(|error| error.to_string())?);
@@ -1893,20 +1912,30 @@ fn completed_turn_summaries(
     Ok(summaries)
 }
 
+#[cfg(test)]
 pub fn enrich_session_outputs(
     conn: &Connection,
     outputs: &mut [&mut [SessionSummary]],
+) -> Result<(), String> {
+    enrich_session_outputs_scoped(conn,outputs,None)
+}
+
+pub fn enrich_session_outputs_scoped(
+    conn: &Connection,
+    outputs: &mut [&mut [SessionSummary]],
+    billing_scope: Option<&str>,
 ) -> Result<(), String> {
     let keys = outputs
         .iter()
         .flat_map(|rows| rows.iter().map(|row| row.key.clone()))
         .collect();
-    let completed = completed_turn_summaries(conn, &keys, None)?;
+    // Whole-turn duration cannot establish the speed of only its API/subscription portion.
+    let completed = if billing_scope.is_none() {completed_turn_summaries(conn, &keys, None)?} else {std::collections::BTreeMap::new()};
     let mut enriched = std::collections::BTreeMap::new();
     for sessions in outputs {
         for session in sessions.iter_mut() {
             if !enriched.contains_key(&session.key) {
-                enriched.insert(session.key.clone(), request_summary(conn, &session.key)?);
+                enriched.insert(session.key.clone(), request_summary(conn, &session.key,billing_scope)?);
             }
             let (recent, speed) = &enriched[&session.key];
             session.recent_request = recent.clone();
@@ -1915,6 +1944,39 @@ pub fn enrich_session_outputs(
         }
     }
     Ok(())
+}
+
+pub(super) fn sessions_scoped(conn:&Connection,tool:Option<&str>,now:i64,billing_scope:Option<&str>)->Result<Vec<SessionSummary>,String>{
+    let mut rows=sessions(conn,tool,now)?;
+    let Some(scope)=billing_scope else{return Ok(rows);};
+    let mut grouped=std::collections::HashMap::<String,(Totals,i64,Option<String>)>::new();
+    super::analysis::each_usage(conn,tool,None,&MonitorPeriod{billing_scope:Some(scope.into()),..Default::default()},|row|{
+        let group=grouped.entry(row.key).or_default();
+        merge_totals(&mut group.0,&row.totals);
+        if row.timestamp_ms>=group.1 {group.1=row.timestamp_ms;group.2=row.model;}
+    })?;
+    let mut rates=conn.prepare("SELECT r.session_key,SUM(o.output_tokens)/60.0 FROM monitor_observations o JOIN monitor_requests r ON r.tool=o.tool AND r.id=o.id WHERE o.observed_ms>?1 AND o.observed_ms<=?2 AND COALESCE(json_extract(r.usage,'$.billingScope'),'unknown')=?3 AND COALESCE(json_extract(r.usage,'$.usageBasis'),'')!='legacy_initial_cumulative' GROUP BY r.session_key").map_err(|e|e.to_string())?;
+    let live=rates.query_map(params![now-60000,now,scope],|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?))).map_err(|e|e.to_string())?
+        .collect::<Result<std::collections::HashMap<_,_>,_>>().map_err(|e|e.to_string())?;
+    let mut scoped = Vec::new();
+    for mut row in rows.drain(..) {
+        let has_activity = matches!(row.meta.status.as_str(), "active" | "running" | "stale");
+        let current_scope = has_activity && super::billing::session_kind(conn, &row)?.as_deref() == Some(scope);
+        let history = grouped.remove(&row.key);
+        if history.is_none() && !current_scope {continue;}
+        let (mut totals, stamp, model) = history.unwrap_or_default();
+        finish_totals(&mut totals);
+        totals.output_tokens_per_second=live.get(&row.key).copied().unwrap_or(0.);
+        if !current_scope {
+            if has_activity || row.meta.status=="recent" {row.meta.status="unknown".into();}
+            row.meta.updated_at_ms=stamp;
+            row.meta.model=model;
+        }
+        if row.meta.status=="unknown" && totals.output_tokens_per_second>0. {row.meta.status="recent".into();}
+        row.totals=totals;
+        scoped.push(row);
+    }
+    Ok(scoped)
 }
 
 pub fn sessions(
@@ -2138,14 +2200,14 @@ pub fn session_detail_with_descendants(
         }
         index += 1;
     }
-    enrich_session_outputs(conn, &mut [std::slice::from_mut(&mut session)])?;
+    enrich_session_outputs_scoped(conn, &mut [std::slice::from_mut(&mut session)],period.billing_scope.as_deref())?;
     members[0] = session.clone();
     let scope_keys: Vec<_> = if include_descendants {
         members.iter().map(|member| member.key.clone()).collect()
     } else {
         vec![key.to_owned()]
     };
-    let selected_completed_turn = if let Some(turn_id) = period.turn_id.as_deref() {
+    let selected_completed_turn = if period.billing_scope.is_some() { None } else if let Some(turn_id) = period.turn_id.as_deref() {
         completed_turn_summaries(
             conn,
             &std::collections::BTreeSet::from([key.to_owned()]),
@@ -2197,7 +2259,9 @@ pub fn session_detail_with_descendants(
     let mut filtered_totals = Totals::default();
     let mut request_count = 0;
     let mut unlinked_child_requests = 0;
+    let mut scoped_member_totals=std::collections::HashMap::<String,Totals>::new();
     super::analysis::each_usage_in_sessions(conn, &scope_keys, period, |row| {
+        if period.billing_scope.is_some() {merge_totals(scoped_member_totals.entry(row.key.clone()).or_default(),&row.totals);}
         merge_totals(&mut filtered_totals, &row.totals);
         let display_turn = if row.key == key {
             Some(row.turn_id.clone())
@@ -2276,7 +2340,7 @@ pub fn session_detail_with_descendants(
                 turn.updated_at_ms = turn.updated_at_ms.max(end);
             }
             turn.timing = Some(timing);
-        } else if period.model.is_none() {
+        } else if period.model.is_none() && period.billing_scope.is_none() {
             if let Some(time) = timing
                 .completed_at_ms
                 .or(timing.started_at_ms)
@@ -2299,6 +2363,14 @@ pub fn session_detail_with_descendants(
         finish_totals(&mut turn.totals);
     }
     turns.sort_by_key(|turn| std::cmp::Reverse(turn.updated_at_ms));
+    if period.billing_scope.is_some() {
+        for member in &mut members {
+            member.totals=scoped_member_totals.remove(&member.key).unwrap_or_default();
+            finish_totals(&mut member.totals);
+        }
+        session.totals=members[0].totals.clone();
+        session.meta.model=session.recent_request.as_ref().and_then(|request|request.model.clone());
+    }
     Ok(SessionDetail {
         request_count,
         session,
@@ -5700,6 +5772,7 @@ mod completed_turn_tests {
             model: Some("model-b".into()),
             turn_id: Some("older".into()),
             pricing_reason: None,
+            billing_scope: None,
         };
         let detail = session_detail(&conn, "codex:one", 0, 1, 20_000, false, &period).unwrap();
         assert_eq!(detail.requests.len(), 1);

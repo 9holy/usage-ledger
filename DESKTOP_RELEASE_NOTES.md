@@ -1,32 +1,8 @@
 # Usage Ledger Desktop Release Notes
 
-## 0.2.39 — Data channel completion / 接口、日志与账目补充核验
+Current source version: **0.2.51**. See the [version guide](docs/release/0.2.51.md), [English README](README.md), and [Chinese README](README.zh-CN.md). Verified packages and their build evidence are available on [GitHub Releases](https://github.com/9holy/usage-ledger/releases).
 
-Current version: **0.2.39**. See the [bilingual release notes](docs/release/0.2.39.md) and [completion audit](docs/data-channel-completion-2026-11-07.md).
-
-This patch completes the follow-up producer and consumer review: platform quota formats, exact official windows and extra pools, connection-safe reads, validated purchase profiles, account-safe retained history, and finance snapshot/batch integrity. It retains the existing local costing formulas. Windows x64 and native Mac arm64/x64 packages publish only after every required build and verification succeeds; exact provenance is recorded in `BUILD-INFO.json`.
-
-当前版本为 **0.2.39**。本轮补齐各平台实际生产字段、官方精确窗口/额外额度池、连接切换、采购档案、同邮箱历史及财务读取校验；保留原有成本公式。完整矩阵与修复前后证据见[补充核验报告](docs/data-channel-completion-2026-11-07.md)。主工作流通过全部必要检查后发布三平台安装包，手动覆盖升级并保留原数据。
-
-The sections below are historical release records. Their test counts and scope describe those versions.
-
-以下章节为历史版本记录，其中测试数量和核验范围属于当时版本。
-
-## 0.2.38 — Source data contracts / 来源数据通道核验
-
-Current version: **0.2.38**. See the [bilingual release notes](docs/release/0.2.38.md), [source audit](docs/data-channel-audit-2026-11-07.md), [English README](README.md), and [Chinese README](README.zh-CN.md).
-
-This patch verifies the Sub2API, CLIProxyAPI/CPA, Cockpit and usage-monitor input contracts against pinned upstream sources. It fixes omitted historical usage, quota semantics and failure states, source identity isolation, and invalid numeric results. Existing local costing formulas and default-instance financial facts are retained. The prior [v0.2.37 notes](docs/release/0.2.37.md) remain available.
-
-The main workflow publishes Windows x64 and separate Mac Apple Silicon/Intel installers after all required checks, native tests, packaging, and startup verification pass. Actual evidence is in `BUILD-INFO.json` and its Actions run. Upgrade manually while retaining application data; this release provides no automatic-update feed. Signing and GUI/real-account validation limits remain documented in the release notes.
-
-当前版本为 **0.2.38**。本轮根据固定上游源码核对三端成本与用量监控的数据通道，修复历史用量遗漏、额度语义与错误状态、跨实例账目隔离及无效数值，保留自有成本公式与默认实例已有账目。完整字段和端点矩阵见[源码核验报告](docs/data-channel-audit-2026-11-07.md)。
-
-主工作流通过全部必要验证后发布 Windows x64、M 芯片和 Intel Mac 安装包；实际源码、摘要和构建证据见 `BUILD-INFO.json`。手动覆盖升级并保留数据。来源源码核对和合成回归不代表已对用户真实账号或提供方账单逐笔验收。
-
-The notes below preserve the v0.2.22 historical record and do not describe this release's update channel or verification results.
-
-下文保留 0.2.22 历史技术记录，不代表本版更新通道或验证结果。
+当前源码版本为 **0.2.51**。新功能、升级兼容与平台限制见本版中英文说明；安装包及其构建证据以 GitHub Releases 为准。
 
 ## Historical Technical Notes: v0.2.22 / 历史技术记录
 

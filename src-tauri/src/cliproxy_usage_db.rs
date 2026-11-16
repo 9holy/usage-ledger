@@ -109,15 +109,16 @@ pub fn read_usage_events(
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|error| error.to_string())?;
         let mut response_tier_column = "NULL AS response_service_tier";
-        let mut id_column = "";
-        let mut id_order = "";
+        let mut optional=Vec::new();
         for name in names {
-            match name.map_err(|error| error.to_string())?.as_str() {
-                "response_service_tier" => response_tier_column = "response_service_tier",
-                "id" => { id_column = ", id"; id_order = ", id DESC"; }
-                _ => {}
+            let name=name.map_err(|error| error.to_string())?;
+            if name == "response_service_tier" {
+                response_tier_column = "response_service_tier";
             }
+            if matches!(name.as_str(),"id"|"request_id"|"response_id"|"session_id"|"official_account_id") {optional.push(name);}
         }
+        let extra=if optional.is_empty(){String::new()}else{format!(", {}",optional.join(", "))};
+        let id_order = if optional.iter().any(|name| name == "id") { ", id DESC" } else { "" };
         let sql = format!(
             "SELECT requested_at, provider, executor_type, model, alias, auth_index, auth_type, \
              source, reasoning_effort, service_tier, {response_tier_column}, latency_ms, ttft_ms, failed, status_code, \
@@ -125,7 +126,7 @@ pub fn read_usage_events(
              cache_creation_tokens, total_tokens, primary_used_percent, primary_reset_at, \
              primary_used_tokens, primary_remaining_tokens, primary_limit_tokens, \
              secondary_used_percent, secondary_reset_at, secondary_used_tokens, \
-             secondary_remaining_tokens, secondary_limit_tokens{id_column} \
+             secondary_remaining_tokens, secondary_limit_tokens{extra} \
              FROM usage_events WHERE requested_at >= ?1 AND requested_at < ?2 ORDER BY requested_at DESC{id_order}"
         );
         let end = end_ms.unwrap_or_else(crate::ledger_db::now_ms);
@@ -279,6 +280,11 @@ mod tests {
             fixture.read(false, 1000, 2000)[0]["response_service_tier"],
             "default"
         );
+        conn.execute_batch("ALTER TABLE usage_events ADD COLUMN session_id; ALTER TABLE usage_events ADD COLUMN response_id;
+          UPDATE usage_events SET session_id='shared-session',response_id='provider-response'").unwrap();
+        let correlated=fixture.read(false,1000,2000);
+        assert_eq!(correlated[0]["session_id"],"shared-session");
+        assert_eq!(correlated[0]["response_id"],"provider-response");
         assert_eq!(
             conn.query_row("SELECT api_key FROM usage_events LIMIT 1", [], |row| row
                 .get::<_, String>(

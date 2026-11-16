@@ -19,7 +19,7 @@
           <button v-if="!showEditor" ref="createButton" type="button" class="btn btn-primary new-connection" @click="openEditor()"><Plus :size="18" />{{ t('desktop.connect.newConnection') }}</button>
         </div>
         <p v-if="connectionStore.error && !showEditor" class="connection-error" role="alert"><CircleAlert :size="16" />{{ connectionStore.error }}</p>
-        <div v-if="connectionStore.connections.length" class="saved-connections">
+        <div class="saved-connections">
           <article v-for="conn in connectionStore.connections" :key="conn.id" class="saved-connection" :style="{ '--source-rgb': conn.type === 'sub2api' ? '111,205,232' : '199,223,116' }" :class="{ 'is-connected': conn.id === connectionStore.activeId && connectionStore.connected }">
             <div class="source-identity">
               <span class="source-icon-frame"><img class="source-logo" :src="conn.type === 'sub2api' ? '/source-icons/sub2api.svg' : '/source-icons/cliproxyapi.jpg'" alt="" /></span>
@@ -43,20 +43,18 @@
               <button type="button" @click="pendingRemove = null">{{ t('desktop.connect.cancel') }}</button>
             </div>
           </article>
+          <article class="saved-connection cockpit-source" style="--source-rgb:167,192,237">
+            <div class="source-identity">
+              <span class="source-icon-frame"><img class="source-logo" :src="'/source-icons/cockpit.png'" alt="" /></span>
+              <div class="connection-copy">
+                <strong>Cockpit</strong>
+                <div class="connection-meta"><span>{{ t('desktop.connect.localDevice') }}</span><span class="cockpit-status" :class="cockpitState === null ? 'status-neutral' : cockpitState.available ? 'status-available' : 'status-warning'">{{ cockpitState === null ? t('desktop.connect.detecting') : cockpitState.available ? t('desktop.connect.available') : t('desktop.connect.notInstalled') }}</span></div>
+                <small v-if="cockpitState && !cockpitState.available">{{ cockpitState.reason }}</small>
+              </div>
+            </div>
+            <div class="connection-actions"><button type="button" class="connection-main btn btn-secondary" :disabled="connectionStore.connecting" @click="enterCockpitCostCenter"><LogIn :size="17" />{{ t('desktop.connect.enter') }}</button></div>
+          </article>
         </div>
-        <p v-else class="connection-empty">{{ t('desktop.connect.noConnections') }}</p>
-        <div class="pane-heading local-heading">
-          <h2>{{ t('desktop.connect.localData') }}</h2>
-        </div>
-        <article class="local-source">
-          <span class="source-icon-frame"><img class="source-logo" src="/source-icons/cockpit.png" alt="" /></span>
-          <div class="connection-copy">
-            <strong>Cockpit <small>{{ t('desktop.connect.localDevice') }}</small></strong>
-            <span class="cockpit-status" :class="cockpitState === null ? 'status-neutral' : cockpitState.available ? 'status-available' : 'status-warning'">{{ cockpitState === null ? t('desktop.connect.detecting') : cockpitState.available ? t('desktop.connect.available') : t('desktop.connect.notInstalled') }}</span>
-            <small v-if="cockpitState && !cockpitState.available">{{ cockpitState.reason }}</small>
-          </div>
-          <button type="button" class="local-connection btn btn-secondary" :disabled="connectionStore.connecting" @click="enterCockpitCostCenter"><LogIn :size="17" />{{ t('desktop.connect.enter') }}</button>
-        </article>
       </aside>
       <section v-show="showEditor" class="connection-form-pane" :aria-label="t('desktop.connect.editorLabel')">
         <div class="form-heading">
@@ -213,7 +211,7 @@ const isDesktop = isDesktopRuntime()
 // 注意 running 与 available 同义(只判本地文件可读,不判进程存活),UI 不得据此声称「运行中」。
 const cockpitState = ref<CockpitConnectionState | null>(null)
 onMounted(async () => {
-  void appStore.fetchPublicSettings()
+  if (connectionStore.active?.type === 'sub2api') void appStore.fetchPublicSettings()
   cockpitState.value = await getCockpitConnectionState()
 })
 
@@ -411,20 +409,18 @@ function handleRemove(id: string) {
 .source-identity{display:flex;align-items:center;gap:16px}.source-icon-frame{display:grid;place-items:center;width:60px;height:60px;border:1px solid #6f8d7055;border-radius:14px;background:linear-gradient(140deg,#6d8a6f26,#122019);box-shadow:inset 0 1px #e0ffdd28,0 7px 14px #0004;flex-shrink:0}.source-logo{width:40px;height:40px;object-fit:contain;border-radius:8px;flex-shrink:0}.connection-copy{min-width:0;flex:1;overflow-wrap:anywhere}.connection-copy strong{display:block;font-size:21px;font-weight:600;color:var(--cost-text)}.connection-copy>small{display:block;margin-top:8px;color:var(--cost-muted);font-size:12px}
 .connection-meta{display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin-top:9px;font-size:12px}.connection-meta>span{color:var(--cost-blue)}.connection-meta b{display:flex;align-items:center;gap:6px;font-weight:400;color:#a5afa7}.connection-meta b.is-live{color:var(--cost-lime)}.connection-meta i{width:6px;height:6px;border-radius:50%;background:currentColor}
 .connection-address-label{display:block;margin-top:26px;color:#829985;font-size:10px;letter-spacing:.05em}.connection-address{font-size:13px;color:#adbdaf;overflow-wrap:anywhere;margin:7px 0 22px;line-height:1.6;font-variant-numeric:tabular-nums}.connection-actions{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--cost-line);padding-top:14px;gap:12px}
-.connection-main,.local-connection{display:inline-flex;min-height:42px;border-radius:8px;align-items:center;justify-content:center;gap:9px;padding:0 16px;white-space:nowrap}.connection-main>svg,.local-connection>svg{color:var(--cost-lime);flex-shrink:0}.remove-connection{border-color:transparent;background:none}.remove-connection:hover:not(:disabled){color:#efb6a7}
+.connection-main{display:inline-flex;min-height:42px;border-radius:8px;align-items:center;justify-content:center;gap:9px;padding:0 16px;white-space:nowrap}.connection-main>svg{color:var(--cost-lime);flex-shrink:0}.remove-connection{border-color:transparent;background:none}.remove-connection:hover:not(:disabled){color:#efb6a7}
 .remove-confirm{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--cost-line);color:#efb6a7;font-size:12px}.remove-confirm button{padding:5px 12px;border:1px solid var(--cost-line-strong);border-radius:4px}.remove-confirm button:first-of-type{border-color:#925c50}
-.connection-empty{font-size:14px;color:var(--cost-muted);padding:25px 0}
-.local-heading{margin-top:38px}.local-heading h2{font-size:20px}
-.local-source{display:flex;align-items:center;gap:18px;border:1px solid #415442;background:radial-gradient(ellipse at 0% 30%,#30634825,transparent 60%),linear-gradient(145deg,#19291e,#111c15);border-radius:14px;padding:26px;box-shadow:inset 0 1px #c5e2c315,0 14px 28px #0002}.local-source strong small{display:inline-block;margin-left:9px;font-size:11px;font-weight:400;color:#a5afa7}.cockpit-status{display:block;margin-top:10px;font-size:12px}.status-neutral{color:var(--cost-muted)}.status-available{color:var(--cost-lime)}.status-warning{color:var(--cost-gold)}
+.cockpit-source{display:flex;flex-direction:column;gap:24px}.cockpit-source .connection-actions{margin-top:auto;justify-content:flex-end}.connection-meta .status-neutral{color:var(--cost-muted)}.connection-meta .status-available{color:var(--cost-lime)}.connection-meta .status-warning{color:var(--cost-gold)}
 .connection-form-pane{border:1px solid #415442;border-radius:14px;padding:28px;background:linear-gradient(145deg,#1a281e,#111c15);box-shadow:inset 0 1px #c5e2c315,0 14px 28px #0002;align-self:start}.form-heading{margin-bottom:26px}.reconnect-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}.reconnect-heading .console-icon-button{border-color:transparent;background:none}
 .connection-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px 16px}.form-field{min-width:0}.full-width{grid-column:1/-1}.connection-segment{display:flex;min-height:42px;border:1px solid var(--cost-line-strong);border-radius:4px;overflow:hidden}.connection-segment button{display:flex;gap:6px;align-items:center;justify-content:center;flex:1;min-width:0;padding:8px;font-size:12px;color:#a5afa7;background:var(--cost-bg)}.connection-segment svg{flex-shrink:0}.connection-segment button+button{border-left:1px solid var(--cost-line-strong)}.connection-segment button[aria-pressed='true']{color:var(--cost-blue);background:#19252a;box-shadow:inset 0 0 0 1px var(--cost-blue)}.connection-segment button:hover{background:var(--cost-panel-2)}
 .secret-input{position:relative}.secret-input .input{padding-right:44px}.secret-input>button{position:absolute;right:3px;top:3px;display:grid;place-items:center;width:34px;height:34px;color:#a5afa7;border-radius:3px}.secret-input>button:hover{color:var(--cost-text);background:var(--cost-panel-2)}
 .remember-password{display:flex;gap:9px;align-items:flex-start;color:#b6bfb7;font-size:12px}.remember-password input{margin-top:3px;width:15px;height:15px}.remember-password small{display:block;color:var(--cost-muted);font-size:11px;margin-top:4px;line-height:1.6}
 .cost-service{border-top:1px solid var(--cost-line);padding-top:15px}.cost-service summary{cursor:pointer;font-size:13px;color:#a5afa7;padding-bottom:6px}.cost-service[open] summary{margin-bottom:12px}.cost-warning{color:var(--cost-gold)!important}
 .connection-error{display:flex;gap:9px;align-items:flex-start;background:#30201c;border:1px solid #72483d;color:#efb6a7;padding:12px;margin-bottom:20px;font-size:12px;overflow-wrap:anywhere}.connection-error svg{flex-shrink:0}.two-factor-form{margin-top:24px;padding-top:20px;border-top:1px solid var(--cost-gold)}.two-factor-form>div{display:flex;gap:10px}.two-factor-form .input{flex:1;min-width:0}.two-factor-form .btn{flex:0 0 90px}
-@media(max-width:1100px){.connect-columns.is-editing{grid-template-columns:minmax(0,.9fr) minmax(380px,1fr);gap:24px}.connection-form-pane{padding:24px}.is-editing .local-source{flex-wrap:wrap}.is-editing .local-connection{margin-left:auto}}
-@media(max-width:800px){.connect-columns,.connect-columns.is-editing{grid-template-columns:1fr;padding:28px 20px;gap:28px}.connection-form-pane{padding:24px}.saved-connections{grid-template-columns:1fr}.local-source{flex-wrap:wrap}.local-connection{margin-left:auto}}
-@media(max-width:460px){.connection-form{grid-template-columns:1fr}.form-field{grid-column:1/-1}.saved-connection,.local-source{padding:18px}.pane-heading h2,.form-heading h2{font-size:20px}.new-connection{padding:0 12px}}
+@media(max-width:1100px){.connect-columns.is-editing{grid-template-columns:minmax(0,.9fr) minmax(380px,1fr);gap:24px}.connection-form-pane{padding:24px}}
+@media(max-width:800px){.connect-columns,.connect-columns.is-editing{grid-template-columns:1fr;padding:28px 20px;gap:28px}.connection-form-pane{padding:24px}.saved-connections{grid-template-columns:1fr}}
+@media(max-width:460px){.connection-form{grid-template-columns:1fr}.form-field{grid-column:1/-1}.saved-connection{padding:18px}.pane-heading h2,.form-heading h2{font-size:20px}.new-connection{padding:0 12px}}
 
 .connect-intro{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:30px;margin-bottom:10px;padding-bottom:30px;border-bottom:1px solid #3a503c70}
 .connect-intro>div>span{font-size:11px;color:#b3cd91}.connect-intro h1{font-size:32px;font-weight:650;line-height:1.35;color:#e4f1e5;margin:10px 0}.connect-intro p{font-size:13px;color:#9bb19f;margin:0;line-height:1.7}

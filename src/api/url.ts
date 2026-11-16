@@ -11,12 +11,13 @@
  */
 
 import type { ConnectionConfig } from '@/stores/connection'
+import { version } from '../../package.json'
 import { shallowRef } from 'vue'
 
 const DEFAULT_API_BASE_URL = '/api/v1'
 
-/** 本地反代端口,与 src-tauri/src/proxy.rs PROXY_PORT 对称。改动需两端同步。 */
-export const PROXY_PORT = 18765
+/** Stable and isolated preview applications must not share a proxy listener. */
+export const PROXY_PORT = version.includes('-preview.') ? 18766 : 18765
 /** 桌面端本地反代 baseURL(无前缀,path 由请求自带,target 由 header 传)。 */
 const DESKTOP_PROXY_BASE = `http://127.0.0.1:${PROXY_PORT}`
 /** cliproxy 本地默认地址(sidecar 常驻端口 8317);baseUrl 留空时兜底。 */
@@ -79,6 +80,10 @@ export function getActiveConnection(): ConnectionConfig | null {
 
 export function isDesktopRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in (window as any)
+}
+
+export function hasSub2apiBackend(): boolean {
+  return !isDesktopRuntime() || activeConnectionState.value?.type === 'sub2api'
 }
 
 function normalizePath(path: string): string {

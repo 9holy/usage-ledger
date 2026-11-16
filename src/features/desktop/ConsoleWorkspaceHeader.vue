@@ -2,15 +2,17 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { Activity, ChartNoAxesCombined } from '@lucide/vue'
+import { Activity, ChartNoAxesCombined, Wallet } from '@lucide/vue'
 import { DESKTOP_LOGO } from '@/utils/branding'
 import LocaleSwitcher from '@/components/common/LocaleSwitcher.vue'
 
 const route = useRoute()
 const { t } = useI18n()
+const emit = defineEmits<{ costs: [] }>()
 const costActive = computed(
   () =>
     route.path === '/connect' ||
+    route.path === '/local-cost' ||
     route.path.startsWith('/admin/cost-center') ||
     route.path.startsWith('/cockpit/cost-center')
 )
@@ -46,7 +48,10 @@ const monitorActive = computed(() => route.path.startsWith('/usage-monitor'))
         <span class="workspace-label"><strong>{{ t('desktop.workspace.monitor') }}</strong><small>{{ t('desktop.workspace.monitorNote') }}</small></span>
       </router-link>
     </nav>
-    <div class="workspace-locale" :aria-label="t('desktop.workspace.language')"><LocaleSwitcher /></div>
+    <div class="workspace-utilities" :class="{'has-costs':monitorActive}">
+      <button v-if="monitorActive" type="button" class="workspace-cost-action" @click="emit('costs')"><Wallet :size="17" />{{ t('usageMonitor.costIntegration.openCosts') }}</button>
+      <div class="workspace-locale" :aria-label="t('desktop.workspace.language')"><LocaleSwitcher /></div>
+    </div>
   </header>
 </template>
 
@@ -73,7 +78,11 @@ const monitorActive = computed(() => route.path.startsWith('/usage-monitor'))
   color: var(--cost-text, #e9ede6);
   text-decoration: none;
 }
-.workspace-locale { justify-self: end; }
+.workspace-utilities { justify-self:end; display:flex; align-items:center; gap:16px; min-width:0; }
+.workspace-cost-action { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:36px; padding:7px 13px; border:1px solid var(--cost-lime); border-radius:4px; background:var(--cost-lime); color:var(--cost-bg); font-size:13px; font-weight:600; white-space:nowrap; }
+.workspace-cost-action>svg { flex-shrink:0; }
+.workspace-cost-action:hover { filter:brightness(1.06); }
+.workspace-cost-action:focus-visible { outline:2px solid var(--cost-blue); outline-offset:3px; }
 .workspace-mark {
   display: grid;
   place-items: center;
@@ -212,9 +221,10 @@ const monitorActive = computed(() => route.path.startsWith('/usage-monitor'))
   .workspace-header { grid-template-columns: minmax(0, 1fr) auto; }
   .workspace-switch { width: 100%; grid-column: 1 / -1; grid-row: 2; }
   .workspace-brand { grid-column: 1; grid-row: 1; }
-  .workspace-locale { grid-column: 2; grid-row: 1; }
+  .workspace-utilities { grid-column: 2; grid-row: 1; }
 }
 @media (max-width: 720px) {
+  .workspace-utilities.has-costs { grid-column:1/-1; grid-row:3; justify-self:stretch; justify-content:flex-end; }
   .workspace-header {
     padding: 16px 20px;
     gap: 15px;

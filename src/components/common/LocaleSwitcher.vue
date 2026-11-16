@@ -76,9 +76,9 @@ async function selectLocale(code: string) {
     return
   }
   switching.value = true
+  isOpen.value = false
   try {
     await setLocale(code)
-    isOpen.value = false
   } finally {
     switching.value = false
     await nextTick()

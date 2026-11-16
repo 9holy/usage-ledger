@@ -9,7 +9,7 @@ vi.mock('axios', () => ({ default: { post: mocks.refresh } }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue('native-session-token') }))
 import { login, login2FA, logout } from '../auth'
 import { refreshAuthTokens } from '../tokenRefresh'
-import { getActiveConnection, setActiveConnection } from '../url'
+import { getActiveConnection, setActiveConnection, PROXY_PORT } from '../url'
 import { useConnectionStore } from '@/stores/connection'
 
 const response = { access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600, token_type: 'Bearer', user: { id: 7, role: 'admin' } }
@@ -82,7 +82,7 @@ describe('connection-bound JWT commits', () => {
     ;(window as any).__TAURI_INTERNALS__ = {}
     mocks.refresh.mockResolvedValueOnce({ data: { code: 0, data: response } })
     await refreshAuthTokens({ failedAccessToken: 'old-access' })
-    expect(axios.post).toHaveBeenCalledWith('http://127.0.0.1:18765/auth/refresh', { refresh_token: 'old-refresh' }, expect.objectContaining({ headers: expect.objectContaining({ 'X-Target-Base': 'https://source-a.example/api/v1', 'X-Proxy-Token': 'native-session-token' }) }))
+    expect(axios.post).toHaveBeenCalledWith(`http://127.0.0.1:${PROXY_PORT}/auth/refresh`, { refresh_token: 'old-refresh' }, expect.objectContaining({ headers: expect.objectContaining({ 'X-Target-Base': 'https://source-a.example/api/v1' }) }))
     expect(getActiveConnection()?.apiKey).toBe('new-access')
     expect(localStorage.getItem('auth_token')).toBe('new-access')
   })

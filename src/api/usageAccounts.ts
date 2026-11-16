@@ -9,7 +9,7 @@ export interface AccountSubscription {
   endMs: number | null
   renewalAtMs?: number | null
   checkedAtMs: number | null
-  source: 'local_auth' | 'official' | 'none'
+  source: 'local_auth' | 'official' | 'sub2api' | 'cliproxy' | 'none'
   error: string | null
 }
 
@@ -21,6 +21,7 @@ export function accountSubscriptionUnavailable(subscription: AccountSubscription
 
 export interface AccountUsagePeriod {
   billingTotals?: Record<string, MonitorTotals>
+  sourceCoverageIncomplete?: boolean
   startMs: number
   endMs: number
   observedEndMs: number
@@ -52,6 +53,9 @@ export interface AccountUsage extends AccountUsagePeriods {
   accountKey: string
   accountLabel: string
   tool: 'codex' | 'claude' | 'antigravity'
+  billingKind?: 'subscription' | 'api'
+  calendarMonth?: AccountUsagePeriod | null
+  clientTools?: string[]
   attribution: 'session_creator' | 'request_evidence_with_creator_reference'
   /** Unique cross-match within collected request logs, not official billing confirmation. */
   billingAccountVerified?: boolean
@@ -72,6 +76,12 @@ export interface AccountUsageReport {
   unassignedByTool?: Record<string, MonitorTotals>
   unlocatedTotals?: MonitorTotals
   unlocatedByTool?: Record<string, MonitorTotals>
+  apiUsage?: ApiUsage | null
+}
+
+export interface ApiUsage {
+  week: AccountUsagePeriod
+  month: AccountUsagePeriod | null
 }
 
 function desktop(): void {
@@ -80,6 +90,13 @@ function desktop(): void {
 
 export function getUsageMonitorAccounts(weekStartMs: number, nowMs: number): Promise<AccountUsageReport> {
   desktop()
-  return invoke('usage_monitor_accounts', { weekStartMs, nowMs })
+  const now = new Date(nowMs)
+  const monthStartMs = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+  return invoke('usage_monitor_accounts', { weekStartMs, nowMs, monthStartMs })
+}
+
+export function setUsageAccountName(accountKey: string, name: string): Promise<void> {
+  desktop()
+  return invoke('usage_monitor_set_account_name', { accountKey, name })
 }
 

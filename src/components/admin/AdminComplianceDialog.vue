@@ -168,7 +168,7 @@ async function submit(): Promise<void> {
 
   try {
     const status = await complianceStore.accept(typedPhrase.value.trim())
-    if (!status.required) {
+    if (status && !status.required) {
       appStore.showSuccess(t('adminCompliance.accepted'))
       typedPhrase.value = ''
       attemptedSubmit.value = false

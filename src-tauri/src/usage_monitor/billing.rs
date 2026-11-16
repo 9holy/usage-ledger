@@ -30,7 +30,34 @@ pub(super) fn key(usage: &UsageRecord) -> &str {
     }
 }
 
+pub(super) fn session_kind(conn: &Connection, session: &super::types::SessionSummary) -> Result<Option<String>, String> {
+    if session.meta.tool == "deepseek-harness" {
+        return Ok(Some("api".into()));
+    }
+    // Only the newest file context can describe the current request after an auth switch.
+    let current: Option<(String, Option<String>, Option<String>)> = conn.prepare_cached(
+        "SELECT path,json_extract(state,'$.turn_id'),json_extract(state,'$.claude_request_ref')
+         FROM monitor_files WHERE tool=?1 AND json_extract(state,'$.session.id')=?2
+         ORDER BY json_extract(state,'$.session.updatedAtMs') DESC,path LIMIT 1"
+    ).map_err(|e|e.to_string())?.query_row(params![session.meta.tool,session.meta.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
+        .optional().map_err(|e|e.to_string())?;
+    let Some((path,turn,reference)) = current else {return Ok(None);};
+    match session.meta.tool.as_str() {
+        "codex" => conn.prepare_cached("SELECT kind FROM monitor_turn_billing WHERE session_key=?1 AND turn_id=?2 AND turn_id<>'' AND kind<>'unknown'")
+            .map_err(|e|e.to_string())?.query_row(params![session.key,turn],|r|r.get(0)).optional().map_err(|e|e.to_string()),
+        "claude" => conn.prepare_cached("SELECT kind FROM monitor_claude_request_identity WHERE source=?1 AND reference=?2 AND NOT conflicted")
+            .map_err(|e|e.to_string())?.query_row(params![path,reference],|r|r.get(0)).optional().map_err(|e|e.to_string()),
+        _ => Ok(None),
+    }
+}
+
 pub(super) fn classify(conn: &Connection, usage: &UsageRecord) -> Result<Option<String>, String> {
+    if usage.usage_basis=="upstream_receipt" || usage.tool=="api"{return Ok(Some("api".into()));}
+    match super::request_identity::kind(conn,&usage.tool,&usage.id)?{
+        super::request_identity::KindMatch::Missing=>{},
+        super::request_identity::KindMatch::Known(kind)=>return Ok(Some(kind)),
+        super::request_identity::KindMatch::Conflict=>return Ok(None),
+    }
     if usage.tool != "codex" {
         return Ok(usage.billing_scope.clone());
     }
@@ -48,9 +75,9 @@ pub(super) fn classify(conn: &Connection, usage: &UsageRecord) -> Result<Option<
     if api {
         return Ok(Some("api".into()));
     }
-    let typed: Option<(String, i64)> = conn
+    let typed: Option<String> = conn
         .prepare_cached(
-            "SELECT kind,observed_ms FROM monitor_turn_billing WHERE session_key=?1 AND turn_id=?2",
+            "SELECT kind FROM monitor_turn_billing WHERE session_key=?1 AND turn_id=?2",
         )
         .map_err(|e| e.to_string())?
         .query_row(
@@ -58,28 +85,24 @@ pub(super) fn classify(conn: &Connection, usage: &UsageRecord) -> Result<Option<
                 store::session_key("codex", &usage.session_id),
                 usage.turn_id
             ],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    if let Some((kind, observed)) = typed {
+    if let Some(kind) = typed {
         if kind == "unknown" {
             return Ok(None);
         }
-        if usage.timestamp_ms >= observed
-            && !usage.unknown_fields.iter().any(|s| s == "timestamp")
-            && usage
-                .request_timing
-                .as_ref()
-                .and_then(|t| t.started_at_ms)
-                .is_none_or(|start| start >= observed)
-        {
+        // Feedback tags may arrive after the response; the exact turn identity binds them.
+        if !usage.turn_id.is_empty() && usage.usage_basis != "legacy_initial_cumulative" {
             return Ok(Some(kind));
         }
     }
-    // A quota period observed in the same client home does not identify the
-    // credentials used by this historical request. Keep its billing mode unknown.
-    Ok(None)
+    let accounts:i64=conn.prepare_cached("SELECT COUNT(DISTINCT a.account_key) FROM monitor_request_quota_evidence e
+        JOIN monitor_codex_quota_accounts a ON a.home=e.home AND a.reset_ms=e.reset_ms AND a.plan=e.plan
+        WHERE e.id=?1 AND ?2>=e.reset_ms-604800000 AND ?2<e.reset_ms")
+        .map_err(|e|e.to_string())?.query_row(params![usage.id,usage.timestamp_ms],|r|r.get(0)).map_err(|e|e.to_string())?;
+    Ok((accounts == 1).then(|| "subscription".into()))
 }
 
 pub(super) fn original_api(
@@ -100,22 +123,53 @@ pub(super) fn price(
     api: &CostEstimate,
     api_json: Option<&str>,
 ) -> Result<CostEstimate, String> {
-    if usage.billing_scope.as_deref() != Some("subscription") {
-        return Ok(api.clone());
-    }
     let adjusted = pricing::subscription_quote(usage, api);
-    if adjusted.usd != api.usd
+    let changed = adjusted.usd != api.usd
         || adjusted.cny != api.cny
         || adjusted
             .scenarios
             .iter()
             .zip(&api.scenarios)
-            .any(|(a, b)| a.amount != b.amount)
-    {
-        conn.execute("INSERT INTO monitor_original_api_quotes VALUES(?1,?2,?3) ON CONFLICT(tool,id) DO UPDATE SET cost=excluded.cost",
-            params![usage.tool,usage.id,api_json.map(str::to_owned).unwrap_or(serde_json::to_string(api).map_err(|e|e.to_string())?)]).map_err(|e|e.to_string())?;
+            .any(|(a, b)| a.amount != b.amount);
+    if !changed{return Ok(api.clone());}
+    if usage.tool!="codex" || usage.billing_scope.as_deref()!=Some("subscription") {
+        let ids=serde_json::to_string(&[&usage.id]).map_err(|e|e.to_string())?;
+        let owners=super::upstream_accounts::owners(conn,Some(&ids))?;
+        if !owners.get(&(usage.tool.clone(),usage.id.clone())).is_some_and(|owner|!owner.conflict&&owner.subscription&&owner.account_tool=="codex"){return Ok(api.clone());}
     }
+        conn.execute("INSERT INTO monitor_original_api_quotes VALUES(?1,?2,?3) ON CONFLICT(tool,id) DO UPDATE SET cost=excluded.cost WHERE monitor_original_api_quotes.cost<>excluded.cost",
+            params![usage.tool,usage.id,api_json.map(str::to_owned).unwrap_or(serde_json::to_string(api).map_err(|e|e.to_string())?)]).map_err(|e|e.to_string())?;
     Ok(adjusted)
+}
+
+pub(super) fn repair_upstream_quote(tx:&Transaction<'_>,tool:&str,id:&str)->Result<(),String>{
+    let row:Option<(String,String)>=tx.query_row("SELECT usage,cost FROM monitor_requests WHERE tool=?1 AND id=?2",params![tool,id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+    let Some((usage,json))=row else{return Ok(());};
+    let old_usage:UsageRecord=serde_json::from_str(&usage).map_err(|e|e.to_string())?;
+    let mut usage=old_usage.clone();
+    let source_mode=usage.runtime_mode.as_ref().is_some_and(|mode|mode.source=="upstream_request_record");
+    if source_mode && (usage.requested_mode.is_some() || usage.mode_basis=="response_reported"&&usage.mode.is_some()) {usage.runtime_mode=None;}
+    else if usage.requested_mode.is_none() && (usage.runtime_mode.is_none()||source_mode) {
+        let mode:Option<(String,i64)>=tx.query_row("SELECT MIN(json_extract(details,'$.requestedMode')),MIN(timestamp_ms) FROM monitor_upstream_receipts WHERE tool=?1 AND monitor_id=?2 AND NOT conflicted AND details IS NOT NULL AND json_extract(details,'$.requestedMode') IS NOT NULL HAVING COUNT(DISTINCT json_extract(details,'$.requestedMode'))=1",params![tool,id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(|e|e.to_string())?;
+        usage.runtime_mode=mode.map(|(mode,observed)|super::types::RuntimeModeEvidence{mode:Some(mode),conflicted:false,observed_at_ms:observed,source:"upstream_request_record".into()});
+    }
+    let old:CostEstimate=serde_json::from_str(&json).map_err(|e|e.to_string())?;
+    let original=original_api(tx,tool,id)?.unwrap_or_else(||json.clone());
+    let api:CostEstimate=serde_json::from_str(&original).map_err(|e|e.to_string())?;
+    let next=price(tx,&usage,&api,Some(&original))?;
+    let cost_changed=serde_json::to_value(&old).map_err(|e|e.to_string())?!=serde_json::to_value(&next).map_err(|e|e.to_string())?;
+    if cost_changed || old_usage.runtime_mode!=usage.runtime_mode {
+        store::adjust(tx,&old_usage,&old,-1)?;
+        tx.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.runtimeMode',json(?4)),cost=?3 WHERE tool=?1 AND id=?2",params![tool,id,if cost_changed{serde_json::to_string(&next).map_err(|e|e.to_string())?}else{json},serde_json::to_string(&usage.runtime_mode).map_err(|e|e.to_string())?]).map_err(|e|e.to_string())?;
+        store::adjust(tx,&usage,&next,1)?;
+    }
+    let mut snapshot=serde_json::to_value(&api).map_err(|e|e.to_string())?;
+    snapshot["_mode"]=serde_json::to_value(&usage.mode).map_err(|e|e.to_string())?;
+    snapshot["_modeBasis"]=usage.mode_basis.into();
+    snapshot["_requestedMode"]=serde_json::to_value(&usage.requested_mode).map_err(|e|e.to_string())?;
+    snapshot["_usageBasis"]=usage.usage_basis.into();
+    tx.execute("UPDATE monitor_upstream_receipts SET original_quote=?3 WHERE tool=?1 AND monitor_id=?2 AND (original_quote IS NULL OR (json_extract(original_quote,'$.usd') IS NULL AND json_extract(original_quote,'$.cny') IS NULL AND COALESCE(json_array_length(original_quote,'$.scenarios'),0)=0))",params![tool,id,snapshot.to_string()]).map_err(|e|e.to_string())?;
+    Ok(())
 }
 
 fn is_unadjusted_subscription_quote(usage: &UsageRecord, api: &CostEstimate) -> bool {
@@ -171,11 +225,11 @@ fn is_unadjusted_subscription_quote(usage: &UsageRecord, api: &CostEstimate) -> 
     }
 }
 
-fn repair_one(tx: &Transaction<'_>, id: &str) -> Result<bool, String> {
+pub(super) fn repair_request(tx: &Transaction<'_>, tool: &str, id: &str) -> Result<bool, String> {
     let row: Option<(String, String)> = tx
-        .prepare_cached("SELECT usage,cost FROM monitor_requests WHERE tool='codex' AND id=?1")
+        .prepare_cached("SELECT usage,cost FROM monitor_requests WHERE tool=?1 AND id=?2")
         .map_err(|e| e.to_string())?
-        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row(params![tool,id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()
         .map_err(|e| e.to_string())?;
     let Some((json, old_json)) = row else {
@@ -193,7 +247,8 @@ fn repair_one(tx: &Transaction<'_>, id: &str) -> Result<bool, String> {
     }
     let old_usage = usage.clone();
     usage.billing_scope = kind;
-    let api_json = original_api(tx, "codex", id)?.unwrap_or_else(|| old_json.clone());
+    let old: CostEstimate = serde_json::from_str(&old_json).map_err(|e| e.to_string())?;
+    let api_json = original_api(tx, tool, id)?.unwrap_or_else(|| old_json.clone());
     let api: CostEstimate = serde_json::from_str(&api_json).map_err(|e| e.to_string())?;
     if !scope_changed && serde_json::to_value(&api).map_err(|e| e.to_string())?
         != serde_json::to_value(&old).map_err(|e| e.to_string())?
@@ -218,11 +273,10 @@ fn repair_one(tx: &Transaction<'_>, id: &str) -> Result<bool, String> {
         store::adjust(tx, &old_usage, &old, -1)?;
     }
     if scope_changed {
-        tx.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope',?2),cost=?3 WHERE tool='codex' AND id=?1",
-            params![id,usage.billing_scope,next_json]).map_err(|e|e.to_string())?;
-    } else {
-        tx.execute("UPDATE monitor_requests SET cost=?2 WHERE tool='codex' AND id=?1", params![id,next_json])
-            .map_err(|e| e.to_string())?;
+        tx.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope',?3),cost=?4 WHERE tool=?1 AND id=?2",
+            params![tool,id,usage.billing_scope,next_json]).map_err(|e|e.to_string())?;
+    } else if cost_changed {
+        tx.execute("UPDATE monitor_requests SET cost=?3 WHERE tool=?1 AND id=?2", params![tool,id,next_json]).map_err(|e|e.to_string())?;
     }
     if cost_changed {
         store::adjust(tx, &usage, &next, 1)?;
@@ -235,7 +289,7 @@ pub(super) fn repair_ids<'a>(
     ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), String> {
     for id in ids {
-        repair_one(tx, id)?;
+        repair_request(tx, "codex", id)?;
     }
     Ok(())
 }
@@ -261,7 +315,7 @@ pub(super) fn apply_batch(
     rows: &[Observation],
     next: &store::RuntimeModeCursor,
 ) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
     apply_batch_in_transaction(&tx, path, rows, next)?;
     tx.commit().map_err(|e| e.to_string())
 }
@@ -314,30 +368,37 @@ pub(super) fn apply_batch_in_transaction(
 }
 
 pub(super) fn seed_proxy_requests(conn: &mut Connection) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let ids = super::request_accounts::EvidenceIndex::load(&tx)?.api_request_ids();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    let evidence = super::request_accounts::EvidenceIndex::load(&tx)?;
+    let ids = evidence.api_request_ids();
+    evidence.persist_proxy_owners(&tx)?;
     let previous = {
-        let mut query = tx.prepare("SELECT id FROM monitor_api_requests")
-            .map_err(|e| e.to_string())?;
-        let rows = query.query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
+        let mut query = tx.prepare("SELECT id FROM monitor_api_requests").map_err(|e| e.to_string())?;
+        let rows = query.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
         rows.collect::<Result<BTreeSet<_>, _>>().map_err(|e| e.to_string())?
     };
     for id in previous.difference(&ids) {
-        tx.execute("DELETE FROM monitor_api_requests WHERE id=?1", [id])
-            .map_err(|e| e.to_string())?;
-        repair_one(&tx, id)?;
+        tx.execute("DELETE FROM monitor_api_requests WHERE id=?1", [id]).map_err(|e| e.to_string())?;
+        repair_request(&tx, "codex", id)?;
     }
-    for id in ids.difference(&previous) {
-        tx.execute("INSERT INTO monitor_api_requests VALUES(?1)", [id])
-            .map_err(|e| e.to_string())?;
-        repair_one(&tx, id)?;
+    for id in &ids {
+        if tx
+            .execute(
+                "INSERT OR IGNORE INTO monitor_api_requests VALUES(?1)",
+                [id],
+            )
+            .map_err(|e| e.to_string())?
+            > 0
+        {
+            repair_request(&tx, "codex", id)?;
+        }
     }
     tx.execute(
         "INSERT OR REPLACE INTO monitor_state VALUES('billing_proxy_seed_v4','1')",
         [],
     )
     .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM monitor_state WHERE key='proxy_identity_pending'",[]).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -364,21 +425,36 @@ pub(super) fn reconcile_proxy_requests(conn: &mut Connection) -> Result<(), Stri
 }
 
 pub(super) fn bootstrap(conn: &mut Connection) -> Result<(), String> {
-    reconcile_proxy_requests(conn)?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let done: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='billing_strict_evidence_v3')",
-        [], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if done {
-        return Ok(());
+    let turn_done:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='billing_turn_binding_v2')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if !turn_done{
+        let ids={let mut query=conn.prepare("SELECT r.id FROM monitor_requests r JOIN monitor_turn_billing t ON t.session_key=r.session_key AND t.turn_id=json_extract(r.usage,'$.turnId')
+          WHERE r.tool='codex' AND t.turn_id<>'' AND t.kind IN ('api','subscription') AND COALESCE(json_extract(r.usage,'$.billingScope'),'')<>t.kind
+          AND COALESCE(json_extract(r.usage,'$.usageBasis'),'')<>'legacy_initial_cumulative'").map_err(|e|e.to_string())?;
+          let rows=query.query_map([],|r|r.get::<_,String>(0)).map_err(|e|e.to_string())?;rows.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?};
+        let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+        repair_ids(&tx,ids.iter().map(String::as_str))?;
+        tx.execute("INSERT INTO monitor_state VALUES('billing_turn_binding_v2','1')",[]).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e|e.to_string())?;
     }
-    // Older releases inferred subscription billing from a shared home/plan/reset
-    // or applied one turn's authentication to a cumulative usage interval.
-    // Re-evaluate saved classifications once and restore their frozen API quote
-    // whenever no request-specific or explicit runtime evidence supports them.
-    // Also repair old unquoted backfills that saved a provable API tariff despite
-    // an already-confirmed subscription scope, preserving the original quote.
+    let dsh_done:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='billing_dsh_scope_v1')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if !dsh_done {
+        let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+        tx.execute("UPDATE monitor_requests SET usage=json_set(usage,'$.billingScope','api') WHERE tool='deepseek-harness' AND json_extract(usage,'$.billingScope') IS NULL",[]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO monitor_state VALUES('billing_dsh_scope_v1','1')",[]).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e|e.to_string())?;
+    }
+    reconcile_proxy_requests(conn)?;
+    let owners_done:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='upstream_proxy_owners_v1')",[],|r|r.get(0)).map_err(|e|e.to_string())?;
+    if !owners_done {
+        let evidence=super::request_accounts::EvidenceIndex::load(conn)?;
+        let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+        evidence.persist_proxy_owners(&tx)?;
+        tx.execute("INSERT INTO monitor_state VALUES('upstream_proxy_owners_v1','1')",[]).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e|e.to_string())?;
+    }
+    let done: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='billing_strict_evidence_v3')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    if done { return Ok(()); }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
     let ids = {
         let mut q=tx.prepare("SELECT id FROM monitor_requests WHERE tool='codex'
             AND json_extract(usage,'$.billingScope') IS NOT NULL").map_err(|e|e.to_string())?;
@@ -399,106 +475,33 @@ mod tests {
     use super::*;
     use crate::model_catalog::CatalogSnapshot;
     #[test]
-    fn proxy_evidence_arriving_before_usage_is_reconciled_without_new_proxy_rows() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        store::initialize(&conn).unwrap();
-        conn.execute("INSERT INTO monitor_request_account_evidence VALUES('fixture',1,'thread','account:actual','gpt-6.1-sol',NULL,1000,3000,100,20,80)", []).unwrap();
-        bootstrap(&mut conn).unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_api_requests", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        let usage = UsageRecord {
-            id: "response:late".into(), tool: "codex".into(), session_id: "thread".into(), turn_id: "turn".into(),
-            timestamp_ms: 2000, model: Some("gpt-6.1-sol".into()), mode: Some("standard".into()),
-            mode_basis: "response_reported".into(), input_tokens: 100, context_tokens: Some(100),
-            cache_read_tokens: 80, output_tokens: 20, ..Default::default()
-        };
-        let tx = conn.transaction().unwrap();
-        store::save_usage_with_catalog(&tx, &usage, i64::MAX, 3000, &CatalogSnapshot::default()).unwrap();
-        tx.commit().unwrap();
-        let original_cost: String = conn.query_row("SELECT cost FROM monitor_requests WHERE id=?1", [&usage.id], |r| r.get(0)).unwrap();
-        // The persisted reconciliation checkpoint must be invalidated by new usage,
-        // even if no further proxy rows arrive before the next restart/refresh.
-        bootstrap(&mut conn).unwrap();
-        let (scope, cost): (Option<String>, String) = conn.query_row(
-            "SELECT json_extract(usage,'$.billingScope'),cost FROM monitor_requests WHERE id=?1",
-            [&usage.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(scope.as_deref(), Some("api"));
-        assert_eq!(cost, original_cost);
-        bootstrap(&mut conn).unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_api_requests", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert_eq!(store::sum_sessions(&store::sessions(&conn, None, 3000).unwrap()).request_count, 1);
-    }
-
-    #[test]
-    fn quota_period_match_does_not_prove_billing_and_old_inferences_restore_the_api_quote() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        store::initialize(&conn).unwrap();
-        let usage = UsageRecord {
-            id: "response:quota-only".into(), tool: "codex".into(),
-            session_id: "thread".into(), turn_id: "turn".into(), timestamp_ms: 2000,
-            model: Some("gpt-6.1-sol".into()), mode: Some("standard".into()),
-            mode_basis: "response_reported".into(), input_tokens: 300_000,
-            cache_read_tokens: 200_000, output_tokens: 100, context_tokens: Some(300_000),
-            ..Default::default()
-        };
-        conn.execute("INSERT INTO monitor_request_quota_evidence VALUES(?1,'home',604800000,'pro')", [&usage.id]).unwrap();
-        conn.execute("INSERT INTO monitor_codex_quota_accounts VALUES('home',604800000,'pro','account:creator',1000,0)", []).unwrap();
-        assert_eq!(classify(&conn, &usage).unwrap(), None);
-        let tx = conn.transaction().unwrap();
-        store::save_usage_with_catalog(&tx, &usage, i64::MAX, 3000, &CatalogSnapshot::default()).unwrap();
-        tx.commit().unwrap();
-        let api_quote: String = conn.query_row("SELECT cost FROM monitor_requests WHERE id=?1", [&usage.id], |row| row.get(0)).unwrap();
-
-        // Construct the durable state written by the old quota-only classifier,
-        // including its frozen original API quote, without altering price rules.
-        apply_batch(&mut conn, "runtime", &[Observation {
-            session_key: "codex:thread".into(), turn_id: "turn".into(),
-            kind: "subscription".into(), observed_ms: 1000,
-        }], &store::RuntimeModeCursor::default()).unwrap();
-        assert_eq!(original_api(&conn, "codex", &usage.id).unwrap().as_deref(), Some(api_quote.as_str()));
-        conn.execute("DELETE FROM monitor_turn_billing", []).unwrap();
-        conn.execute("INSERT INTO monitor_state VALUES('billing_proxy_seed_v2','1')", []).unwrap();
-
-        for _ in 0..2 {
-            bootstrap(&mut conn).unwrap();
-            let (scope, cost): (Option<String>, String) = conn.query_row(
-                "SELECT json_extract(usage,'$.billingScope'),cost FROM monitor_requests WHERE id=?1",
-                [&usage.id], |row| Ok((row.get(0)?, row.get(1)?)),
-            ).unwrap();
-            assert_eq!(scope, None);
-            assert_eq!(cost, api_quote);
-            let totals = store::sum_sessions(&store::sessions(&conn, None, 3000).unwrap());
-            assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (1, 300_000, 100));
+    fn late_exact_turn_auth_is_reconciled_without_repricing_api_or_using_another_turn(){
+        let mut conn=Connection::open_in_memory().unwrap();store::initialize(&conn).unwrap();
+        for(id,turn,basis)in [("late","turn","token_usage_record"),("other","other-turn","token_usage_record"),("baseline","turn","legacy_initial_cumulative")]{
+            let usage=UsageRecord{id:id.into(),tool:"codex".into(),session_id:"thread".into(),turn_id:turn.into(),timestamp_ms:1000,usage_basis:basis.into(),..Default::default()};
+            let cost=serde_json::to_string(&CostEstimate{usd:Some(7.),..Default::default()}).unwrap();
+            conn.execute("INSERT INTO monitor_requests VALUES('codex',?1,'codex:thread',1000,?2,?3)",params![id,serde_json::to_string(&usage).unwrap(),cost]).unwrap();
         }
+        conn.execute("INSERT INTO monitor_turn_billing VALUES('codex:thread','turn','api',900000)",[]).unwrap();
+        bootstrap(&mut conn).unwrap();bootstrap(&mut conn).unwrap();
+        assert_eq!(conn.query_row("SELECT json_extract(usage,'$.billingScope') FROM monitor_requests WHERE id='late'",[],|r|r.get::<_,String>(0)).unwrap(),"api");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests WHERE id<>'late' AND json_extract(usage,'$.billingScope') IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(conn.query_row("SELECT SUM(json_extract(cost,'$.usd')) FROM monitor_requests",[],|r|r.get::<_,f64>(0)).unwrap(),21.);
     }
-
     #[test]
-    fn proxy_classification_is_revoked_when_a_late_request_makes_the_match_ambiguous() {
-        let mut conn = Connection::open_in_memory().unwrap();
+    fn api_only_harness_history_is_grouped_without_changing_saved_prices_or_other_unknown_tools() {
+        let mut conn=Connection::open_in_memory().unwrap();
         store::initialize(&conn).unwrap();
-        conn.execute("INSERT INTO monitor_request_account_evidence VALUES('fixture',1,'thread','account:actual','gpt-6.1-sol',NULL,1000,3000,100,20,80)", []).unwrap();
-        let mut usage = UsageRecord {
-            id: "response:first".into(), tool: "codex".into(), session_id: "thread".into(),
-            turn_id: "turn".into(), timestamp_ms: 2000, model: Some("gpt-6.1-sol".into()),
-            input_tokens: 100, output_tokens: 20, cache_read_tokens: 80, context_tokens: Some(100),
-            ..Default::default()
-        };
-        let tx = conn.transaction().unwrap();
-        store::save_usage_with_catalog(&tx, &usage, i64::MAX, 3000, &CatalogSnapshot::default()).unwrap();
-        tx.commit().unwrap();
+        for tool in ["claude","deepseek-harness"] {
+            let record=UsageRecord{id:"a".into(),tool:tool.into(),session_id:"s".into(),timestamp_ms:1000,..Default::default()};
+            conn.execute("INSERT INTO monitor_requests VALUES(?1,'a',?2,1000,?3,'{\"usd\":7}')",params![tool,store::session_key(tool,"s"),serde_json::to_string(&record).unwrap()]).unwrap();
+        }
         bootstrap(&mut conn).unwrap();
-        assert_eq!(classify(&conn, &usage).unwrap().as_deref(), Some("api"));
-
-        usage.id = "response:late-identical".into();
-        let tx = conn.transaction().unwrap();
-        store::save_usage_with_catalog(&tx, &usage, i64::MAX, 3000, &CatalogSnapshot::default()).unwrap();
-        tx.commit().unwrap();
-        reconcile_proxy_requests(&mut conn).unwrap();
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_api_requests", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests WHERE json_extract(usage,'$.billingScope') IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-        let totals = store::sum_sessions(&store::sessions(&conn, None, 3000).unwrap());
-        assert_eq!((totals.request_count, totals.input_tokens, totals.output_tokens), (2, 200, 40));
+        bootstrap(&mut conn).unwrap();
+        assert_eq!(conn.query_row("SELECT json_extract(usage,'$.billingScope') FROM monitor_requests WHERE tool='deepseek-harness'",[],|r|r.get::<_,String>(0)).unwrap(),"api");
+        assert_eq!(conn.query_row("SELECT json_extract(usage,'$.billingScope') FROM monitor_requests WHERE tool='claude'",[],|r|r.get::<_,Option<String>>(0)).unwrap(),None);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM monitor_requests WHERE cost='{\"usd\":7}'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
     }
-
     #[test]
     fn subscription_sol_is_corrected_api_is_unchanged_and_conflicts_restore_original_quote() {
         let mut conn = Connection::open_in_memory().unwrap();

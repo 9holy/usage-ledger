@@ -27,6 +27,28 @@ CREATE INDEX ix_finance_batch ON finance_events(source,instance_id,batch_id);
 CREATE INDEX ix_finance_related ON finance_events(related_event_id) WHERE related_event_id IS NOT NULL;
 ";
 
+pub const MIGRATION_V16: &str = "
+CREATE TABLE finance_events_local (
+ id TEXT PRIMARY KEY, source TEXT NOT NULL CHECK(source IN ('sub2api','cliproxy','cockpit','local')),
+ instance_id TEXT NOT NULL, account_id TEXT NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('purchase','renewal','refund','termination_loss')),
+ amount REAL NOT NULL CHECK(amount>0), currency TEXT NOT NULL CHECK(currency IN ('CNY','USD')),
+ occurred_at_ms INTEGER NOT NULL, coverage_start_ms INTEGER, coverage_end_ms INTEGER, note TEXT,
+ created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL, voided_at_ms INTEGER,
+ purchase_channel TEXT, plan_label TEXT, batch_id TEXT, batch_total REAL, related_event_id TEXT,
+ CHECK((coverage_start_ms IS NULL AND coverage_end_ms IS NULL) OR
+ (kind IN ('purchase','renewal') AND coverage_start_ms IS NOT NULL AND coverage_end_ms IS NOT NULL
+ AND coverage_end_ms>coverage_start_ms))
+);
+INSERT INTO finance_events_local SELECT * FROM finance_events;
+DROP TABLE finance_events;
+ALTER TABLE finance_events_local RENAME TO finance_events;
+CREATE INDEX ix_finance_scope_time ON finance_events(source,instance_id,account_id,occurred_at_ms);
+CREATE INDEX ix_finance_batch ON finance_events(source,instance_id,batch_id);
+CREATE INDEX ix_finance_related ON finance_events(related_event_id) WHERE related_event_id IS NOT NULL;
+CREATE TABLE local_cost_settings (id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
+";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinanceScope {
@@ -168,7 +190,7 @@ fn valid_id_text(value: &str, field: &str) -> Result<(), String> {
     Ok(())
 }
 fn valid_scope(source: &str, instance: &str) -> Result<(), String> {
-    if !matches!(source, "sub2api" | "cliproxy" | "cockpit") {
+    if !matches!(source, "sub2api" | "cliproxy" | "cockpit" | "local") {
         return Err("Unsupported finance source".into());
     }
     valid_id_text(instance, "instanceId")
@@ -1119,6 +1141,23 @@ pub async fn finance_ledger_related_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_source_migration_preserves_existing_finance_rows_and_keeps_sources_isolated(){
+        let mut conn=db();
+        save(&mut conn,purchase()).unwrap();
+        let old:String=conn.query_row("SELECT json_array(id,source,instance_id,account_id,amount,coverage_start_ms,coverage_end_ms,voided_at_ms) FROM finance_events",[],|r|r.get(0)).unwrap();
+        conn.execute_batch(MIGRATION_V16).unwrap();
+        let kept:String=conn.query_row("SELECT json_array(id,source,instance_id,account_id,amount,coverage_start_ms,coverage_end_ms,voided_at_ms) FROM finance_events",[],|r|r.get(0)).unwrap();
+        assert_eq!(old,kept);
+        let mut local=purchase();local.id=event(2,"purchase",1.,0).id;local.source="local".into();
+        save(&mut conn,local).unwrap();
+        assert_eq!(query(&conn,window(0,5*DAY)).unwrap().total_events,1);
+        let mut q=window(0,5*DAY);q.source="local".into();
+        let local=query(&conn,q).unwrap();
+        assert_eq!(local.total_events,1);
+        assert_eq!(local.by_account[0].totals.net_expense,Some(50.));
+        assert_eq!(conn.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0)).unwrap(),"ok");
+    }
     const DAY: i64 = 86_400_000;
     fn db() -> Connection {
         let c = Connection::open_in_memory().unwrap();

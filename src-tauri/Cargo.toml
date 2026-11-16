@@ -1,6 +1,6 @@
 [package]
 name = "console2api"  # ponytail: cargo 包名禁数字开头,改 console2api;产物名由 tauri.conf.json productName 定,不受影响
-version = "0.2.39"
+version = "0.2.51"
 description = "用量账本 - AI 用量监控与多源成本管理"
 authors = ["2API Console"]
 edition = "2021"
@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+aes-gcm = "0.10.3"
 getrandom = "0.3"
 base64 = "0.22"
 # cockpit apikey accountId 哈希:codex_apikey_<md5(apiKey)>。纯 Rust 零 transitive 依赖,

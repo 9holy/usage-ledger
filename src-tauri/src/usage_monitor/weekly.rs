@@ -264,6 +264,7 @@ fn finish_group(
     (group.totals, references, forecasts, group.billing_totals, group.unlocated_totals)
 }
 
+#[cfg(test)]
 fn read_with_catalog(
     conn: &Connection,
     start_ms: i64,
@@ -271,12 +272,16 @@ fn read_with_catalog(
     forecast_end_ms: Option<i64>,
     catalog: &CatalogSnapshot,
 ) -> Result<WeeklyUsage, String> {
-    // Keep the guard and usage projection on one snapshot, including direct
-    // callers. An existing outer read transaction already provides this scope.
+    read_scoped(conn,start_ms,end_ms,forecast_end_ms,catalog,None)
+}
+
+fn read_scoped(
+    conn:&Connection,start_ms:i64,end_ms:i64,forecast_end_ms:Option<i64>,catalog:&CatalogSnapshot,billing_scope:Option<&str>,
+)->Result<WeeklyUsage,String>{
     if conn.is_autocommit() {
-        let transaction = conn.unchecked_transaction().map_err(|error| error.to_string())?;
-        let result = read_with_catalog(&transaction, start_ms, end_ms, forecast_end_ms, catalog)?;
-        transaction.commit().map_err(|error| error.to_string())?;
+        let transaction = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let result = read_scoped(&transaction,start_ms,end_ms,forecast_end_ms,catalog,billing_scope)?;
+        transaction.commit().map_err(|e| e.to_string())?;
         return Ok(result);
     }
     store::validate_token_totals(conn)?;
@@ -287,12 +292,10 @@ fn read_with_catalog(
             .map(|tool| (tool.into(), Group::default()))
             .collect();
     let unlocated = "(EXISTS(SELECT 1 FROM json_each(usage,'$.unknownFields') WHERE value='timestamp') OR COALESCE(json_extract(usage,'$.usageBasis'),'') IN ('legacy_initial_cumulative','legacy_cumulative_delta'))";
-    let mut statement = conn.prepare(&format!(
-        "SELECT usage,CASE WHEN timestamp_ms>=?1 OR {unlocated} THEN cost END FROM monitor_requests WHERE (timestamp_ms>=?2 AND timestamp_ms<?3) OR {unlocated} ORDER BY timestamp_ms"
-    )).map_err(|error| error.to_string())?;
+    let mut statement=conn.prepare(&format!("SELECT usage,CASE WHEN timestamp_ms>=?1 OR {unlocated} THEN cost END FROM monitor_requests WHERE ((timestamp_ms>=?2 AND timestamp_ms<?3) OR {unlocated}) AND (?4 IS NULL OR json_extract(usage,'$.billingScope')=?4) ORDER BY timestamp_ms")).map_err(|error|error.to_string())?;
     let rows = statement
         .query_map(
-            params![start_ms, end_ms.saturating_sub(28 * DAY), end_ms],
+            params![start_ms, end_ms.saturating_sub(28 * DAY), end_ms,billing_scope],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .map_err(|error| error.to_string())?;
@@ -411,8 +414,10 @@ pub async fn usage_monitor_weekly(
     start_ms: i64,
     end_ms: i64,
     forecast_end_ms: Option<i64>,
+    billing_scope: Option<String>,
 ) -> Result<WeeklyUsage, String> {
     let period = MonitorPeriod {
+        billing_scope:billing_scope.clone(),
         start_ms: Some(start_ms),
         end_ms: Some(end_ms),
         ..Default::default()
@@ -426,12 +431,13 @@ pub async fn usage_monitor_weekly(
     }
     let catalog = crate::model_catalog::snapshot();
     tauri::async_runtime::spawn_blocking(move || {
-        read_with_catalog(
+        read_scoped(
             &super::connection()?,
             start_ms,
             end_ms,
             forecast_end_ms,
             &catalog,
+            billing_scope.as_deref(),
         )
     })
     .await
@@ -465,6 +471,9 @@ mod tests {
         assert_eq!(result.billing_totals["subscription"].priced_cost_usd,2.);
         assert_eq!(result.billing_totals["api"].priced_cost_usd,10.);
         assert_eq!(result.billing_totals.values().map(|r|r.priced_cost_usd).sum::<f64>(),result.totals.priced_cost_usd);
+        let api=read_scoped(&conn,0,2000,None,&CatalogSnapshot::default(),Some("api")).unwrap();
+        assert_eq!((api.totals.request_count,api.totals.priced_cost_usd),(1,10.));
+        assert_eq!(api.billing_totals.len(),1);
     }
     fn insert(
         conn: &Connection,

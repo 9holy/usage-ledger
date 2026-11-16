@@ -8,6 +8,9 @@ use std::{collections::VecDeque, path::Path};
 #[serde(default)]
 pub struct ParserState {
     pub session: Option<SessionMeta>,
+    pub(super) claude_owner: Option<super::request_identity::ClaudeOwner>,
+    pub(super) claude_request_ref: Option<String>,
+    pub(super) identity_replayed: bool,
     pub(crate) quota_account_id: Option<String>,
     pub(crate) quota_identity_loaded: bool,
     pub(crate) quota_identity_error: Option<String>,
@@ -61,6 +64,8 @@ pub struct ParsedLine {
     pub delete_ids: Vec<String>,
     pub quotas: Vec<super::quota::QuotaObservation>,
     pub request_quotas: Vec<super::codex_quota_accounts::RequestQuota>,
+    pub(super) identity_contexts: Vec<super::request_identity::ClaudeContext>,
+    pub(super) identity_links: Vec<super::request_identity::ClaudeLink>,
 }
 
 impl ParserState {
@@ -897,16 +902,39 @@ fn claude(
         meta.project = Some(cwd);
     }
     let mut result = ParsedLine::default();
+    if row["type"] == "session-owner" {
+        state.claude_owner=string(row,"sessionId").zip(string(row,"accountUuid"))
+            .filter(|(session,account)|session.len()<=512&&account.len()<=512)
+            .map(|(session,account)|super::request_identity::ClaudeOwner{session,account,organization:string(row,"organizationUuid").filter(|value|value.len()<=512)});
+        return Ok(result);
+    }
+    if row["type"] == "api-request" {
+        state.claude_request_ref = None;
+        state.session.as_mut().unwrap().status = "active".into();
+        if let (Some(reference),Some(session),Some(betas))=(string(row,"id"),string(row,"sessionId"),row["params"]["betas"].as_array()) {
+            if reference.len()<=512&&session.len()<=512&&betas.iter().all(Value::is_string) {
+                state.claude_request_ref = Some(reference.clone());
+                let oauth=betas.iter().any(|beta|beta.as_str()==Some("oauth-2025-04-20"));
+                let account=state.claude_owner.as_ref().filter(|owner|oauth&&owner.session==session)
+                    .map(|owner|super::request_identity::claude_account_key(&owner.account,owner.organization.as_deref()));
+                result.identity_contexts.push(super::request_identity::ClaudeContext{reference,session,kind:if oauth{"subscription"}else{"api"},account});
+            }
+        }
+        return Ok(result);
+    }
     let tool_result = row["message"]["content"]
         .as_array()
         .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"));
     if row["type"] == "user" && row["isMeta"] != true && !tool_result {
+        state.claude_request_ref = None;
+        state.session.as_mut().unwrap().status = "active".into();
         if let Some(id) = string(row, "uuid") {
             set_turn(state, id);
         }
         return Ok(result);
     }
     if row["type"] == "system" && row["subtype"] == "turn_duration" {
+        state.session.as_mut().unwrap().status = "idle".into();
         if !state.turn_id.is_empty() {
             let turn_id = state.turn_id.clone();
             state.session.as_mut().unwrap().turn_timing = Some(TurnTiming {
@@ -919,6 +947,10 @@ fn claude(
         }
         return Ok(result);
     }
+    if row["type"] == "system" && row["subtype"] == "stop_hook_summary" {
+        state.session.as_mut().unwrap().status = "idle".into();
+        return Ok(result);
+    }
     if row["type"] != "assistant" || row["isApiErrorMessage"] == true {
         return Ok(result);
     }
@@ -926,6 +958,10 @@ fn claude(
     if message["model"] == "<synthetic>" || message["isApiErrorMessage"] == true {
         return Ok(result);
     }
+    state.session.as_mut().unwrap().status = match message["stop_reason"].as_str() {
+        Some(reason) if !matches!(reason, "tool_use" | "pause_turn") => "idle",
+        _ => "active",
+    }.into();
     let data = &message["usage"];
     if !data.is_object() {
         return Ok(result);
@@ -1034,6 +1070,11 @@ fn claude(
         .or(number(row, "duration_ms")?)
         .or(usage.duration_ms);
     usage.usage_basis = "assistant_message_usage".into();
+    if let (Some(reference),Some(session))=(string(row,"requestRef"),string(row,"sessionId")) {
+        if reference.len()<=512&&session.len()<=512 {
+            result.identity_links.push(super::request_identity::ClaudeLink{id:usage.id.clone(),reference,session});
+        }
+    }
     state.remember(usage.clone());
     result.usage.push(usage);
     Ok(result)

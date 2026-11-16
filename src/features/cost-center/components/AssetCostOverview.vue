@@ -36,7 +36,7 @@
       </div>
       <p class="asset-overview__disclaimer"><Info :size="15" aria-hidden="true" /><span> {{ t('costComponents.estimatedAmountsAreForReferenceOnlyMissing') }} </span></p>
     </div>
-    <footer>{{ updatedLabel }} {{ t('costComponents.costsStartWhenTheAccountJoins') }} </footer>
+    <footer><slot name="footer">{{ updatedLabel }} {{ t('costComponents.costsStartWhenTheAccountJoins') }}</slot></footer>
   </section>
 </template>
 

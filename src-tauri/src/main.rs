@@ -36,13 +36,14 @@ fn cockpit_usage_ledger_path() -> Result<std::path::PathBuf, String> {
 /// 存 cockpit 模式本地成本档案(cockpit_cost_profiles.json)——cockpit 是只读本地 JSON 数据源,
 /// 无后端可写(sub2api 存 PG,cockpit 存本地 JSON 对齐"手动补充采购价"语义)。
 fn console_data_dir() -> Result<std::path::PathBuf, String> {
+    let directory=if env!("CARGO_PKG_VERSION").contains("-preview."){"2api-console-preview"}else{"2api-console"};
     if let Ok(appdata) = std::env::var("APPDATA") {
-        return Ok(std::path::PathBuf::from(appdata).join("2api-console"));
+        return Ok(std::path::PathBuf::from(appdata).join(directory));
     }
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .map_err(|_| "无法定位用户主目录(APPDATA/USERPROFILE/HOME 均未设置)".to_string())?;
-    Ok(std::path::PathBuf::from(home).join(".local").join("share").join("2api-console"))
+    Ok(std::path::PathBuf::from(home).join(".local").join("share").join(directory))
 }
 
 /// 读本地成本档案 JSON(cockpit 模式手动配置的采购价)。不存在时返 "{}"(首次使用)。
@@ -912,6 +913,12 @@ fn main() {
             model_catalog::model_catalog_quote_batch,
             usage_monitor::usage_monitor_snapshot,
             usage_monitor::accounts::usage_monitor_accounts,
+            usage_monitor::upstream_accounts::usage_monitor_sync_upstream,
+            usage_monitor::upstream_accounts::usage_monitor_upstream_history,
+            usage_monitor::local_cost::local_cost_report,
+            usage_monitor::local_cost::local_cost_live,
+            usage_monitor::local_cost::local_cost_save_settings,
+            usage_monitor::account_names::usage_monitor_set_account_name,
             usage_monitor::usage_monitor_analysis,
             usage_monitor::usage_monitor_session,
             usage_monitor::usage_monitor_quotas,
@@ -954,6 +961,9 @@ fn main() {
         .on_window_event(handle_main_window_event)
         .setup(move |app| {
             use tauri::Manager;
+            if app.config().identifier != "com.console.2api" {
+                ledger_db::set_runtime_data_dir(app.path().app_data_dir()?)?;
+            }
             // Single-instance detection runs before setup, so only the primary binds the proxy.
             proxy::spawn_proxy()?;
             model_catalog::start();
@@ -1234,6 +1244,9 @@ mod tests {
         let payload = format!(r#"{{"accounts":[{{"email":"{marker}","updatedAt":1,"usage":{{"requestCount":42}}}}]}}"#);
         let write_result = write_cost_ledger(payload.clone(), None);
         let back = read_cost_ledger();
+        assert!(write_cost_ledger("{broken".into(), None).is_err());
+        assert!(write_cost_ledger("[]".into(), None).is_err());
+        assert_eq!(read_cost_ledger().unwrap(),payload);
         std::fs::remove_dir_all(&tmp).ok();
         write_result.expect("写入台账失败");
         let back = back.expect("读回台账失败");
@@ -1251,6 +1264,23 @@ mod tests {
             emails.contains(&marker.as_str()),
             "台账往返丢内容: 写入 {marker:?}, 读回条目 {emails:?}; 原文: {back}"
         );
+    }
+
+    #[test]
+    fn preview_cost_files_do_not_write_the_stable_app_files(){
+        if !env!("CARGO_PKG_VERSION").contains("-preview."){return;}
+        let _env=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let tmp=std::env::temp_dir().join(format!("console-preview-isolation-{}",std::process::id()));
+        let _appdata=EnvGuard::set("APPDATA",&tmp);
+        let original=tmp.join("2api-console");std::fs::create_dir_all(&original).unwrap();
+        std::fs::write(original.join("cockpit_cost_profiles.json"),r#"{"stable":1}"#).unwrap();
+        std::fs::write(original.join("cockpit_usage_ledger.json"),r#"{"stable":2}"#).unwrap();
+        let ledger = r#"{"accounts":[],"preview":4}"#;
+        write_cost_profiles(r#"{"preview":3}"#.into()).unwrap();write_cost_ledger(ledger.into(), None).unwrap();
+        assert_eq!(std::fs::read_to_string(original.join("cockpit_cost_profiles.json")).unwrap(),r#"{"stable":1}"#);
+        assert_eq!(std::fs::read_to_string(original.join("cockpit_usage_ledger.json")).unwrap(),r#"{"stable":2}"#);
+        assert_eq!(read_cost_profiles().unwrap(),r#"{"preview":3}"#);assert_eq!(read_cost_ledger().unwrap(),ledger);
+        std::fs::remove_dir_all(tmp).unwrap();
     }
 
     /// summarize_cockpit_api_logs 参数校验:坏日期/区间倒置/桶尺寸越界必须 Err(不触盘)。
@@ -1644,7 +1674,7 @@ mod tests {
         assert!(write_cost_profiles("[]".into()).is_err());
         assert!(write_cost_profiles("{broken".into()).is_err());
         assert_eq!(read_cost_profiles().unwrap(), payload2);
-        assert!(!tmp.join("2api-console/cockpit_cost_profiles.json.pending").exists());
+        assert!(!console_data_dir().unwrap().join("cockpit_cost_profiles.json.pending").exists());
         std::fs::remove_dir_all(&tmp).ok();
     }
     #[test]
