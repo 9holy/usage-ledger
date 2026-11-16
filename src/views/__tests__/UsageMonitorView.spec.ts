@@ -534,6 +534,18 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.quota-prediction-updated').text()).toContain('推算更新于')
   })
 
+  it('recovers the saved ledger pair on first launch after an upgrade without mixing newer live money', async () => {
+    const account = forecastAccount()
+    account.currentCycle!.totals = { ...account.currentCycle!.totals, automaticPriceSummary: automaticEstimate(2000) }
+    mockAccountForecast(account, forecastQuota('codex:1', { stale: true }))
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toEqual(savedQuotaForecast().quotes[0])
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('quota').usedPercent).toBe(20)
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('显示上次有效推算')
+    expect(wrapper.get('.quota-prediction-updated').text()).toContain('2026/10/16')
+    expect(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)).toBeNull()
+  })
+
   it('uses the quota-observation amount on first capture even when live cycle usage is newer', async () => {
     const account = forecastAccount()
     account.currentCycle!.totals = { ...account.currentCycle!.totals, automaticPriceSummary: automaticEstimate(200) }
@@ -618,7 +630,7 @@ describe('UsageMonitorView', () => {
     await wrapper.get('[aria-label="额度账号"]').setValue('codex:2'); await flushPromises()
     expect(wrapper.get('.current-quotas').text()).toContain('$20.00')
     expect(wrapper.get('.current-credits').text()).toContain('上次积分余额')
-    expect(wrapper.get('.account-quota-forecast').text()).toContain('周额度待更新')
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('显示上次有效推算')
     expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈ $500')
     const history = wrapper.get<HTMLDetailsElement>('.quota-group:not(.current-quotas)')
     history.element.open = true; await history.trigger('toggle'); await flushPromises()
@@ -645,7 +657,7 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('[aria-label="额度账号"]').findAll('option')).toHaveLength(2)
     expect(wrapper.get('.current-quotas').text()).toContain('账号 2')
     expect(JSON.parse(localStorage.getItem(HIDDEN_QUOTA_ACCOUNTS_KEY)!)).toEqual([])
-    expect(wrapper.get('.account-quota-forecast').text()).toContain('周额度待更新')
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('显示上次有效推算')
   })
 
   it('always exposes the verified current account even if its key was previously hidden', async () => {
@@ -729,6 +741,11 @@ describe('UsageMonitorView', () => {
     vi.mocked(getUsageMonitorAccounts).mockResolvedValue({ collectedAtMs: NOW, weekStartMs: monitorWeekBounds(NOW).startMs, currentAccountKey: 'codex:1', accounts: [forecastAccount('codex:1', 100, usedPercent)], unassignedWeek: { ...snapshot().totals, requestCount: 0 } })
     vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [forecastQuota('codex:1', { usedPercent, ...overrides })] })
     wrapper = mount(UsageMonitorView, options); await flushPromises()
+    if (['stale quota', 'source error'].includes(_name)) {
+      expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toEqual(savedQuotaForecast().quotes[0])
+      expect(wrapper.get('.account-quota-forecast').text()).toContain('显示上次有效推算')
+      return
+    }
     expect(wrapper.get('.account-quota-forecast').text()).toContain(message)
     expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈')
     expect(wrapper.find('usage-value-chart-stub').exists()).toBe(false)
@@ -1013,7 +1030,7 @@ describe('UsageMonitorView', () => {
 
   it.each(['different account', 'different cycle', 'new quota period', 'expired cycle', 'expired quota', 'zero use', 'new zero sample', 'exhausted use'])('does not reuse a saved prediction for %s', async reason => {
     localStorage.setItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY, JSON.stringify([savedQuotaForecast()]))
-    const account = forecastAccount(reason === 'different account' ? 'codex:2' : 'codex:1')
+    const account = forecastAccount(reason === 'different account' ? 'codex:2' : 'codex:1', reason === 'different account' ? 40 : 100)
     const quota = forecastQuota(account.accountKey, { stale: true })
     if (reason === 'different cycle') { account.currentCycle!.startMs += 86400000; account.currentCycle!.resetAtMs += 86400000; quota.resetsAtMs! += 86400000 }
     if (reason === 'new quota period') { quota.observedAtMs = NOW + 2; quota.resetsAtMs = NOW + 7 * 86400000 + 1 }
@@ -1024,6 +1041,12 @@ describe('UsageMonitorView', () => {
     if (reason === 'exhausted use') account.currentCycle!.usedPercent = quota.usedPercent = 100
     mockAccountForecast(account, quota, NOW, account.accountKey)
     wrapper = mount(UsageMonitorView, options); await flushPromises()
+    if (reason === 'different account') {
+      expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toMatchObject({ observedSubtotal: 40, projectedSubtotal: 200 })
+      expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('quota').accountLabel).toContain('账号 2')
+      expect(JSON.parse(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)!)[0].accountKey).toBe('codex:1')
+      return
+    }
     expect(wrapper.find('usage-value-chart-stub').exists()).toBe(false)
     expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈')
     expect(wrapper.find('.quota-prediction-updated').exists()).toBe(false)
@@ -1037,7 +1060,8 @@ describe('UsageMonitorView', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     mockAccountForecast(forecastAccount(), forecastQuota('codex:1', { stale: true }))
     wrapper = mount(UsageMonitorView, options); await flushPromises()
-    expect(wrapper.find('usage-value-chart-stub').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'UsageValueChart' }).props('forecast')).toEqual(saved.quotes[0])
+    expect(wrapper.get('.account-quota-forecast').text()).toContain('显示上次有效推算')
     expect(warn).toHaveBeenCalledWith('[usage-monitor] quota snapshot load failed', expect.any(Error))
     mockAccountForecast()
     await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()

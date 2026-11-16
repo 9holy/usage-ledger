@@ -3,7 +3,7 @@
   "version": "0.2.51",
   "repository": "9holy/usage-ledger",
   "freeze": "release-0.2.51",
-  "createdAt": "2026-11-16T23:28:08.634Z",
+  "createdAt": "2026-11-16T23:47:06.471Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.51",
@@ -5858,8 +5858,8 @@
     },
     {
       "path": "src/views/UsageMonitorView.vue",
-      "bytes": 215860,
-      "sha256": "d00f720227c0bdc0fd4a604a74a0c9a522e2c6e78fb665b382848e9447e3a0b0"
+      "bytes": 216581,
+      "sha256": "dc6958fc26b3005346a390a1007fb2e2b47a325c86445905122b2378370ef715"
     },
     {
       "path": "src/views/__tests__/ConnectView.spec.ts",
@@ -5893,8 +5893,8 @@
     },
     {
       "path": "src/views/__tests__/UsageMonitorView.spec.ts",
-      "bytes": 183470,
-      "sha256": "a786b311b03083e3c9f736dd15097ad0a6a4ef40d2bafa9ea340977957c1c35f"
+      "bytes": 185284,
+      "sha256": "a719b67bd891efd9529d2968303e5097968c45c8a1d8708d0bad3c9df7d437c5"
     },
     {
       "path": "src/views/admin/AccountsView.vue",

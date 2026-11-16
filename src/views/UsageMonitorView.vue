@@ -447,8 +447,18 @@ const accountQuotaPrediction = computed(() => {
   const cycle = account?.currentCycle ?? account?.quotaCycles[0]
   if (live.finalized && live.context) return { ...live, updatedAtMs: cycle?.exhaustedAtMs ?? undefined }
   const quota = forecastQuota.value
-  const saved = quotaSnapshots.value.find(row => row.accountKey === account?.accountKey && row.tool === account?.tool
+  let saved = quotaSnapshots.value.find(row => row.accountKey === account?.accountKey && row.tool === account?.tool
     && row.cycleStartMs === cycle?.startMs && row.cycleResetAtMs === cycle?.resetAtMs)
+  // The ledger keeps the paired cutoff when browser storage changes during an upgrade.
+  if (!saved && account && cycle && (quota?.stale || quota?.sourceError || quotaError.value || accountUsageError.value)) {
+    const paired = projectAccountQuotaCycle(cycle, account.tool)
+    if (!paired.reason) saved = {
+      accountKey: account.accountKey, tool: account.tool, accountLabel: live.label,
+      cycleStartMs: cycle.startMs, cycleResetAtMs: cycle.resetAtMs,
+      quotaObservedAtMs: cycle.quotaObservedAtMs, updatedAtMs: cycle.quotaObservedAtMs, usedPercent: cycle.usedPercent!,
+      quotes: paired.quotes, partial: paired.partial, coveredRequests: paired.coveredRequests, requestCount: paired.requestCount,
+    }
+  }
   const used = cycle?.usedPercent
   if (!saved || account?.billingAccountVerified === false || quota?.billingAccountVerified === false
     || (account?.tool === 'codex' && cycle?.quotaSnapshot?.billingTotals && !cycle.quotaSnapshot.billingTotals.subscription?.requestCount)
