@@ -6,7 +6,10 @@ use chrono::{Datelike, Timelike};
 
 const CHECKED_AT: &str = "2026-10-16";
 const OPENAI_CHECKED_AT: &str = "2026-11-07";
-pub const VERSION: &str = "models-dev-reference-rules-2026-11-07-v6";
+pub const VERSION: &str = "models-dev-reference-rules-2026-11-18-v7";
+const NOVEMBER_RATES: &str = "2026-11-18";
+// 2027-03-01 00:00 Pacific: the GPT-6.2 API Ultrafast launch rate ends.
+const ULTRAFAST_LIST_START_MS: i64 = 1_803_888_000_000;
 const OPENAI: &str = "https://developers.openai.com/api/docs/pricing";
 const TERRA: &str = "https://developers.openai.com/api/docs/models/gpt-6.1-terra";
 const NEW_MODELS_CHECKED_AT: &str = "2026-10-27";
@@ -70,6 +73,8 @@ fn openai(model: &str, mode: &str, long: bool) -> Option<Rates> {
 
 fn reference_modes(model: &str) -> &'static [&'static str] {
     match model {
+        "gpt-6.2-astra" | "gpt-6.2-sol" => &["standard", "fast", "ultrafast"],
+        "claude-fable-5-2" => &["standard", "fast"],
         "gpt-6-astra" | "gpt-6.1-sol" => &["standard", "fast", "ultrafast", "flex"],
         "codex-auto-review" | "gpt-6.1-terra" | "gpt-6-sol" | "gpt-6-luna"
         | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => &["standard", "fast", "flex"],
@@ -79,6 +84,9 @@ fn reference_modes(model: &str) -> &'static [&'static str] {
 
 fn anthropic(model: &str, mode: &str, long: bool) -> Option<Rates> {
     Some(match (model, mode) {
+        ("claude-fable-5-2", "standard") => rates(8., 0.2, 10., 16., 40.),
+        ("claude-fable-5-2", "fast") => rates(16., 0.4, 20., 32., 80.),
+        ("claude-fable-5-2", "batch") => rates(4., 0.1, 5., 8., 20.),
         ("claude-fable-5-1" | "claude-mythos-5-1", "standard") => rates(10., 0.25, 12.5, 20., 50.),
         ("claude-opus-5-5", "standard") => rates(4., 0.2, 5., 8., 20.),
         ("claude-opus-5-5", "fast") => rates(8., 0.4, 10., 16., 40.),
@@ -107,8 +115,19 @@ fn quote(
     let (write5, write1) = writes;
     let (price, source, provider, currency, tier) = if model.starts_with("gpt-") {
         let long = input > 272_000;
-        let Some(price) = openai(model, mode, long) else {
-            return Err("unverified_model_or_mode_price");
+        let price = if matches!(model,"gpt-6.2-astra"|"gpt-6.2-sol") {
+            let speed = match mode {
+                "standard" => 1., "fast" => 2., "batch" => 0.5,
+                "ultrafast" if record.timestamp_ms <= 0 => return Err("unknown_request_time"),
+                "ultrafast" if record.timestamp_ms < ULTRAFAST_LIST_START_MS => 3.,
+                "ultrafast" => 6.,
+                _ => return Err("unverified_model_or_mode_price"),
+            };
+            let base = if model == "gpt-6.2-astra" { 8. } else { 2. };
+            let input = base * speed * if long { 2. } else { 1. };
+            rates(input,input * 0.05,input * 1.25,input * 2.5,base * 5. * speed * if long { 1.5 } else { 1. })
+        } else {
+            openai(model, mode, long).ok_or("unverified_model_or_mode_price")?
         };
         (
             price,
@@ -186,7 +205,9 @@ fn quote(
         evidence: PriceEvidence {
             version: VERSION.into(),
             source_url: source.into(),
-            checked_at: if source == OPENAI || source == TERRA {
+            checked_at: if matches!(model,"gpt-6.2-astra"|"gpt-6.2-sol"|"claude-fable-5-2") {
+                NOVEMBER_RATES
+            } else if source == OPENAI || source == TERRA {
                 OPENAI_CHECKED_AT
             } else if source == SUB2API {
                 NEW_MODELS_CHECKED_AT
@@ -221,7 +242,7 @@ fn quote(
     })
 }
 
-fn estimate_official(record: &UsageRecord) -> CostEstimate {
+fn estimate_official(record: &UsageRecord, aggregate_context: Option<i64>) -> CostEstimate {
     let Some(model) = record.model.as_deref() else {
         return unknown("unknown_model");
     };
@@ -229,7 +250,7 @@ fn estimate_official(record: &UsageRecord) -> CostEstimate {
         return unknown("subscription_routing_alias_needs_model");
     }
     let ordinary_write = model == "glm-5.2" || model == "doubao-seed-2.0-code";
-    let tiered = model != "glm-5.2" && model != "codex-auto-review";
+    let tiered = !matches!(model, "glm-5.2" | "codex-auto-review" | "claude-fable-5-2");
     if record.unknown_fields.iter().any(|s| {
         matches!(
             s.as_str(),
@@ -246,7 +267,9 @@ fn estimate_official(record: &UsageRecord) -> CostEstimate {
     {
         return unknown("unsupported_pricing_modifier");
     }
-    let input = if tiered {
+    let input = if let Some(context) = aggregate_context {
+        context
+    } else if tiered {
         let Some(input) = record.context_tokens else {
             return unknown("unknown_per_request_context");
         };
@@ -275,7 +298,7 @@ fn estimate_official(record: &UsageRecord) -> CostEstimate {
     if model == "codex-auto-review" && record.cache_write_tokens > 0 {
         return unknown("unverified_cache_write_price");
     }
-    if record.cache_write_tokens > 0 && openai(model, "standard", false).is_some() {
+    if record.cache_write_tokens > 0 && (matches!(model,"gpt-6.2-astra"|"gpt-6.2-sol") || openai(model, "standard", false).is_some()) {
         return unknown("unknown_cache_write_ttl");
     }
     let writes = if model.starts_with("claude-") && record.cache_write_tokens > 0 {
@@ -1023,10 +1046,51 @@ fn catalog_quote(
     })
 }
 
+fn official_quote_input(input: &CatalogQuoteInput, model: &str, aggregate_context: Option<i64>) -> CostEstimate {
+    let unknown_fields = [
+        ("input_tokens", input.input_tokens), ("output_tokens", input.output_tokens),
+        ("cache_read_tokens", input.cache_read_tokens), ("cache_write_tokens", input.cache_write_tokens),
+    ].into_iter().filter(|(_,v)| v.is_none()).map(|(key,_)| key.into()).collect();
+    let usage = UsageRecord {
+        model: Some(model.into()),
+        mode: input.actual_mode.as_deref().map(|m| normalize_mode(m).into()),
+        mode_basis: if input.actual_mode.is_some() { "response_reported" } else { "unknown" }.into(),
+        requested_mode: input.requested_mode.clone(),
+        timestamp_ms: if input.aggregate { 0 } else { input.timestamp_ms.unwrap_or(0) },
+        input_tokens: input.input_tokens.unwrap_or(0), output_tokens: input.output_tokens.unwrap_or(0),
+        cache_read_tokens: input.cache_read_tokens.unwrap_or(0), cache_write_tokens: input.cache_write_tokens.unwrap_or(0),
+        cache_write_5m_tokens: input.cache_write_5m_tokens, cache_write_1h_tokens: input.cache_write_1h_tokens,
+        context_tokens: input.context_tokens, unknown_fields, ..Default::default()
+    };
+    estimate_official(&usage, aggregate_context)
+}
+
 pub fn quote_input(input: &CatalogQuoteInput, catalog: &CatalogSnapshot) -> CostEstimate {
     let model_alias = input.model.rsplit('/').next().unwrap_or(&input.model);
     if model_alias == "qianfan-code-latest" || model_alias.starts_with("gpt-reserve") {
         return unknown("subscription_routing_alias_needs_model");
+    }
+    let official = match model_alias {
+        "gpt-6.2-astra" | "gpt-6.2-sol" => Some("openai"),
+        "claude-fable-5-2" => Some("anthropic"),
+        _ => None,
+    };
+    // A provider-qualified reseller model must use that provider's catalog.
+    if let Some(provider) = official.filter(|p|
+        input.provider.as_deref().is_none_or(|v| v.eq_ignore_ascii_case(p))
+        && input.model.split_once('/').is_none_or(|(v,_)| v.eq_ignore_ascii_case(p))) {
+        let context = if input.aggregate && provider == "openai" {
+            if input.context_tokens.is_some() { return unknown("aggregate_input_is_not_per_request_context"); }
+            match (input.context_min,input.context_max,input.context_tier.as_deref()) {
+                (Some(min),Some(max),_) if min < 0 || min > max => return unknown("invalid_aggregate_context_range"),
+                (Some(min),Some(max),_) if min <= 272_000 && max > 272_000 => return unknown("aggregate_context_spans_price_tiers"),
+                (Some(min),Some(_),_) => Some(min),
+                (None,None,Some("base")) => Some(0),
+                (None,None,Some(">272000")) => Some(272_001),
+                _ => return unknown("unknown_aggregate_context_range"),
+            }
+        } else { None };
+        return official_quote_input(input, model_alias, context);
     }
     match catalog_quote(input, catalog) {
         Ok(cost) => cost,
@@ -1042,39 +1106,7 @@ pub fn quote_input(input: &CatalogQuoteInput, catalog: &CatalogSnapshot) -> Cost
             {
                 return unknown(error);
             }
-            let mut unknown_fields = Vec::new();
-            for (name, value) in [
-                ("input_tokens", input.input_tokens),
-                ("output_tokens", input.output_tokens),
-                ("cache_read_tokens", input.cache_read_tokens),
-                ("cache_write_tokens", input.cache_write_tokens),
-            ] {
-                if value.is_none() {
-                    unknown_fields.push(name.into());
-                }
-            }
-            let usage = UsageRecord {
-                model: Some(input.model.clone()),
-                mode: input.actual_mode.clone().map(|m| normalize_mode(&m).into()),
-                mode_basis: if input.actual_mode.is_some() {
-                    "response_reported"
-                } else {
-                    "unknown"
-                }
-                .into(),
-                requested_mode: input.requested_mode.clone(),
-                timestamp_ms: input.timestamp_ms.unwrap_or(0),
-                input_tokens: input.input_tokens.unwrap_or(0),
-                output_tokens: input.output_tokens.unwrap_or(0),
-                cache_read_tokens: input.cache_read_tokens.unwrap_or(0),
-                cache_write_tokens: input.cache_write_tokens.unwrap_or(0),
-                cache_write_5m_tokens: input.cache_write_5m_tokens,
-                cache_write_1h_tokens: input.cache_write_1h_tokens,
-                context_tokens: input.context_tokens,
-                unknown_fields,
-                ..Default::default()
-            };
-            let fallback = estimate_official(&usage);
+            let fallback = official_quote_input(input, &input.model, None);
             if fallback.usd.is_some() || fallback.cny.is_some() || !fallback.scenarios.is_empty() {
                 fallback
             } else if catalog.providers.is_empty() || terra || input.model == "codex-auto-review" {
@@ -1154,6 +1186,56 @@ mod catalog_tests {
             .unwrap()
             .timestamp_millis()
     }
+    #[test]
+    fn gpt_62_prices_use_request_context_and_the_pacific_promotion_boundary() {
+        let catalog = CatalogSnapshot::default();
+        for (model,base) in [("gpt-6.2-astra",8.),("gpt-6.2-sol",2.)] {
+            let mut q=input(model);
+            q.provider=Some("openai".into());
+            q.cache_read_tokens=Some(20);
+            for (context,input_multiplier,output_multiplier) in [(272_000,1.,1.),(272_001,2.,1.5)] {
+                q.input_tokens=Some(context);
+                q.context_tokens=Some(context);
+                for (mode,speed,time) in [("standard",1.,1),("priority",2.,1),("batch",0.5,1),
+                    ("ultrafast",3.,ULTRAFAST_LIST_START_MS-1),("ultrafast",6.,ULTRAFAST_LIST_START_MS)] {
+                    q.actual_mode=Some(mode.into());
+                    q.timestamp_ms=Some(time);
+                    let result=quote_input(&q,&catalog);
+                    let expected=(((context-20) as f64+20.*0.05)*input_multiplier+100.*5.*output_multiplier)*base*speed/1e6;
+                    assert!((result.usd.unwrap()-expected).abs()<1e-10);
+                    assert_eq!(result.evidence.unwrap().source_url,OPENAI);
+                }
+            }
+            q.timestamp_ms=None;
+            assert_eq!(quote_input(&q,&catalog).reason.as_deref(),Some("unknown_request_time"));
+            q.actual_mode=None;
+            q.requested_mode=Some("fast".into());
+            let scenarios=quote_input(&q,&catalog);
+            assert!(scenarios.usd.is_none() && scenarios.scenarios.iter().any(|s|s.mode=="fast"));
+            q.aggregate=true; q.context_tokens=None; q.context_min=Some(272_000); q.context_max=Some(272_001);
+            assert_eq!(quote_input(&q,&catalog).reason.as_deref(),Some("aggregate_context_spans_price_tiers"));
+        }
+        assert!(quote_input(&input("gpt-6.2"),&catalog).usd.is_none());
+    }
+
+    #[test]
+    fn fable_52_prices_both_cache_ttls_and_does_not_override_a_reseller() {
+        let catalog=CatalogSnapshot::parse(r#"{"vendor":{"models":{"claude-fable-5-2":{"cost":{"input":70,"output":80,"cache_read":5,"cache_write":4}}}}}"#,"fixture".into(),1).unwrap();
+        let mut q=input("anthropic/claude-fable-5-2");
+        q.context_tokens=None; q.cache_read_tokens=Some(200); q.cache_write_tokens=Some(300);
+        q.cache_write_5m_tokens=Some(100); q.cache_write_1h_tokens=Some(200);
+        for (mode,k) in [("standard",1.),("fast",2.),("batch",0.5)] {
+            q.actual_mode=Some(mode.into());
+            let result=quote_input(&q,&catalog);
+            assert!((result.usd.unwrap()-(500.*8.+200.*0.2+100.*10.+200.*16.+100.*40.)*k/1e6).abs()<1e-12);
+        }
+        q.cache_write_1h_tokens=None;
+        assert_eq!(quote_input(&q,&catalog).reason.as_deref(),Some("unknown_cache_write_ttl"));
+        q.cache_write_1h_tokens=Some(200);
+        q.provider=Some("vendor".into()); q.model="claude-fable-5-2".into(); q.actual_mode=Some("standard".into());
+        assert_eq!(quote_input(&q,&catalog).evidence.unwrap().input_per_million,70.);
+    }
+
     #[test]
     fn new_model_reference_prices_use_exact_tokens_tiers_and_sources() {
         let catalog = catalog();

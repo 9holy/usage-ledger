@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "version": "0.2.52",
   "repository": "9holy/usage-ledger",
-  "freeze": "v0.2.52",
-  "createdAt": "2026-11-17T10:44:02.325Z",
+  "freeze": "v0.2.52-model-pricing",
+  "createdAt": "2026-11-17T20:47:43.558Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.52",
@@ -389,8 +389,8 @@
     },
     {
       "path": "docs/release/0.2.52.md",
-      "bytes": 1255,
-      "sha256": "ef1bcd4e9b743805c3d6e9d79fa60793a7c1b953c92d97ff532a7a6d21de805a"
+      "bytes": 1961,
+      "sha256": "82589d3dd8f8b33972678c12d90e2758919054ec0ad249dc157c27c7d2ca5f45"
     },
     {
       "path": "docs/screenshots/README.md",
@@ -1164,8 +1164,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/pricing.rs",
-      "bytes": 71666,
-      "sha256": "26f76539d9a9a3452230523d18652cd351a03ebab976c5d9c5a7fe7bc6d4b601"
+      "bytes": 77347,
+      "sha256": "e736290b93daafb5b109f4798ba39f402f9a6d31c0eac3cfcca3353489ce9d81"
     },
     {
       "path": "src-tauri/src/usage_monitor/quota.rs",
@@ -5894,8 +5894,8 @@
     },
     {
       "path": "src/views/__tests__/LocalCostView.spec.ts",
-      "bytes": 11486,
-      "sha256": "7cf4094f985def7bf371b0f7106cf50612cfa052fd95c51373901adbe0a96ff0"
+      "bytes": 11492,
+      "sha256": "4ae4b64c88224f004686b913088fd60f3a77ff91f0dd03d455610712fcc7f53f"
     },
     {
       "path": "src/views/__tests__/UsageMonitorView.spec.ts",

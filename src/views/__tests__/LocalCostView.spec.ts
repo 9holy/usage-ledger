@@ -157,7 +157,7 @@ describe('local cost workspace', () => {
     vi.mocked(getLocalCostReport).mockResolvedValue(report)
     const wrapper = mount(LocalCostView); await flushPromises()
     expect(wrapper.get('.accounts-table').text()).toContain('订阅登录 3 次')
-    expect(wrapper.get('.accounts-table').text()).toContain('方式待核实 2 次')
+    expect(wrapper.get('.accounts-table').text()).toContain('调用方式待确认 2 次')
     wrapper.unmount()
   })
 })
