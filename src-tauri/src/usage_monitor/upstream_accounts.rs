@@ -579,7 +579,10 @@ pub(super) fn owners(conn: &Connection, ids: Option<&str>) -> Result<BTreeMap<(S
 #[tauri::command]
 pub async fn usage_monitor_sync_upstream(batch: SourceBatch,runtime:tauri::State<'_,super::MonitorRuntime>) -> Result<SyncResult, String> {
     let started=runtime.status_snapshot()?.started_at_ms;
-    tauri::async_runtime::spawn_blocking(move || save_at(&mut super::connection()?, batch,started)).await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn=crate::ledger_db::open_default().map_err(|e|e.to_string())?;
+        save_at(&mut conn,batch,started)
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]

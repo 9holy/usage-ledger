@@ -3,7 +3,7 @@
   "version": "0.2.51",
   "repository": "9holy/usage-ledger",
   "freeze": "release-0.2.51",
-  "createdAt": "2026-11-16T23:47:06.471Z",
+  "createdAt": "2026-11-17T00:07:25.463Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.51",
@@ -1198,8 +1198,8 @@
     },
     {
       "path": "src-tauri/src/usage_monitor/upstream_accounts.rs",
-      "bytes": 86259,
-      "sha256": "ae34c4426f76409d44e0e91b6a5491af00ffa8138373a5a2f5caa77b6fee5cd2"
+      "bytes": 86340,
+      "sha256": "92747e240454f0d81cee70d98daa09cf1b410f1ad3324d679a58329ee0d725a1"
     },
     {
       "path": "src-tauri/src/usage_monitor/weekly.rs",
