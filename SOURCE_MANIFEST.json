@@ -3,7 +3,7 @@
   "version": "0.2.52",
   "repository": "9holy/usage-ledger",
   "freeze": "v0.2.52-model-pricing",
-  "createdAt": "2026-11-17T20:47:43.558Z",
+  "createdAt": "2026-11-17T20:56:28.048Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.52",
@@ -179,8 +179,8 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "bytes": 6870,
-      "sha256": "c08c5256a72da26309413c11b31b325f5d80f0ef2776c524d67f2eda3cabc0f4"
+      "bytes": 7384,
+      "sha256": "a4dd1f635a60ff58841ac86ebdc618c88b63c78edb5cdd95df5e9281cea65046"
     },
     {
       "path": ".github/workflows/macos-test.yml",
