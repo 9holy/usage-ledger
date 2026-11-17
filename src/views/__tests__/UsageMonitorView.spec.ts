@@ -140,7 +140,7 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.weekly-section').element.closest('.live-workspace')).not.toBeNull()
     expect(wrapper.find('.modal-overlay,.live-quick,.monitor-cost-summary,.cost-insights').exists()).toBe(false)
     expect(wrapper.find('.monitor-finance-page').exists()).toBe(false)
-    await wrapper.get('.workspace-cost-action').trigger('click'); await flushPromises()
+    await wrapper.get('#monitor-tab-costs').trigger('click'); await flushPromises()
     expect(wrapper.get('#monitor-tab-costs').attributes('aria-selected')).toBe('true')
     expect(wrapper.find('.monitor-finance-page').exists()).toBe(true)
     expect(wrapper.find('.modal-overlay,.live-band').exists()).toBe(false)
@@ -316,7 +316,7 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.account-quota-forecast').text()).toContain('≈ $100')
     expect(wrapper.find('.weekly-billing-values').exists()).toBe(false)
     const weeklyValue = wrapper.get('.week-figures > div:first-child')
-    expect(weeklyValue.text()).toContain('本周已识别用量估算')
+    expect(weeklyValue.text()).toContain('本周用量估值')
     expect(weeklyValue.findAll('strong')).toHaveLength(1)
     expect(weeklyValue.get('strong').text()).toContain('$300')
     expect(wrapper.text()).not.toContain('类型待确认估值')
@@ -1205,6 +1205,54 @@ describe('UsageMonitorView', () => {
     expect(sources.text()).toContain('Claude Code · 尚未报告额度')
   })
 
+  it('shows the current Codex quota once and keeps the older Sub2API reading under sources', async () => {
+    const official = forecastQuota('codex:1', {
+      source: 'codex_official_usage', windowSeconds: 604800, usedPercent: 8, remainingPercent: 92,
+    })
+    const gateway: MonitorQuota = {
+      ...official, id: 2, source: 'sub2api', plan: null, windowSeconds: undefined, stale: true,
+      observedAtMs: NOW - 2 * 86400000, resetsAtMs: official.resetsAtMs! + 1000, usedPercent: 0, remainingPercent: 100,
+    }
+    mockAccountForecast(forecastAccount('codex:1', 201.82, 8), official)
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [gateway, official] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const current = wrapper.get('.current-quotas')
+    expect(current.findAll('.allowance-item')).toHaveLength(1)
+    expect(current.get('.quota-dial').text()).toContain('8.0%')
+    expect(current.text()).toContain('$201.82')
+    expect(current.text()).not.toContain('Sub2API')
+    expect(wrapper.find('.quota-group:not(.current-quotas)').exists()).toBe(false)
+    const sources = wrapper.get<HTMLDetailsElement>('.quota-source-details')
+    expect(sources.element.open).toBe(false)
+    sources.element.open = true
+    expect(sources.text()).toContain('Sub2API · 7天额度 · 上次已用 0.0%')
+    expect(sources.text()).toContain(new Date(gateway.observedAtMs!).toLocaleString('zh-CN', { hour12: false }))
+
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [gateway, { ...official, stale: true }] })
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(current.findAll('.allowance-item')).toHaveLength(1)
+    expect(current.get('.quota-dial').text()).toContain('8.0%上次已用')
+
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [gateway] })
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(current.get('.quota-dial').text()).toContain('0.0%上次已用')
+    expect(current.text()).toContain('Sub2API')
+  })
+
+  it('keeps distinct quota windows, pools and reset cycles separate', async () => {
+    const current = forecastQuota('codex:1', { source: 'codex_official_usage', windowSeconds: 604800 })
+    const shorter = { ...current, id: 2, slot: 'secondary', windowMinutes: 300, windowSeconds: 18000 }
+    const extra = { ...current, id: 3, limitId: 'other-model', poolLabel: 'Separate model quota' }
+    const previous = { ...current, id: 4, source: 'sub2api', observedAtMs: NOW - 4 * 86400000,
+      resetsAtMs: NOW - 3 * 86400000, stale: true, expired: true }
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [current, shorter, extra, previous] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    expect(wrapper.get('.current-quotas').findAll('.allowance-item')).toHaveLength(3)
+    const history = wrapper.get<HTMLDetailsElement>('.quota-group:not(.current-quotas)')
+    history.element.open = true; await history.trigger('toggle'); await flushPromises()
+    expect(history.get('.allowance-item').text()).toContain('Sub2API')
+  })
+
   it('keeps an expired quota historical without expiring independently recent credits', async () => {
     vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [forecastQuota('codex:1', {
       source: 'codex_official_usage', observedAtMs: NOW - 2000, resetsAtMs: NOW - 1000, usedPercent: 100, remainingPercent: 0,
@@ -1418,6 +1466,31 @@ describe('UsageMonitorView', () => {
     expect(wrapper.findAll('.source-group>summary>[data-tone]').map(row => row.attributes('data-tone'))).toEqual(['error', 'warning', 'unknown'])
     expect(wrapper.findAll('.source-entry>summary>[data-tone]').map(row => row.attributes('data-tone'))).toEqual(['error', 'warning', 'unknown'])
     expect(wrapper.get('.source-group').text()).toContain('暂时无法读取工具用量')
+    i18n.global.locale.value = 'en'; await flushPromises()
+    expect(wrapper.findAll('.source-group > summary')[1].text()).toContain('2 files')
+    expect(wrapper.get('.source-health').text()).not.toContain('subagents')
+  })
+
+  it('shows provider restrictions and spending limits in both languages without exposing raw keys', async () => {
+    const allowed = { allowed: true, limitReached: false, rateLimitReachedType: null, spendControl: null }
+    mockAccountForecast(forecastAccount(), forecastQuota('codex:1', { source: 'codex_official_usage', providerStatus: allowed }))
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const quota = wrapper.get('.current-quotas')
+    expect(quota.text()).not.toContain('当前可用')
+    expect(quota.find('[title="当前可用"]').exists()).toBe(true)
+
+    mockAccountForecast(forecastAccount(), forecastQuota('codex:1', { source: 'codex_official_usage', providerStatus: {
+      allowed: false, limitReached: true, rateLimitReachedType: 'workspace_member_credits_depleted',
+      spendControl: { reached: true, individualLimit: { source: 'workspace_member', limit: '$25', used: '$25', remaining: '$0', usedPercent: 100, remainingPercent: null, resetAfterSeconds: 45, resetsAtMs: null } },
+    } }))
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(quota.get('.quota-provider-status').text()).toBe('额度已受限 · 成员积分已用完')
+    expect(quota.get('.provider-spend-control').text()).toContain('45 秒后重置')
+    expect(quota.text()).not.toContain('workspace_member')
+    i18n.global.locale.value = 'en'; await flushPromises()
+    expect(quota.get('.quota-provider-status').text()).toBe('Quota restricted · Member credits are used up')
+    expect(quota.get('.provider-spend-control').text()).toContain('Limit $25')
+    expect(quota.text()).not.toContain('usageMonitor.text.')
   })
 
   it('shares quota color between ring and remaining text without rounding away a remainder', async () => {
@@ -1813,9 +1886,11 @@ describe('UsageMonitorView', () => {
     }
     vi.mocked(getUsageMonitorSnapshot).mockResolvedValue(current)
     wrapper = mount(UsageMonitorView, options); await flushPromises()
-    expect(wrapper.get('.tool-overview').text()).toContain('等待速度数据')
+    expect(wrapper.get('.tool-overview .tool-rate').text()).toContain('10.00 Token/秒')
+    expect(wrapper.get('.tool-overview .tool-rate').text()).toContain('近 60 秒平均')
+    expect(wrapper.get('.tool-overview .tool-rate').attributes('title')).toBe('只读到部分记录')
     expect(wrapper.get('.global-rate strong').text()).toContain('10.00')
-    expect(wrapper.get('.sessions-table').text()).toContain('10.00 / 运行中，等待用量回传')
+    expect(wrapper.get('.sessions-table').text()).toContain('10.00 / 运行中')
     expect(wrapper.get('.sessions-table').text()).toContain('只读到部分记录')
     expect(wrapper.get('.sessions-table').text()).not.toContain('统计中')
   })
@@ -1835,10 +1910,42 @@ describe('UsageMonitorView', () => {
     for (const label of ['Codex', 'Claude Code']) {
       const tool = tools.find(row => row.text().includes(label))!
       expect(tool.text()).toContain('运行 1')
-      expect(tool.text()).toContain('运行中，等待用量回传')
+      expect(tool.get('.tool-rate').text()).toBe('')
     }
     expect(wrapper.findAll('.rate-session')).toHaveLength(2)
-    expect(wrapper.get('.sessions-table').text()).toContain('运行中，等待用量回传')
+    expect(wrapper.findAll('.rate-session strong').map(row => row.text())).toEqual(['运行中', '运行中'])
+    expect(wrapper.text()).not.toContain('等待用量回传')
+  })
+
+  it('keeps each last measurement during a running gap, then clears it on stop', async () => {
+    const current = snapshot()
+    const window = { seconds: 60, observedOutputTokens: 600, outputTokensPerSecond: 10, coveredMs: 60_000, complete: true, sourceComplete: true }
+    const windows = [window]
+    current.live = { sampledAtMs: NOW, collectionUpdatedAtMs: NOW, basis: 'collector_observed_output', windows,
+      byTool: [{ tool: 'codex', model: null, sessionKey: null, windows }], byModel: [], bySession: [{ tool: 'codex', model: null, sessionKey: 'codex:s1', windows }],
+      currentRates: [{ tool: 'codex', model: null, sessionKey: 'codex:s1', outputTokensPerSecond: 42, sampledAtMs: NOW, intervalMs: 1000 }],
+      timeline: [], peakMinuteOutputTokens: null, sourceCoverageIncomplete: false, unavailableTools: [] }
+    vi.mocked(getUsageMonitorSnapshot).mockResolvedValue(current)
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const header = wrapper.get('.tool-overview .tool-rate')
+    expect(header.text()).toContain('42.0 Token/秒')
+    expect(header.text()).toContain('实时')
+    const gap = { ...current.live, sampledAtMs: NOW + 2000, currentRates: [], windows: [], byTool: [], bySession: [] }
+    vi.mocked(getUsageMonitorSnapshot).mockResolvedValue({ ...current, live: gap })
+    await wrapper.get('.heading-actions [aria-label="刷新数据"]').trigger('click'); await flushPromises()
+    expect(header.text()).toContain('42.0 Token/秒')
+    expect(header.text()).toContain('上次')
+    expect(header.text()).not.toContain('实时')
+    expect(wrapper.get('.global-rate').text()).toContain('10.00')
+    expect(wrapper.get('.global-rate').text()).toContain('上次')
+    expect(wrapper.get('.rate-session').text()).toContain('上次')
+    expect(wrapper.get('.sessions-table').text()).toContain('10.00（上次）')
+
+    vi.mocked(getUsageMonitorSnapshot).mockResolvedValue({ ...current, activeSessions: [], rateSessions: [], live: gap })
+    await wrapper.get('.heading-actions [aria-label="刷新数据"]').trigger('click'); await flushPromises()
+    expect(header.text()).toBe('')
+    expect(wrapper.get('.global-rate').text()).not.toContain('10.00')
+    expect(wrapper.find('.rate-session').exists()).toBe(false)
   })
 
   it('shows all same-window rate contributors beside the global total and uses the independent standard reference', async () => {

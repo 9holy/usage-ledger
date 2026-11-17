@@ -2,9 +2,9 @@
 
 # Usage Ledger
 
-**Version 0.2.51 · AI usage monitoring and cost workspace · English / 中文**
+**Version 0.2.52 · AI usage monitoring and cost workspace · English / 中文**
 
-Local account costs, procurement channels, expenses and API cost rules are integrated into Usage Monitor. See the [version guide](docs/release/0.2.51.md).
+Local account costs, procurement channels, expenses and API cost rules are integrated into Usage Monitor. See the [latest changes](docs/release/0.2.52.md).
 
 Usage Ledger is a desktop app for understanding AI-tool activity and the cost of the accounts and services behind it. It combines a local usage monitor with a cost workspace for Sub2API, CLIProxyAPI, and Cockpit.
 

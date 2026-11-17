@@ -1,8 +1,8 @@
 # Usage Ledger Desktop Release Notes
 
-Current source version: **0.2.51**. See the [version guide](docs/release/0.2.51.md), [English README](README.md), and [Chinese README](README.zh-CN.md). Verified packages and their build evidence are available on [GitHub Releases](https://github.com/9holy/usage-ledger/releases).
+Current source version: **0.2.52**. See the [version guide](docs/release/0.2.52.md), [English README](README.md), and [Chinese README](README.zh-CN.md). Verified packages and their build evidence are available on [GitHub Releases](https://github.com/9holy/usage-ledger/releases).
 
-当前源码版本为 **0.2.51**。新功能、升级兼容与平台限制见本版中英文说明；安装包及其构建证据以 GitHub Releases 为准。
+当前源码版本为 **0.2.52**。新功能、升级兼容与平台限制见本版中英文说明；安装包及其构建证据以 GitHub Releases 为准。
 
 ## Historical Technical Notes: v0.2.22 / 历史技术记录
 

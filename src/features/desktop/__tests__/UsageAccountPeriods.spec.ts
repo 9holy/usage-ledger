@@ -66,16 +66,15 @@ describe('account allowance periods', () => {
     expect(wrapper.find('.quota-cycle-details').exists()).toBe(false);
   })
 
-  it('keeps a legacy creator amount separate from verified account usage even with collapsed details', () => {
+  it('keeps unconfirmed legacy amounts in the closed amount details', () => {
     const wrapper = mount(UsageAccountPeriods, { props: { account: account({ billingAccountVerified: false,
       attribution: 'session_creator', currentCycle: cycle(identified(13.68)) }) } })
     expect(wrapper.get('.amount-overview').text()).not.toContain('$13.68')
     expect(wrapper.get('.amount-overview').text()).toContain('本轮边界未确认')
     expect(wrapper.get('.creator-reference').text()).toContain('$13.68')
-    expect(wrapper.get('.creator-reference').text()).toContain('未核实归属')
-    expect(wrapper.get('.creator-reference').text()).toContain('未计入上方账号用量，不可再次相加')
-    expect(wrapper.get('.creator-reference').element.closest('details')).toBeNull()
-    expect(wrapper.get('.amount-details').attributes('open')).toBeUndefined()
+    expect(wrapper.get('.creator-reference').text()).toContain('未确认账号的用量')
+    expect(wrapper.get('.creator-reference').text()).toContain('未计入上方金额')
+    expect(wrapper.get('.creator-reference').element.closest('details:not([open])')).toBe(wrapper.get('.amount-details').element)
   })
 
   it('never mixes creator-only reference amounts into strict account cycle and month totals', () => {
@@ -90,7 +89,7 @@ describe('account allowance periods', () => {
     expect(wrapper.get('.creator-reference').text()).toContain('$900.00')
     expect(wrapper.get('.creator-reference').text()).toContain('$800.00')
     expect(wrapper.get('.creator-reference').text()).toContain('$700.00')
-    expect(wrapper.get('.verified-usage-note').text()).toContain('非实付或额度扣减')
+    expect(wrapper.get('.amount-details .attribution').text()).toContain('不是实际付款')
     expect(wrapper.props('account')).toEqual(data)
   })
 
@@ -118,7 +117,7 @@ describe('account allowance periods', () => {
     expect(wrapper.text()).toContain('本轮已记录用量估算')
     expect(wrapper.text()).toContain('2026/10/15')
     expect(wrapper.text()).toContain('2026/10/22')
-    expect(wrapper.text()).toContain('仅计入已采集请求日志中能唯一交叉匹配到该账号的用量')
+    expect(wrapper.get('.amount-details .attribution').text()).toContain('不是实际付款')
     expect(wrapper.find('canvas').exists()).toBe(false)
   })
 
@@ -211,7 +210,7 @@ describe('account allowance periods', () => {
     expect(wrapper.text()).toContain('本轮暂无已采集用量')
     expect(wrapper.text()).toContain('采集已暂停')
     expect(wrapper.text()).not.toContain('$0')
-    expect(wrapper.text()).toContain('之后的用量只计入订阅月累计，积分余额不换算成金额')
+    expect(wrapper.text()).toContain('之后的用量只计入月累计。积分另计。')
     expect(wrapper.find('.amount-overview').text()).not.toContain('积分')
     const unknown = mount(UsageAccountPeriods, { props: { account: account() } })
     expect(unknown.text()).toContain('还没有额度周期的记录')

@@ -94,16 +94,6 @@ const creatorRows = computed(() => {
       <div v-else class="amount-item"><h4>{{ t('usageMonitor.text.usedThisMonth') }}</h4><small class="unknown-month">{{ t('usageMonitor.text.subscriptionDatesUnconfirmed') }}</small></div>
       <div v-if="previous" class="amount-item previous-cycle"><h4>{{ t('usageMonitor.text.previousWeeklyQuotaUsed') }}</h4><strong class="period-amount">{{ previous.amount }}</strong></div>
     </div>
-    <p class="verified-usage-note">{{ t('usageMonitor.text.verifiedAccountUsageNote') }}</p>
-    <section v-if="creatorRows.length" class="creator-reference">
-      <h4>{{ t('usageMonitor.text.creatorReferenceSeparate') }}</h4>
-      <p>{{ t('usageMonitor.text.creatorReferenceSeparateNote') }}</p>
-      <div v-for="row in creatorRows" :key="row.label" class="creator-reference-period">
-        <h4>{{ row.label }}</h4><strong>{{ row.value.amount }}</strong>
-        <small>{{ range(row.period) }}</small><small>{{ row.value.note }}</small>
-        <small v-if="row.value.reference">{{ row.value.reference }}</small>
-      </div>
-    </section>
     <details class="amount-details">
       <summary>{{ t('usageMonitor.text.amountDetails') }}</summary>
       <small v-if="account.billingAccountVerified === false" class="source-error">{{ attributionNote }}</small>
@@ -160,6 +150,15 @@ const creatorRows = computed(() => {
       <small v-if="account.subscription.checkedAtMs" class="source-checked">{{ t('usageMonitor.text.subscriptionInformationUpdated') }} {{ date(account.subscription.checkedAtMs) }}</small>
       <small class="attribution">{{ t('usageMonitor.text.verifiedAccountUsageNote') }}</small>
       <small>{{ t('usageMonitor.text.weeklyQuotaAmountsStopAtTheFirstObserved100') }}</small>
+      <section v-if="creatorRows.length" class="creator-reference">
+        <h4>{{ t('usageMonitor.text.creatorReferenceSeparate') }}</h4>
+        <p>{{ t('usageMonitor.text.creatorReferenceSeparateNote') }}</p>
+        <div v-for="row in creatorRows" :key="row.label" class="creator-reference-period">
+          <h4>{{ row.label }}</h4><strong>{{ row.value.amount }}</strong>
+          <small>{{ range(row.period) }}</small><small>{{ row.value.note }}</small>
+          <small v-if="row.value.reference">{{ row.value.reference }}</small>
+        </div>
+      </section>
     </details>
     <details v-if="quotaCycles.length" class="quota-cycle-details">
       <summary>{{ t('usageMonitor.text.quotaCycle') }} {{ quotaCycles.length }}</summary>
@@ -179,7 +178,7 @@ const creatorRows = computed(() => {
 </template>
 
 <style scoped>
-.verified-usage-note,.creator-reference p{font-size:12px;color:#aebfb3;line-height:1.6}.creator-reference{margin-top:12px;padding:10px;border:1px dashed #826c48;border-radius:6px}.creator-reference-period{margin-top:8px}.creator-reference-period>strong{color:#d3ba8a;font-variant-numeric:tabular-nums}
+.creator-reference{margin-top:12px;padding-top:10px;border-top:1px solid var(--cost-line,#293c30)}.creator-reference p{margin:3px 0 0;color:var(--cost-muted)}.creator-reference-period{margin-top:8px}.creator-reference-period>strong{color:#d3ba8a;font-variant-numeric:tabular-nums}
 .quota-cycle-details{margin-top:8px;min-width:0}.quota-cycle-details>summary{width:fit-content;max-width:100%;padding:2px 6px;cursor:pointer;color:#91a79a;font-size:11px}.quota-cycle-details[open]>summary{margin-bottom:10px}
 .previous-cycle .period-amount{color:var(--usage-input,#78b8ff)}.previous-details{grid-column:1/-1}.previous-unavailable{font-size:12px;color:#9fb3a5;margin:0}
 .amount-evidence{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;padding:10px 0 14px}.amount-evidence>div{min-width:0}.amount-evidence>.month-details{margin:0;padding:0;border:0}.amount-details .cycle-history{padding-top:12px;border-top:1px solid var(--cost-line,#293c30)}@media(max-width:600px){.amount-evidence{grid-template-columns:minmax(0,1fr);gap:14px}}

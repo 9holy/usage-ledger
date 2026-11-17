@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "version": "0.2.51",
+  "version": "0.2.52",
   "repository": "9holy/usage-ledger",
-  "freeze": "release-0.2.51",
-  "createdAt": "2026-11-17T00:07:25.463Z",
+  "freeze": "v0.2.52",
+  "createdAt": "2026-11-17T10:44:02.325Z",
   "gitHistoryIncluded": false,
   "policy": {
-    "version": "0.2.51",
+    "version": "0.2.52",
     "repository": "9holy/usage-ledger",
     "directories": [
       "src",
@@ -81,6 +81,7 @@
       "docs/release/0.2.38.md",
       "docs/release/0.2.39.md",
       "docs/release/0.2.51.md",
+      "docs/release/0.2.52.md",
       "docs/data-channel-completion-2026-11-07.md",
       "docs/finance-data-contract-audit-2026-11-07.md",
       "docs/cockpit-quota-production-contract-2026-11-07.md",
@@ -219,7 +220,7 @@
     {
       "path": "DESKTOP_RELEASE_NOTES.md",
       "bytes": 9826,
-      "sha256": "62d7e99c59f526407fe31a0a6fe3156050b091cb55b787f6bad52ab51ad87682"
+      "sha256": "d7363cc9786edab1fb67bb098cb98bf36ce005039d3ad13878cc2498ed7868b1"
     },
     {
       "path": "LICENSES/CC-BY-NC-SA-4.0.txt",
@@ -243,13 +244,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 22185,
-      "sha256": "d7a397a03b8fc82a0dd7b58f70697ee5f10891f86e96f0907d2875ee1afda466"
+      "bytes": 22186,
+      "sha256": "12dfb87abd0059e93d02e479cb8c20bed856a802070101e878501757e78157f5"
     },
     {
       "path": "README.zh-CN.md",
       "bytes": 20039,
-      "sha256": "4f17a9a34b039093bacc5ec482776342abe543fe6366c2d6b4663c17d3c1fe98"
+      "sha256": "92a849661d6af33488d4b741c96aa617b71f0706347ac1c775537135b53cb5f5"
     },
     {
       "path": "THIRD_PARTY_NOTICES.md",
@@ -385,6 +386,11 @@
       "path": "docs/release/0.2.51.md",
       "bytes": 2533,
       "sha256": "61762d8c62209521193e810e421ced0d18580ed6ff0055144be47227be982be1"
+    },
+    {
+      "path": "docs/release/0.2.52.md",
+      "bytes": 1255,
+      "sha256": "ef1bcd4e9b743805c3d6e9d79fa60793a7c1b953c92d97ff532a7a6d21de805a"
     },
     {
       "path": "docs/screenshots/README.md",
@@ -554,7 +560,7 @@
     {
       "path": "package.json",
       "bytes": 3584,
-      "sha256": "23101df0a659723e3e854d2d6373d5540280826f103b05b915cf064a2ada3ac5"
+      "sha256": "7bdf244894509fa90924fc1fd876a70e5c2cb399082149ab039a499c8cc65e28"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -658,8 +664,8 @@
     },
     {
       "path": "scripts/source-release-policy.json",
-      "bytes": 5322,
-      "sha256": "162f9e5b721c1193a41fc1fa6331a86662b63d00b287896f03d21b8399ebd03a"
+      "bytes": 5352,
+      "sha256": "bf03acc3d72d57b8eac058b46be0b7154b0b39adc0b538c96c0b6fcac3d9ed44"
     },
     {
       "path": "scripts/test-deepseek-headless.py",
@@ -684,12 +690,12 @@
     {
       "path": "src-tauri/Cargo.lock",
       "bytes": 146554,
-      "sha256": "fb77eabeb76758455c64c78260ae804bd74798adafad09892bb987608728d57c"
+      "sha256": "384c26be0298fcf68e76bdef6e8d8d5cf115dce1676bbeb3afa728a943abe462"
     },
     {
       "path": "src-tauri/Cargo.toml",
       "bytes": 2230,
-      "sha256": "1a4615bcb698ed32e57545ffa5fc5cc57e650eb7d1c91a4851d883eab122acdd"
+      "sha256": "b9ac49c04a6b2a8c1e864803fbea272ba90e0e8c927c764a5d11c10138761bed"
     },
     {
       "path": "src-tauri/Info.macos.plist",
@@ -1214,7 +1220,7 @@
     {
       "path": "src-tauri/tauri.conf.json",
       "bytes": 1486,
-      "sha256": "f65e981f58a00db5912ddb5955c05ee017d57a5d6e2b2158c7296adb676941ea"
+      "sha256": "c8538df620cf89f97a615cf8b04675f046134b43eca285fd6337283a7dd9ca1a"
     },
     {
       "path": "src-tauri/tauri.local.conf.json",
@@ -4483,8 +4489,8 @@
     },
     {
       "path": "src/features/desktop/ConsoleWorkspaceHeader.vue",
-      "bytes": 7881,
-      "sha256": "be118bbace4faff7f5d7ea8c02e715ce3a0aeae736929e3028bbf65b625ea583"
+      "bytes": 6903,
+      "sha256": "430b5d745d38de858db27cfbdb97f326a9711fedda5de75feb428f48b0da3b15"
     },
     {
       "path": "src/features/desktop/DesktopTitleBar.vue",
@@ -4518,8 +4524,8 @@
     },
     {
       "path": "src/features/desktop/UsageAccountPeriods.vue",
-      "bytes": 21205,
-      "sha256": "3983b31aabfb7430636078b16d83ab69644d0a0935d10e375d8ed6fed71c0dc4"
+      "bytes": 21109,
+      "sha256": "bb1ad6f70e42598d607b99bf5b401911c77e09940b93139105b5c554ef5fac41"
     },
     {
       "path": "src/features/desktop/UsageApiAccount.vue",
@@ -4558,8 +4564,8 @@
     },
     {
       "path": "src/features/desktop/UsageCurrentSpeed.vue",
-      "bytes": 4654,
-      "sha256": "38dab52bf5cb65b083e9a1d252400f78165bdfdf14204d1025eb407b73a1c31e"
+      "bytes": 4965,
+      "sha256": "35a417ce8c81456a5622ea381c3e5b9a180ef8bbcc6bf352081a6f68578b3a49"
     },
     {
       "path": "src/features/desktop/UsageEfficiencyBand.vue",
@@ -4573,8 +4579,8 @@
     },
     {
       "path": "src/features/desktop/UsageLivePanel.vue",
-      "bytes": 38380,
-      "sha256": "2cadb708d2dfa93b44bba77871e497d5a1682732ab33d57f8f558b60204f8bcf"
+      "bytes": 38900,
+      "sha256": "c645fe5264b8ba075caad1103c5f22c85beedc7fff8f56b592cf94edb50aa261"
     },
     {
       "path": "src/features/desktop/UsageModeEvidence.vue",
@@ -4658,8 +4664,8 @@
     },
     {
       "path": "src/features/desktop/__tests__/ConsoleWorkspaceHeader.spec.ts",
-      "bytes": 4924,
-      "sha256": "ef534359bab15e325c9de806540cfd97addff74e80a546dbbd757546bdfe6d58"
+      "bytes": 4613,
+      "sha256": "d0a46f9fa21857fbafc7a566af92c733ae0328b60ead09303fb748c2947bb328"
     },
     {
       "path": "src/features/desktop/__tests__/DesktopTitleBar.spec.ts",
@@ -4688,8 +4694,8 @@
     },
     {
       "path": "src/features/desktop/__tests__/UsageAccountPeriods.spec.ts",
-      "bytes": 25891,
-      "sha256": "e56949f69a58037ae69334c5ef48ff69716105284d5b934ab097cf15690cad68"
+      "bytes": 25768,
+      "sha256": "15bba606d18d263b26c6c8bd0986c9cabbe3878622772cab61df7c22474d2630"
     },
     {
       "path": "src/features/desktop/__tests__/UsageCompactLabels.spec.ts",
@@ -4713,8 +4719,8 @@
     },
     {
       "path": "src/features/desktop/__tests__/UsageCurrentSpeed.spec.ts",
-      "bytes": 1731,
-      "sha256": "ded50fae47bdeff87b08e120d0708207bb624919f9d16daa5583bff9e7c11c6a"
+      "bytes": 1903,
+      "sha256": "a5fdcab1b78e458ef827b3f9149b552f8d1c11b9e35a92fb49553d857b5f86d0"
     },
     {
       "path": "src/features/desktop/__tests__/UsageEfficiencyBand.spec.ts",
@@ -4738,8 +4744,8 @@
     },
     {
       "path": "src/features/desktop/__tests__/UsageLivePanel.spec.ts",
-      "bytes": 26454,
-      "sha256": "8ebbe797807590f362bf2454d656f22332c20b75f924cbcd8963b0e6c9b7906e"
+      "bytes": 26336,
+      "sha256": "bdc52f2cedfaaa9f950d7f908a32626c33fc1e15aac2b65964f5a45f1e805374"
     },
     {
       "path": "src/features/desktop/__tests__/UsagePeriodSummary.spec.ts",
@@ -4888,8 +4894,8 @@
     },
     {
       "path": "src/features/desktop/liveRate.ts",
-      "bytes": 1550,
-      "sha256": "264eab85adba1fe5f5158b3c14e9ba05e3aedeb8038300f9811967bc0d32dac5"
+      "bytes": 2287,
+      "sha256": "9329d0bfa947d90b7db00df3fc6e04f14ffcbab1a047bdea263a2f96cc545ed2"
     },
     {
       "path": "src/features/desktop/localCostMath.ts",
@@ -5178,8 +5184,8 @@
     },
     {
       "path": "src/i18n/locales/en/desktop.ts",
-      "bytes": 13907,
-      "sha256": "f6f4201696e6064bd44ea34d42ca98f7f057fdf7397cfd659fed2c591852ea72"
+      "bytes": 13886,
+      "sha256": "f7d11ebd7eea10953f73c2e82c2344c67b78814bbdc20d1e80b7f1e906f82a9d"
     },
     {
       "path": "src/i18n/locales/en/index.ts",
@@ -5198,8 +5204,8 @@
     },
     {
       "path": "src/i18n/locales/en/usageMonitor.ts",
-      "bytes": 74125,
-      "sha256": "b98a1762dcacabc64f87093647887f0c120612995a8147f9a86784e90fb2f165"
+      "bytes": 73805,
+      "sha256": "958156eee9517ff660d6d4d5027598b229ce04844b9dff27d9a53116ec007030"
     },
     {
       "path": "src/i18n/locales/zh/admin/accounts.ts",
@@ -5298,8 +5304,8 @@
     },
     {
       "path": "src/i18n/locales/zh/desktop.ts",
-      "bytes": 13516,
-      "sha256": "50b57710a04ab09955ab3add3f8919cc8a6775d450114fbba1bf00a773879d61"
+      "bytes": 13502,
+      "sha256": "bfb7fb0a29d1f42d218ac81db1616476a2ac171dfdbd23f6d6056f49ecdff612"
     },
     {
       "path": "src/i18n/locales/zh/index.ts",
@@ -5318,8 +5324,8 @@
     },
     {
       "path": "src/i18n/locales/zh/usageMonitor.ts",
-      "bytes": 69492,
-      "sha256": "2e89a65149078d832a34be8aedf740eb4a4e90513196f5496cb52f43e7867ede"
+      "bytes": 69342,
+      "sha256": "6c48f7f3107f90b7d393b6b61dc34c3e8ce95a13a469b3a72eeef661dcfe3836"
     },
     {
       "path": "src/main.ts",
@@ -5858,8 +5864,8 @@
     },
     {
       "path": "src/views/UsageMonitorView.vue",
-      "bytes": 216581,
-      "sha256": "dc6958fc26b3005346a390a1007fb2e2b47a325c86445905122b2378370ef715"
+      "bytes": 222596,
+      "sha256": "7c1b3a1c0c43663ce566a584eb702097c8c1e9c9d82e0057f2fb999bb372563c"
     },
     {
       "path": "src/views/__tests__/ConnectView.spec.ts",
@@ -5893,8 +5899,8 @@
     },
     {
       "path": "src/views/__tests__/UsageMonitorView.spec.ts",
-      "bytes": 185284,
-      "sha256": "a719b67bd891efd9529d2968303e5097968c45c8a1d8708d0bad3c9df7d437c5"
+      "bytes": 193044,
+      "sha256": "edf4dbb3d145fd1192d87bb774485766a82e4452fddbff3caecb838979b2aebb"
     },
     {
       "path": "src/views/admin/AccountsView.vue",

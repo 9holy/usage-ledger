@@ -5,6 +5,7 @@ import { Activity, Info } from '@lucide/vue'
 import type { LiveSnapshot } from '@/api/usageMonitor'
 import { usageModelColor } from './usageChartPalette'
 import { usageLocale } from '@/utils/usageFormat'
+import { lastRateLabel } from './liveRate'
 
 const props = defineProps<{ live?: LiveSnapshot | null; tool?: string | null; running?: number; compact?: boolean }>()
 const { t } = useI18n()
@@ -20,13 +21,18 @@ const models = computed(() => {
   return [...grouped].map(([model, value]) => ({ model, value })).sort((a,b) => b.value-a.value)
 })
 const number = (value: number) => new Intl.NumberFormat(usageLocale(), { maximumFractionDigits: 2, maximumSignificantDigits: 4 }).format(value)
-const updated = computed(() => samples.value.length ? new Date(Math.max(...samples.value.map(row => row.sampledAtMs))).toLocaleTimeString(usageLocale(), { hour12: false }) : null)
+const reading = computed<{ tool?: string | null; value: number; time: number; last: boolean } | undefined>(previous => {
+  if (samples.value.length) return { tool: props.tool, value: total.value, time: Math.max(...samples.value.map(row => row.sampledAtMs)), last: false }
+  if (props.running && previous && previous.tool === props.tool) return { ...previous, last: true }
+  return undefined
+})
+const updated = computed(() => reading.value ? new Date(reading.value.time).toLocaleTimeString(usageLocale(), { hour12: false }) : null)
 </script>
 
 <template>
   <section class="current-speed" :class="{'is-compact':compact}" :aria-label="t('usageMonitor.speed.current')">
-    <div class="current-reading"><span><Activity :size="16" />{{ t('usageMonitor.speed.current') }}<Info :size="13" :aria-label="t('usageMonitor.speed.basis')" :title="t('usageMonitor.speed.basis')" /></span><strong v-if="samples.length">{{ number(total) }}<small>Token/s</small></strong><strong v-else class="speed-waiting">{{ t(running ? 'usageMonitor.text.runningWaitingForUsage' : 'usageMonitor.speed.waiting') }}</strong><small>{{ updated ? t('usageMonitor.speed.updated', { time: updated }) : t('usageMonitor.speed.noContinuousReports') }}</small></div>
-    <div v-if="!compact" class="current-models"><div v-for="row in models" :key="row.model ?? 'unknown'" class="current-model" :style="{ '--current-color': usageModelColor(row.model) }"><span>{{ row.model ?? t('usageMonitor.text.unknownModel') }}</span><strong>{{ number(row.value) }}<small>Token/s</small></strong><i :style="{ width: row.value / total * 100 + '%' }" /></div><p v-if="!samples.length">{{ t('usageMonitor.speed.waitingDetail') }}</p></div>
+    <div class="current-reading"><span><Activity :size="16" />{{ t('usageMonitor.speed.current') }}<Info :size="13" :aria-label="t('usageMonitor.speed.basis')" :title="t('usageMonitor.speed.basis')" /></span><strong v-if="reading">{{ number(reading.value) }}<small>Token/s</small></strong><strong v-else class="speed-waiting">{{ t(running ? 'usageMonitor.text.running' : 'usageMonitor.speed.waiting') }}</strong><small v-if="reading">{{ reading.last ? lastRateLabel(reading.time) : t('usageMonitor.speed.updated', { time: updated }) }}</small></div>
+    <div v-if="!compact" class="current-models"><div v-for="row in models" :key="row.model ?? 'unknown'" class="current-model" :style="{ '--current-color': usageModelColor(row.model) }"><span>{{ row.model ?? t('usageMonitor.text.unknownModel') }}</span><strong>{{ number(row.value) }}<small>Token/s</small></strong><i :style="{ width: row.value / total * 100 + '%' }" /></div></div>
   </section>
 </template>
 

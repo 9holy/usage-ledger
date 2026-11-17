@@ -1,5 +1,5 @@
 {
-  "version": "0.2.51",
+  "version": "0.2.52",
   "repository": "9holy/usage-ledger",
   "directories": ["src", "public", "LICENSES", "src-tauri/src", "src-tauri/icons", "src-tauri/capabilities"],
   "files": [
@@ -23,6 +23,7 @@
     "docs/data-channel-audit-2026-11-07.md", "docs/sub2api-data-contract-audit-2026-11-07.md",
     "docs/cliproxy-data-contract-audit-2026-11-07.md", "docs/cockpit-data-contract-audit-2026-11-07.md",
     "docs/monitor-quota-contract-audit-2026-11-07.md", "docs/release/0.2.38.md", "docs/release/0.2.39.md", "docs/release/0.2.51.md",
+    "docs/release/0.2.52.md",
     "docs/data-channel-completion-2026-11-07.md", "docs/finance-data-contract-audit-2026-11-07.md",
     "docs/cockpit-quota-production-contract-2026-11-07.md", "docs/cliproxy-interface-coverage-2026-11-07.md",
     "docs/sub2api-extension-contract-audit-2026-11-07.md", "docs/monitor-usage-contract-completion-2026-11-07.md",

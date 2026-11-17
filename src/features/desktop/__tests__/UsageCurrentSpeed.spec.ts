@@ -17,8 +17,11 @@ it('separates current measured speed from average output and expires stale sampl
   expect(wrapper.get('.current-reading strong').text()).toBe('60Token/s')
   expect(wrapper.text()).not.toContain('gpt-6.1-sol')
   await vi.advanceTimersByTimeAsync(11000)
-  expect(wrapper.get('.current-reading strong').text()).toBe('运行中，等待用量回传')
+  expect(wrapper.get('.current-reading strong').text()).toBe('60Token/s')
+  expect(wrapper.get('.current-reading').text()).toContain('上次')
   expect(wrapper.find('.current-model').exists()).toBe(false)
+  await wrapper.setProps({ running: 0 })
+  expect(wrapper.get('.current-reading strong').text()).toBe('等待速度数据')
   wrapper.unmount()
 })
 

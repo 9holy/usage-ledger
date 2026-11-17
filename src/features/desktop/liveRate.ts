@@ -4,6 +4,17 @@ import type { LiveWindow } from '@/api/usageMonitor'
 
 const t = i18n.global.t
 
+export interface LastLiveWindow {
+  window: LiveWindow
+  sampledAtMs: number
+}
+
+export type LastLiveWindows = ReadonlyMap<string, ReadonlyMap<number, LastLiveWindow>>
+
+export function lastRateLabel(sampledAtMs: number): string {
+  return t('usageMonitor.speed.lastReading', { time: new Date(sampledAtMs).toLocaleTimeString(usageLocale(), { hour12: false }) })
+}
+
 export function displayLiveRate(window?: LiveWindow, digits = 2): { text: string; value: number | null; partial: boolean } {
   if (!window) return { text: t('usageMonitor.text.noSamples'), value: null, partial: true }
   if (window.outputComplete === false) return { text: t('usageMonitor.text.outputCountIncomplete'), value: null, partial: true }
@@ -23,4 +34,10 @@ export function displayLiveRate(window?: LiveWindow, digits = 2): { text: string
   if (window.complete && window.sourceComplete === false && measured === 0 && window.observedOutputTokens === 0) return { text: t('usageMonitor.text.waitingForNewRecords'), value: null, partial: true }
   if (!partial && measured === 0) return { text: t('usageMonitor.text.noOutput'), value: 0, partial: false }
   return { text: window.coveredMs > 0 ? t('usageMonitor.text.insufficientSampling') : t('usageMonitor.text.noSamples'), value: null, partial }
+}
+
+export function retainLiveRate(rate: ReturnType<typeof displayLiveRate>, running: boolean, last?: LastLiveWindow): ReturnType<typeof displayLiveRate> & { lastAtMs?: number } {
+  if (!running || (rate.value ?? 0) > 0) return rate
+  if (last) return { ...displayLiveRate(last.window), lastAtMs: last.sampledAtMs }
+  return { ...rate, text: t('usageMonitor.text.running') }
 }

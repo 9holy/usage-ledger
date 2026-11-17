@@ -8,8 +8,6 @@ import { i18n, initI18n } from '@/i18n'
 import { invoke } from '@tauri-apps/api/core'
 import desktopZh from '@/i18n/locales/zh/desktop'
 import desktopEn from '@/i18n/locales/en/desktop'
-import usageMonitorZh from '@/i18n/locales/zh/usageMonitor'
-import usageMonitorEn from '@/i18n/locales/en/usageMonitor'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn().mockResolvedValue(undefined) }))
 
@@ -19,8 +17,8 @@ vi.mock('@/router', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks()
-  i18n.global.setLocaleMessage('zh', { desktop: desktopZh, usageMonitor:usageMonitorZh })
-  i18n.global.setLocaleMessage('en', { desktop: desktopEn, usageMonitor:usageMonitorEn })
+  i18n.global.setLocaleMessage('zh', { desktop: desktopZh })
+  i18n.global.setLocaleMessage('en', { desktop: desktopEn })
   i18n.global.locale.value = 'zh'
 })
 afterEach(() => { Reflect.deleteProperty(window, '__TAURI_INTERNALS__') })
@@ -38,14 +36,12 @@ it('keeps the cost workspace selected inside its detail routes and updates acces
     await router.push(path)
     expect(wrapper.get('.workspace-switch [aria-current="page"]').text()).toContain('成本工作台')
     expect(wrapper.findAll('.workspace-switch [aria-current="page"]')).toHaveLength(1)
-    expect(wrapper.find('.workspace-cost-action').exists()).toBe(false)
   }
   await router.push('/usage-monitor')
   expect(wrapper.get('.workspace-switch [aria-current="page"]').text()).toContain('全局用量监控')
   expect(wrapper.get('.workspace-brand').attributes('href')).toBe('/connect')
-  expect(wrapper.get('.workspace-cost-action').text()).toBe('成本管理')
-  await wrapper.get('.workspace-cost-action').trigger('click')
-  expect(wrapper.emitted('costs')).toHaveLength(1)
+  expect(wrapper.get('.workspace-switch .workspace-cost').attributes('href')).toBe('/connect')
+  expect(wrapper.text()).not.toContain('成本管理')
   wrapper.unmount()
 })
 
@@ -65,7 +61,7 @@ it('switches the live header language through the existing locale menu and prese
   await vi.waitFor(() => expect(wrapper.findAll('.workspace-locale button')).toHaveLength(1))
   await flushPromises()
   expect(wrapper.get('.workspace-brand strong').text()).toBe('Usage Ledger')
-  expect(wrapper.get('.workspace-cost-action').text()).toBe('Manage costs')
+  expect(wrapper.text()).not.toContain('Manage costs')
   expect(wrapper.get('.workspace-switch').attributes('aria-label')).toBe('Workspace navigation')
   expect(wrapper.get('.workspace-switch [aria-current="page"]').text()).toContain('Usage Monitor')
   expect(localStorage.getItem('sub2api_locale')).toBe('en')
