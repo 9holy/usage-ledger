@@ -30,6 +30,11 @@ function rate(window?: LiveWindow, legacy?: number): ReturnType<typeof displayLi
 }
 const running = computed(() => !!props.snapshot?.collectedAtMs && (props.snapshot.rateSessions ?? props.snapshot.activeSessions ?? []).some(session =>
   (!props.tool || session.tool === props.tool) && ['active', 'running'].includes(session.status)))
+const concurrentSessions = computed(() => {
+  const snapshot = props.snapshot
+  if (!snapshot?.collectedAtMs) return null
+  return (props.tool ? snapshot.toolStatusCounts?.[props.tool] : snapshot.statusCounts)?.running ?? null
+})
 const totalRate = computed(() => retainLiveRate(rate(totalWindow.value, props.snapshot?.totals.outputTokensPerSecond), running.value, props.lastWindows?.get('')?.get(seconds.value)))
 const formatMeasuredRate = (value: number) => value < .01 ? new Intl.NumberFormat(usageLocale(), { maximumSignificantDigits: 2, useGrouping: false }).format(value) : value.toFixed(2)
 function coverage(window?: LiveWindow): string {
@@ -212,6 +217,7 @@ function name(project: string | null, id: string): string { return project?.spli
       <div class="global-rate">
         <span :title="t('usageMonitor.text.averageRateNotTokenByTokenGenerationSpeed')">{{ tool ? toolName(tool) : t('usageMonitor.text.global') }} · {{ t('usageMonitor.text.averageOutputRate') }} <Info :size="14" aria-hidden="true" /></span>
         <strong :class="{ 'rate-state': !(totalRate.value != null && totalRate.value > 0) }">{{ totalRate.text }} <small v-if="totalRate.value != null && totalRate.value > 0">{{ t('usageMonitor.text.tokensS4') }}</small></strong>
+        <span class="concurrent-sessions">{{ t('usageMonitor.speed.concurrentSessions') }} <b>{{ concurrentSessions?.toLocaleString(usageLocale()) ?? '—' }}</b></span>
         <p v-if="totalRate.lastAtMs != null">{{ lastRateLabel(totalRate.lastAtMs) }}</p>
         <p v-else-if="totalWindow?.sourceComplete === false || (!tool && snapshot?.live?.sourceCoverageIncomplete)" class="partial" :title="coverage(totalWindow)">{{ t('usageMonitor.text.someToolsAreTemporarilyUnreadableTotalsIncludeOnlyCollected') }}</p>
         <p v-else-if="!running || (totalRate.value ?? 0) > 0">{{ coverage(totalWindow) }}</p>
@@ -255,5 +261,6 @@ function name(project: string | null, id: string): string { return project?.spli
 .chart-legend{display:flex;gap:18px;font-size:12px;color:#9bafa2}.chart-legend span{display:flex;align-items:center;gap:7px}.chart-legend i{height:8px;width:8px;border-radius:2px;background:var(--usage-output)}.chart-legend span+span i{background:var(--usage-requests);border-radius:0;transform:rotate(45deg)}.hour-statistics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px;margin:16px 0 20px}.hour-statistics span{display:block;color:#95a99b;font-size:11px}.hour-statistics strong{display:block;margin-top:6px;font-size:23px;font-weight:600;font-variant-numeric:tabular-nums}.hour-statistics small{font-size:11px;color:#95a99b;font-weight:400}.minute-chart .chart-canvas{height:280px}.activity-scale{display:flex;justify-content:center;align-items:center;gap:9px;font-size:11px;color:#a0b3a8;margin:-4px 0 8px}.activity-scale i{display:block;width:110px;height:6px;border-radius:3px;background:var(--usage-intensity)}@media(max-width:600px){.minute-chart .chart-canvas{height:230px}.hour-statistics{grid-template-columns:repeat(2,minmax(0,1fr))}}.minute-presence{display:grid;grid-template-columns:repeat(60,minmax(0,1fr));gap:3px;margin:8px 0 12px;padding:0 38px}.minute-presence i{height:5px;background:#25302a;border-radius:1px}.minute-presence .present{background:var(--usage-output)}.minute-presence .partial{background:repeating-linear-gradient(135deg,var(--usage-warning) 0 3px,#101413 3px 5px)}.minute-chart .coverage-note{line-height:1.7;max-width:1000px}
 @media(max-width:800px){.live-band{grid-template-columns:minmax(0,1fr)}.global-rate{border-right:0}.rate-sessions{padding-top:16px;border-top:1px solid var(--cost-line)}.global-rate strong{font-size:36px}.chart-title h2 small{display:block;margin:6px 0 0}.rate-session{flex-basis:220px}}
 .rate-session:disabled,.spectrum-legend button:disabled{opacity:1;cursor:default}.rate-session:disabled>span,.spectrum-legend button:disabled>span{color:var(--usage-unknown)}
+.global-rate>.concurrent-sessions{font-size:13px;color:var(--cost-text)}.concurrent-sessions b{color:var(--usage-input);font-size:18px;font-variant-numeric:tabular-nums}
 .global-rate strong.rate-state{font-size:24px;white-space:normal;overflow-wrap:anywhere}.rate-session strong.rate-state{font-size:20px}.orbit-label strong.rate-state{font-size:18px}.contribution-layout .spectrum-legend b.rate-state{font-size:15px}.recent-request-speed{overflow-wrap:anywhere}
 </style>

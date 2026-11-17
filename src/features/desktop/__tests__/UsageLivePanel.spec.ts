@@ -17,6 +17,24 @@ function snapshot(): MonitorSnapshot {
 }
 
 describe('UsageLivePanel', () => {
+  it('shows only running sessions beside the total rate, scoped to the selected tool', async () => {
+    const counts = { running: 5, recent: 8, stale: 2, idle: 9, unknown: 1, activeLast30m: 15 }
+    const data = { ...snapshot(), statusCounts: counts, toolStatusCounts: { codex: { ...counts, running: 3 }, claude: { ...counts, running: 0 } } }
+    const wrapper = mount(UsageLivePanel, { props: { snapshot: null, tool: null } })
+    const count = () => wrapper.get('.concurrent-sessions b').text()
+    expect(count()).toBe('—')
+    await wrapper.setProps({ snapshot: data })
+    expect(wrapper.get('.concurrent-sessions').text()).toBe('并发会话 5')
+    await wrapper.get('[aria-label="速率分组"]').findAll('button')[1].trigger('click')
+    expect(count()).toBe('5')
+    await wrapper.setProps({ tool: 'codex' })
+    expect(count()).toBe('3')
+    await wrapper.setProps({ tool: 'claude' })
+    expect(count()).toBe('0')
+    await wrapper.setProps({ tool: 'api' })
+    expect(count()).toBe('—')
+  })
+
   it('renders Codex and Claude together and shares rate-window changes with the header', async () => {
     const data=snapshot()
     data.live!.windows=[window(60,900),window(300,900)]

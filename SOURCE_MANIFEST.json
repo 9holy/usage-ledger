@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "version": "0.2.52",
   "repository": "9holy/usage-ledger",
-  "freeze": "v0.2.52-model-pricing",
-  "createdAt": "2026-11-17T20:56:28.048Z",
+  "freeze": "v0.2.52-concurrent-sessions",
+  "createdAt": "2026-11-17T21:59:32.107Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.52",
@@ -389,8 +389,8 @@
     },
     {
       "path": "docs/release/0.2.52.md",
-      "bytes": 1961,
-      "sha256": "82589d3dd8f8b33972678c12d90e2758919054ec0ad249dc157c27c7d2ca5f45"
+      "bytes": 2287,
+      "sha256": "0b3e91c5ca9434aa8c1ee1a9ae37ef264caeabb3070065bc509d35fbd438e089"
     },
     {
       "path": "docs/screenshots/README.md",
@@ -4579,8 +4579,8 @@
     },
     {
       "path": "src/features/desktop/UsageLivePanel.vue",
-      "bytes": 38900,
-      "sha256": "c645fe5264b8ba075caad1103c5f22c85beedc7fff8f56b592cf94edb50aa261"
+      "bytes": 39470,
+      "sha256": "22cfba97003ac70eb49225a81c1d93d76c8711ae5eb31e3671e61e532580b301"
     },
     {
       "path": "src/features/desktop/UsageModeEvidence.vue",
@@ -4744,8 +4744,8 @@
     },
     {
       "path": "src/features/desktop/__tests__/UsageLivePanel.spec.ts",
-      "bytes": 26336,
-      "sha256": "bdc52f2cedfaaa9f950d7f908a32626c33fc1e15aac2b65964f5a45f1e805374"
+      "bytes": 27347,
+      "sha256": "0be8d032f367c30c8687b2a4b4804e6073bd8655eefc05f7cb90bc380e639cca"
     },
     {
       "path": "src/features/desktop/__tests__/UsagePeriodSummary.spec.ts",
@@ -5204,8 +5204,8 @@
     },
     {
       "path": "src/i18n/locales/en/usageMonitor.ts",
-      "bytes": 73805,
-      "sha256": "958156eee9517ff660d6d4d5027598b229ce04844b9dff27d9a53116ec007030"
+      "bytes": 73848,
+      "sha256": "1399473d3e0a03fb3fa4a5ab05e4968f72a31666f91be7b23076aededef7e43b"
     },
     {
       "path": "src/i18n/locales/zh/admin/accounts.ts",
@@ -5324,8 +5324,8 @@
     },
     {
       "path": "src/i18n/locales/zh/usageMonitor.ts",
-      "bytes": 69342,
-      "sha256": "6c48f7f3107f90b7d393b6b61dc34c3e8ce95a13a469b3a72eeef661dcfe3836"
+      "bytes": 69378,
+      "sha256": "68c4a3a1aa092105c95bce1da43afdd73e4451dc08c889527ffd787661aa37fc"
     },
     {
       "path": "src/main.ts",

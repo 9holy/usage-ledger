@@ -14,7 +14,7 @@ export default {
   },
   fusion: { overallCosts: '投入与成本', accountCosts: '本期用量与成本', accountsComparison: '全部账号成本对比', accountDetails: '账号明细', periodUsageUsd: '本期已用金额', factorBasis: '仅统计同时有成本和用量估值的账号，用同一时段的成本除以对应估值，统一换算成人民币。' },
   costs: { tab: '账号与成本', title: '成本总览', customDates: '自定义日期', fromDate: '开始日期', toDate: '结束日期', invalidDates: '请选择有效的开始和结束日期', overview: '成本概览', details: '查看完整成本', allAccounts: '全部账号', api: 'API' },
-  speed: { activity: '实时输出与活动', current: '当前输出速度', live: '实时', waiting: '等待速度数据', lastReading: '上次 {time}', lastValue: '{value}（上次）', updated: '更新于 {time}', basis: '用同一次请求的连续输出记录计算。', average: '平均输出速度' },
+  speed: { activity: '实时输出与活动', current: '当前输出速度', live: '实时', waiting: '等待速度数据', lastReading: '上次 {time}', lastValue: '{value}（上次）', updated: '更新于 {time}', basis: '用同一次请求的连续输出记录计算。', average: '平均输出速度', concurrentSessions: '并发会话' },
   format: {
     cannotEstimate: '无法估算',
     completeCacheFields: '输入和缓存信息齐全 {known} / {total} 次',

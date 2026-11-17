@@ -14,7 +14,7 @@ export default {
   },
   fusion: { overallCosts: 'Outlay & costs', accountCosts: 'Period usage & costs', accountsComparison: 'Costs across all accounts', accountDetails: 'Account details', periodUsageUsd: 'Usage value this period', factorBasis: 'Only accounts with both a cost and a usage value are included. Cost is divided by the matching usage value for the same period, converted to CNY.' },
   costs: { tab: 'Accounts & costs', title: 'Cost overview', customDates: 'Custom dates', fromDate: 'Start date', toDate: 'End date', invalidDates: 'Choose a valid start and end date', overview: 'Cost summary', details: 'View full costs', allAccounts: 'All accounts', api: 'API' },
-  speed: { activity: 'Live output & activity', current: 'Current output speed', live: 'Live', waiting: 'Waiting for speed data', lastReading: 'Last reading {time}', lastValue: '{value} (last)', updated: 'Updated at {time}', basis: 'Measured between output updates for the same request.', average: 'Average output speed' },
+  speed: { activity: 'Live output & activity', current: 'Current output speed', live: 'Live', waiting: 'Waiting for speed data', lastReading: 'Last reading {time}', lastValue: '{value} (last)', updated: 'Updated at {time}', basis: 'Measured between output updates for the same request.', average: 'Average output speed', concurrentSessions: 'Concurrent sessions' },
   format: {
     cannotEstimate: 'Cannot estimate',
     completeCacheFields: 'Complete input and cache fields: {known} / {total} requests',
