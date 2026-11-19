@@ -256,8 +256,7 @@ describe('CostCenter operating integration', () => {
     expect(cockpitApi.writeCostLedger).not.toHaveBeenCalled()
     expect(shared.data.cockpitSourceInstanceId.value).toBe('local')
     expect(shared.data.opsOverview.value?.request_count_total).toBe(1)
-    expect(shared.data.error.value).toContain('保留原文件并跳过写回')
-    expect(shared.data.error.value).toContain('fixture ledger read denied')
+    expect(shared.data.error.value).toBe('暂时读不到已保存的 Cockpit 用量，原记录未改动。')
   })
 
   it('rejects a mixed-root primary batch before any saved-ledger write', async () => {
@@ -276,13 +275,14 @@ describe('CostCenter operating integration', () => {
     expect(shared.data.sourceStates.value.rangeStats.status).toBe('unavailable')
   })
 
-  it('keeps duplicate-email raw rows separate and does not persist an ambiguous email ledger', async () => {
-    const { state, stats } = await openCockpitModelFixture()
+  it('stores same-email accounts by separate IDs without assigning the older email-only history', async () => {
+    const { view, state, stats } = await openCockpitModelFixture()
+    const legacy = { email: 'same@example.invalid', updatedAt: 1, usage: { ...stats.totals, estimatedCostUsd: 9 } }
     stats.accounts = [
       { accountId: 'raw-A', email: 'same@example.invalid', usage: { ...stats.totals, estimatedCostUsd: 2 } },
       { accountId: 'raw-B', email: 'same@example.invalid', usage: { ...stats.totals, estimatedCostUsd: 1 } },
     ]
-    vi.mocked(cockpitApi.readCostLedger).mockResolvedValue({ accounts: [] })
+    vi.mocked(cockpitApi.readCostLedger).mockResolvedValue({ accounts: [legacy] })
     vi.mocked(cockpitApi.writeCostLedger).mockClear()
     state.activePanel = 'unified'; await flushPromises()
     const reads = vi.mocked(cockpitApi.getCockpitStats).mock.calls.length
@@ -293,9 +293,14 @@ describe('CostCenter operating integration', () => {
     expect(shared.unifiedLoad).toHaveBeenLastCalledWith('1h', expect.any(Object), expect.objectContaining({ stats }))
     expect(stats.accounts.map(row => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 1]])
     expect(state.cockpitStats.accounts.map((row: cockpitApi.CockpitStats['accounts'][number]) => [row.accountId, row.usage.estimatedCostUsd])).toEqual([['raw-A', 2], ['raw-B', 1]])
-    expect(cockpitApi.writeCostLedger).not.toHaveBeenCalled()
-    expect(shared.data.error.value).toContain('保留原文件并跳过写回')
-    expect(shared.data.error.value).toMatch(/ambiguous/i)
+    expect(cockpitApi.writeCostLedger).toHaveBeenCalledOnce()
+    const [stored, scope] = vi.mocked(cockpitApi.writeCostLedger).mock.calls[0]
+    expect(scope).toBe('local')
+    expect(stored.filter(row => row.accountId == null)).toEqual([legacy])
+    expect(stored.filter(row => row.accountId != null).map(row => [row.accountId, row.usage.estimatedCostUsd]))
+      .toEqual([['raw-A', 2], ['raw-B', 1]])
+    expect(shared.data.error.value).toBe('')
+    expect(view.text()).toContain('1 条旧用量记录无法确认属于哪个账号，已原样保留。')
   })
 
   it('updates current import and fullscreen failure prefixes without rerunning operations or translating raw details', async () => {

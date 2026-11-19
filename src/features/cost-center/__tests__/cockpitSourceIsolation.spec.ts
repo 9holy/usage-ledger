@@ -176,6 +176,6 @@ describe('Cockpit physical source isolation', () => {
     const block = view.slice(start, end)
     expect(block).toContain('assertCockpitSourceIdentity(sourceInstanceId)')
     expect(block.indexOf('assertCockpitSourceIdentity(sourceInstanceId)')).toBeLessThan(block.indexOf('writeCostLedger('))
-    expect(block).toContain('writeCostLedger(mergedLedger, sourceInstanceId)')
+    expect(block).toContain('writeCostLedger(entries, sourceInstanceId)')
   })
 })

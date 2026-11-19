@@ -3,7 +3,7 @@
   "version": "0.2.52",
   "repository": "9holy/usage-ledger",
   "freeze": "v0.2.52-verified-desktop-fixes",
-  "createdAt": "2026-11-19T19:05:28.207Z",
+  "createdAt": "2026-11-19T19:11:20.446Z",
   "gitHistoryIncluded": false,
   "policy": {
     "version": "0.2.52",
@@ -3909,8 +3909,8 @@
     },
     {
       "path": "src/features/cost-center/__tests__/cockpitSourceIsolation.spec.ts",
-      "bytes": 11431,
-      "sha256": "3b83313a8b64f9aa14eb848246d69c357f0ade25fc2740fc854f93371d3ce192"
+      "bytes": 11426,
+      "sha256": "23d46730018e83dec44adca81828aeb18811b3d8078c921607b983a0c9c23bee"
     },
     {
       "path": "src/features/cost-center/__tests__/cockpitWindowCoverage.spec.ts",
@@ -5894,8 +5894,8 @@
     },
     {
       "path": "src/views/__tests__/CostCenterOperating.spec.ts",
-      "bytes": 67205,
-      "sha256": "58da3d696e5637d3de6cdc75af20476b94a1016f0ea6d44dbb723946d32524fc"
+      "bytes": 67650,
+      "sha256": "bf8db58a7abd3a337ff6a162313314caee2d64459573ac2f4e5da1c3341d59ee"
     },
     {
       "path": "src/views/__tests__/HomeView.compact.spec.ts",
