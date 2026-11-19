@@ -59,9 +59,12 @@ export interface AccountUsage extends AccountUsagePeriods {
   attribution: 'session_creator' | 'request_evidence_with_creator_reference'
   /** Unique cross-match within collected request logs, not official billing confirmation. */
   billingAccountVerified?: boolean
+  hasStoredHistory?: boolean
   verifiedWeekRequests?: number
   creatorReferenceWeekRequests?: number
   verifiedHistory?: AccountUsagePeriod | null
+  /** Historical display only: disjoint confirmed and creator-reference usage. */
+  historicalSubscriptionEstimate?: MonitorTotals
   subscription: AccountSubscription
   /** Unverified creator grouping; a subset of unassigned usage, never additive. */
   creatorReference?: AccountUsagePeriods
@@ -93,6 +96,24 @@ export function getUsageMonitorAccounts(weekStartMs: number, nowMs: number): Pro
   const now = new Date(nowMs)
   const monthStartMs = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
   return invoke('usage_monitor_accounts', { weekStartMs, nowMs, monthStartMs })
+}
+
+export interface SubscriptionCycle {
+  id: string
+  startMs: number
+  endMs: number
+  kind: 'recorded' | 'estimated' | 'validity' | 'unconfirmed'
+  current: boolean
+}
+
+export function getSubscriptionCycles(accountKey: string): Promise<SubscriptionCycle[]> {
+  desktop()
+  return invoke('usage_monitor_subscription_cycles', { accountKey })
+}
+
+export function getSubscriptionCycleUsage(accountKey: string, periodId: string): Promise<AccountUsage | null> {
+  desktop()
+  return invoke('usage_monitor_subscription_cycle_usage', { accountKey, periodId })
 }
 
 export function setUsageAccountName(accountKey: string, name: string): Promise<void> {

@@ -37,7 +37,7 @@
     <FinanceBatchEditor v-if="batchOpen" :key="batchInitial?.batchId ?? 'new'" :scope="{ source, instanceId }" :accounts="accounts" :channels="snapshot?.purchaseChannels ?? []" :initial="batchInitial" @cancel="batchOpen = false" @saved="batchSaved" @busy="saving = $event" />
 
     <form v-if="editing" class="finance-form" :aria-label="t('costComponents.financialEventForm')" @submit.prevent="submit">
-      <label> {{ t('costComponents.account') }} <select v-if="restrictAccounts" v-model="form.accountId" :disabled="!!form.id || saving" required><option value="" disabled>{{ t('costComponents.account') }}</option><option v-for="account in accounts" :key="account.id" :value="account.id">{{ account.name }}</option></select><input v-else v-model="form.accountId" :list="optionsId" :disabled="!!form.id || saving" required maxlength="512" /></label>
+      <label> {{ t('costComponents.account') }} <select v-if="restrictAccounts" v-model="form.accountId" :disabled="!!form.id || saving" required @change="fillBillingPeriod"><option value="" disabled>{{ t('costComponents.account') }}</option><option v-for="account in accounts" :key="account.id" :value="account.id">{{ account.name }}</option></select><input v-else v-model="form.accountId" :list="optionsId" :disabled="!!form.id || saving" required maxlength="512" /></label>
       <datalist :id="optionsId"><option v-for="account in accounts" :key="account.id" :value="account.id">{{ account.name }}</option></datalist>
       <label> {{ t('costComponents.event') }} <select v-model="form.kind" :disabled="saving"><option v-for="(label, kind) in kindLabels" :key="kind" :value="kind">{{ label }}</option></select></label>
       <label> {{ t('costComponents.amount') }} <input v-model="form.amount" type="number" min="0" step="any" inputmode="decimal" :disabled="saving" required /></label>
@@ -46,6 +46,7 @@
       <template v-if="isPurchase">
         <label> {{ t('costComponents.coverageStart') }} <input v-model="form.coverageStart" type="datetime-local" step="0.001" :disabled="saving" /></label>
         <label> {{ t('costComponents.coverageEnd') }} <input v-model="form.coverageEnd" type="datetime-local" step="0.001" :disabled="saving" /></label>
+        <button v-if="billingPeriod && !form.coverageStart && !form.coverageEnd" type="button" class="finance-button" :disabled="saving" @click="fillBillingPeriod">{{ t('costComponents.useCurrentBillingPeriod') }}</button>
         <label> {{ t('costComponents.purchaseChannel') }} <input v-model="form.purchaseChannel" :list="`${optionsId}-channels`" maxlength="512" :disabled="saving" /></label>
         <datalist :id="`${optionsId}-channels`"><option v-for="channel in snapshot?.purchaseChannels ?? []" :key="channel" :value="channel" /></datalist>
         <label> {{ t('costComponents.plan') }} <input v-model="form.planLabel" maxlength="512" :disabled="saving" /></label>
@@ -97,7 +98,7 @@ import { getFinanceBatch, getFinanceLedger, getFinanceRelatedEvents, saveFinance
 import FinanceBatchEditor from './FinanceBatchEditor.vue'
 import { formatMoney } from '../model'
 
-const props = withDefaults(defineProps<{ source: FinanceSource; instanceId: string; startMs: number; endMs: number; accounts?: Array<{ id: string; name: string }>; restrictAccounts?: boolean }>(), { accounts: () => [], restrictAccounts: false })
+const props = withDefaults(defineProps<{ source: FinanceSource; instanceId: string; startMs: number; endMs: number; accounts?: Array<{ id: string; name: string; billingPeriod?: { startMs: number; endMs: number } }>; restrictAccounts?: boolean }>(), { accounts: () => [], restrictAccounts: false })
 const emit = defineEmits<{ changed: [] }>()
 const optionsId = `finance-accounts-${getCurrentInstance()!.uid}`
 const kindLabels = computed<Record<FinanceEventKind, string>>(() => ({ purchase: t('costComponents.purchase'), renewal: t('costComponents.renewal'), refund: t('costComponents.refunds'), termination_loss: t('costComponents.terminationLoss') }))
@@ -134,6 +135,12 @@ const money = (amount: number, currency: FinanceCurrency) => formatMoney(amount,
 const when = (value: number) => new Date(value).toLocaleString(getLocale(), { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 const accountName = (id: string) => props.accounts.find(account => account.id === id)?.name ?? id
 const localInput = (time: number) => { const date = new Date(time); return new Date(time - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 23) }
+const billingPeriod = computed(() => props.accounts.find(account => account.id === form.accountId)?.billingPeriod)
+
+function fillBillingPeriod() {
+  form.coverageStart = billingPeriod.value ? localInput(billingPeriod.value.startMs) : ''
+  form.coverageEnd = billingPeriod.value ? localInput(billingPeriod.value.endMs) : ''
+}
 
 function resolveTime(field: keyof typeof epochKeys): number | null {
   if (original.value && form[field] === original.value[field]) return original.value.event[epochKeys[field]] ?? null
@@ -154,12 +161,15 @@ async function reload() {
   finally { if (sequence === readSequence) loading.value = false }
 }
 
-async function openEditor(event?: FinanceEvent) {
+async function openEditor(event?: FinanceEvent, accountId = accountFilter.value) {
   if (event?.batchId) { await openBatch(event.batchId); return }
   batchOpen.value = false
   const occurredAtMs = event?.occurredAtMs ?? Date.now()
-  Object.assign(form, { id: event?.id ?? '', accountId: event?.accountId ?? accountFilter.value, kind: event?.kind ?? 'purchase', amount: event ? String(event.amount) : '', currency: event?.currency ?? 'CNY', occurredAt: localInput(occurredAtMs), coverageStart: event?.coverageStartMs != null ? localInput(event.coverageStartMs) : '', coverageEnd: event?.coverageEndMs != null ? localInput(event.coverageEndMs) : '', note: event?.note ?? '', purchaseChannel: event?.purchaseChannel ?? '', planLabel: event?.planLabel ?? '', relatedEventId: event?.relatedEventId ?? '' })
-  original.value = { event: { occurredAtMs, coverageStartMs: event?.coverageStartMs, coverageEndMs: event?.coverageEndMs }, occurredAt: form.occurredAt, coverageStart: form.coverageStart, coverageEnd: form.coverageEnd }
+  const defaults = event ? undefined : props.accounts.find(account => account.id === accountId)?.billingPeriod
+  const coverageStartMs = event?.coverageStartMs ?? defaults?.startMs
+  const coverageEndMs = event?.coverageEndMs ?? defaults?.endMs
+  Object.assign(form, { id: event?.id ?? '', accountId: event?.accountId ?? accountId, kind: event?.kind ?? 'purchase', amount: event ? String(event.amount) : '', currency: event?.currency ?? 'CNY', occurredAt: localInput(occurredAtMs), coverageStart: coverageStartMs != null ? localInput(coverageStartMs) : '', coverageEnd: coverageEndMs != null ? localInput(coverageEndMs) : '', note: event?.note ?? '', purchaseChannel: event?.purchaseChannel ?? '', planLabel: event?.planLabel ?? '', relatedEventId: event?.relatedEventId ?? '' })
+  original.value = { event: { occurredAtMs, coverageStartMs, coverageEndMs }, occurredAt: form.occurredAt, coverageStart: form.coverageStart, coverageEnd: form.coverageEnd }
   editing.value = true
 }
 
@@ -221,7 +231,7 @@ watch(() => [editing.value, form.accountId, form.currency, isPurchase.value, pro
   finally { if (sequence === relatedSequence) relatedLoading.value = false }
 })
 function selectAccount(id: string) { accountFilter.value = id }
-function openEntry(id: string) { void openEditor(); form.accountId = id }
+function openEntry(id: string) { void openEditor(undefined, id) }
 defineExpose({ reload, selectAccount, openEntry })
 </script>
 

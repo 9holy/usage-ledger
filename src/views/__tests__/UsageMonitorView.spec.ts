@@ -6,7 +6,7 @@ import { routeLocationKey } from 'vue-router'
 import UsageMonitorView from '../UsageMonitorView.vue'
 import CostLineChart from '@/features/cost-center/components/CostLineChart.vue'
 import { usageColors, usageModelColor, usageModeColor } from '@/features/desktop/usageChartPalette'
-import { getUsageMonitorSnapshot, getUsageMonitorAnalysis, getUsageMonitorSession, getUsageMonitorWeekly, getUsageMonitorQuotas, monitorWeekBounds, type MonitorQuota, type MonitorSnapshot, type MonitorAnalysis, type MonitorRequest, type MonitorCostEstimate, type PriceEvidence, type MonitorSessionDetail } from '@/api/usageMonitor'
+import { getUsageMonitorSnapshot, retryUsageMonitorStorage, getUsageMonitorAnalysis, getUsageMonitorSession, getUsageMonitorWeekly, getUsageMonitorQuotas, monitorWeekBounds, type MonitorQuota, type MonitorSnapshot, type MonitorAnalysis, type MonitorRequest, type MonitorCostEstimate, type PriceEvidence, type MonitorSessionDetail } from '@/api/usageMonitor'
 import { getModelCatalogStatus, quoteModelCatalogBatch } from '@/api/modelCatalog'
 import { isDesktopRuntime } from '@/api/url'
 import { getUsageMonitorAccounts, type AccountUsage } from '@/api/usageAccounts'
@@ -21,7 +21,7 @@ vi.mock('@/api/monitorUpstreams',async()=>{const {ref}=await import('vue');retur
 vi.mock('@/features/desktop/useMonitorCosts',async()=>{const {ref}=await import('vue');return{useMonitorCosts:()=>({data:ref(costState.data),rows:ref(costState.rows),error:ref(''),busy:ref(false),saving:ref(false),reload:vi.fn(),save:vi.fn()})}})
 vi.mock('@/api/usageMonitor', async (original) => ({
   ...await original<typeof import('@/api/usageMonitor')>(),
-  getUsageMonitorSnapshot: vi.fn(), getUsageMonitorAnalysis: vi.fn(), getUsageMonitorSession: vi.fn(), getUsageMonitorWeekly: vi.fn(), getUsageMonitorQuotas: vi.fn(),
+  getUsageMonitorSnapshot: vi.fn(), retryUsageMonitorStorage: vi.fn(), getUsageMonitorAnalysis: vi.fn(), getUsageMonitorSession: vi.fn(), getUsageMonitorWeekly: vi.fn(), getUsageMonitorQuotas: vi.fn(),
 }))
 vi.mock('@/api/modelCatalog', () => ({ getModelCatalogStatus: vi.fn(), refreshModelCatalog: vi.fn(), quoteModelCatalogBatch: vi.fn() }))
 vi.mock('@/api/usageAccounts', async original => ({ ...await original<typeof import('@/api/usageAccounts')>(), getUsageMonitorAccounts: vi.fn() }))
@@ -90,6 +90,21 @@ describe('UsageMonitorView', () => {
     vi.mocked(getUsageMonitorAccounts).mockResolvedValue({ collectedAtMs: NOW, weekStartMs: monitorWeekBounds(NOW).startMs, accounts: [], unassignedWeek: { ...snapshot().totals, requestCount: 0 } })
     vi.mocked(getModelCatalogStatus).mockResolvedValue({ available: true, revision: 'test', checkedAtMs: NOW, fetchedAtMs: NOW, etag: null, refreshing: false, error: null, modelCount: 10, sourceUrl: 'https://models.dev/api.json' })
     vi.mocked(quoteModelCatalogBatch).mockResolvedValue([])
+  })
+
+  it('explains a disk space pause and retries only when the user asks', async () => {
+    vi.mocked(getUsageMonitorSnapshot).mockResolvedValue({ ...snapshot(), storagePaused: true, error: 'database or disk is full' })
+    vi.mocked(retryUsageMonitorStorage).mockResolvedValue(undefined)
+    wrapper = mount(UsageMonitorView, options)
+    await flushPromises()
+    expect(wrapper.get('.monitor-storage-retry').text()).toBe('重试采集')
+    expect(wrapper.get('.notice.error').text()).toContain('已保存的记录仍在')
+    expect(retryUsageMonitorStorage).not.toHaveBeenCalled()
+    vi.mocked(getUsageMonitorSnapshot).mockResolvedValue(snapshot())
+    await wrapper.get('.monitor-storage-retry').trigger('click')
+    await flushPromises()
+    expect(retryUsageMonitorStorage).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.monitor-storage-retry').exists()).toBe(false)
   })
   afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.restoreAllMocks(); vi.useRealTimers() })
 
@@ -622,6 +637,21 @@ describe('UsageMonitorView', () => {
     expect(localStorage.getItem(ACCOUNT_QUOTA_SNAPSHOTS_KEY)).toBe(stored)
   })
 
+  it('keeps an account with saved history accessible without a fresh reading', async () => {
+    const current = forecastAccount(), old = { ...forecastAccount('codex:earlier'), hasStoredHistory: true }
+    const metered = { ...forecastAccount('codex:metered'), hasStoredHistory: true, billingKind: 'api' as const }
+    vi.mocked(getUsageMonitorAccounts).mockResolvedValue({ collectedAtMs: NOW, weekStartMs: monitorWeekBounds(NOW).startMs,
+      currentAccountKey: current.accountKey, accounts: [current, old, metered], unassignedWeek: { ...snapshot().totals, requestCount: 0 } })
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [forecastQuota()] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const selector = wrapper.get<HTMLSelectElement>('[aria-label="额度账号"]')
+    expect(selector.element.value).toBe(current.accountKey)
+    expect(selector.findAll('option').map(option => option.element.value)).toContain(old.accountKey)
+    expect(selector.findAll('option').map(option => option.element.value)).not.toContain(metered.accountKey)
+    await selector.setValue(old.accountKey); await flushPromises()
+    expect(wrapper.getComponent(UsageAccountPeriods).props('account').accountKey).toBe(old.accountKey)
+  })
+
   it('hides only another account display, persists that choice and restores it without changing ledger data', async () => {
     mockSelectableQuotaAccounts()
     wrapper = mount(UsageMonitorView, options); await flushPromises()
@@ -634,14 +664,19 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.account-quota-forecast').text()).not.toContain('≈ $500')
     const history = wrapper.get<HTMLDetailsElement>('.quota-group:not(.current-quotas)')
     history.element.open = true; await history.trigger('toggle'); await flushPromises()
-    expect(history.findAll('.allowance-item')).toHaveLength(2)
+    expect(history.findAll('.allowance-item')).toHaveLength(1)
+    expect(history.text()).not.toContain('Anonymous session')
     await wrapper.get('[aria-label="删除账号显示"]').trigger('click'); await flushPromises()
     expect(JSON.parse(localStorage.getItem(HIDDEN_QUOTA_ACCOUNTS_KEY)!)).toEqual(['codex:2'])
     expect(wrapper.get('[aria-label="额度账号"]').findAll('option')).toHaveLength(1)
     expect(wrapper.get('.current-quotas').text()).not.toContain('账号 2')
     expect(wrapper.find('.historical-credit').exists()).toBe(false)
-    expect(history.findAll('.allowance-item')).toHaveLength(1)
-    expect(history.text()).toContain('Anonymous session')
+    expect(wrapper.find('.quota-group:not(.current-quotas)').exists()).toBe(false)
+    const sessions = wrapper.get<HTMLDetailsElement>('.quota-source-details .session-quota-details')
+    expect(sessions.get('summary').text()).toContain('会话额度记录（未标明账号）')
+    expect(sessions.find('[role="region"]').exists()).toBe(false)
+    sessions.element.open = true; await sessions.trigger('toggle'); await flushPromises()
+    expect(sessions.text()).toContain('Anonymous session')
     expect(getUsageMonitorQuotas).toHaveBeenCalledTimes(1)
     expect(getUsageMonitorAccounts).toHaveBeenCalledTimes(1)
     expect(wrapper.get('.account-quota-forecast').text()).toContain('≈ $500')
@@ -683,10 +718,11 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.allowance-overview').text()).toContain('暂无显示的账号')
     expect(wrapper.get('.hidden-quota-accounts>summary').text()).toBe('已隐藏账号 2')
     expect(wrapper.find('.quota-source-details').exists()).toBe(true)
-    const history = wrapper.get<HTMLDetailsElement>('.quota-group:not(.current-quotas)')
-    history.element.open = true; await history.trigger('toggle'); await flushPromises()
-    expect(history.findAll('.allowance-item')).toHaveLength(1)
-    expect(history.text()).toContain('Anonymous session')
+    expect(wrapper.find('.quota-group:not(.current-quotas)').exists()).toBe(false)
+    const sessions = wrapper.get<HTMLDetailsElement>('.session-quota-details')
+    sessions.element.open = true; await sessions.trigger('toggle'); await flushPromises()
+    expect(sessions.findAll('.quota-source-note')).toHaveLength(1)
+    expect(sessions.text()).toContain('Anonymous session')
   })
 
   it.each(['{', '["codex:2",42]'])('ignores malformed hidden-account preferences %s with a visible storage warning', async stored => {
@@ -1253,6 +1289,31 @@ describe('UsageMonitorView', () => {
     expect(history.get('.allowance-item').text()).toContain('Sub2API')
   })
 
+  it('moves the old Sub2API reading to sources when the official weekly cycle rolled over early', async () => {
+    const account = forecastAccount('codex:1', 2310.15, 95)
+    const current = account.currentCycle!
+    const oldReset = NOW + 1000
+    const previous = { ...forecastAccount('codex:1', 2348.80, 100).currentCycle!,
+      startMs: oldReset - 7 * 86400000, endMs: current.startMs, resetAtMs: oldReset,
+      quotaObservedAtMs: current.startMs - 1000, observedEndMs: current.startMs, current: false }
+    const official = forecastQuota(account.accountKey, { source: 'codex_official_usage', usedPercent: 95, remainingPercent: 5 })
+    const gateway = forecastQuota(account.accountKey, { id: 2, source: 'sub2api', stale: true, plan: null,
+      observedAtMs: current.startMs - 2 * 86400000, resetsAtMs: oldReset, usedPercent: 0, remainingPercent: 100 })
+    mockAccountForecast({ ...account, previousCycle: previous, quotaCycles: [current, previous] }, official)
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [gateway, official] })
+    wrapper = mount(UsageMonitorView, options); await flushPromises()
+    const main = wrapper.get('.current-quotas')
+    expect(main.findAll('.allowance-item')).toHaveLength(1)
+    expect(main.get('.quota-dial').text()).toContain('95.0%')
+    expect(main.text()).toContain('$2,348.80')
+    expect(wrapper.get('.quota-source-details').text()).toContain('Sub2API · 7天额度 · 上次已用 0.0%')
+
+    vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [gateway] })
+    await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
+    expect(main.get('.quota-dial').text()).toContain('0.0%')
+    expect(main.text()).toContain('Sub2API')
+  })
+
   it('keeps an expired quota historical without expiring independently recent credits', async () => {
     vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: NOW, sources: [], quotas: [forecastQuota('codex:1', {
       source: 'codex_official_usage', observedAtMs: NOW - 2000, resetsAtMs: NOW - 1000, usedPercent: 100, remainingPercent: 0,
@@ -1302,12 +1363,11 @@ describe('UsageMonitorView', () => {
     expect(credits.text()).toContain('上次积分余额')
     expect(credits.text()).toContain('状态待更新')
     expect(credits.text()).not.toContain('积分可用')
-    const history = wrapper.get<HTMLDetailsElement>('.quota-group:not(.current-quotas)')
-    history.element.open = true; await history.trigger('toggle'); await flushPromises()
-    expect(history.findAll('.allowance-item')).toHaveLength(1)
-    expect(history.text()).toContain('Session 7')
-    expect(history.text()).not.toContain('账号 2')
-    expect(history.findComponent(UsageAccountPeriods).exists()).toBe(false)
+    const sessions = wrapper.get<HTMLDetailsElement>('.session-quota-details')
+    sessions.element.open = true; await sessions.trigger('toggle'); await flushPromises()
+    expect(sessions.findAll('.quota-source-note')).toHaveLength(1)
+    expect(sessions.text()).toContain('Session 7')
+    expect(sessions.text()).not.toContain('账号 2')
 
     vi.mocked(getUsageMonitorQuotas).mockResolvedValue({ collectedAtMs: later, sources: [], quotas: rows.map(row => ({ ...row, observedAtMs: later, usedPercent: 85, remainingPercent: 15 })) })
     await wrapper.get('[aria-label="刷新周价值与额度"]').trigger('click'); await flushPromises()
@@ -1380,10 +1440,10 @@ describe('UsageMonitorView', () => {
     expect(wrapper.get('.current-quotas').text()).toContain('已到重置时间，等待新记录')
     const history = wrapper.get<HTMLDetailsElement>('.quota-group:not(.current-quotas)')
     history.element.open = true; await history.trigger('toggle'); await flushPromises()
-    expect(history.findAll('.allowance-item')).toHaveLength(2)
+    expect(history.findAll('.allowance-item')).toHaveLength(1)
     expect(history.text()).toContain('Cycle account')
     expect(history.text()).not.toContain('Week account')
-    expect(history.text()).toContain('Anonymous session')
+    expect(history.text()).not.toContain('Anonymous session')
     expect(history.text()).not.toContain('Inactive account')
     expect(history.text()).not.toContain('No reset account')
     expect(history.findComponent(UsageAccountPeriods).exists()).toBe(false)

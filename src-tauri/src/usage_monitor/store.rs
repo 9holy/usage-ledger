@@ -72,6 +72,7 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
          CREATE INDEX IF NOT EXISTS monitor_observations_time ON monitor_observations(observed_ms);
          CREATE INDEX IF NOT EXISTS monitor_observations_request ON monitor_observations(tool,id,session_key,observed_ms);",
     ).map_err(|e| e.to_string())?;
+    initialize_session_creators(conn)?;
     super::quota::initialize(conn)?;
     super::request_identity::initialize(conn)?;
     super::live::initialize(conn)?;
@@ -81,6 +82,36 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
     supplement_usage_quality(conn)?;
     migrate_codex_response_namespace(conn)?;
     supplement_live_observation_totals(conn)
+}
+
+fn initialize_session_creators(conn: &Connection) -> Result<(), String> {
+    let tx = Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS monitor_session_creators (
+        tool TEXT NOT NULL, session_id TEXT NOT NULL, account_key TEXT NOT NULL,
+        PRIMARY KEY(tool,session_id,account_key));
+        CREATE INDEX IF NOT EXISTS monitor_session_creators_account ON monitor_session_creators(tool,account_key,session_id);").map_err(|e| e.to_string())?;
+    let migrated: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM monitor_state WHERE key='session_creator_history_v1')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    if !migrated {
+        tx.execute_batch("INSERT OR IGNORE INTO monitor_session_creators
+            SELECT tool,json_extract(state,'$.session.id'),'account:'||json_extract(state,'$.quota_account_id') FROM monitor_files
+            WHERE json_extract(state,'$.quota_identity_error') IS NULL
+              AND json_type(state,'$.session.id')='text' AND trim(json_extract(state,'$.session.id'))<>''
+              AND json_type(state,'$.quota_account_id')='text' AND trim(json_extract(state,'$.quota_account_id'))<>'';
+            INSERT INTO monitor_state VALUES('session_creator_history_v1','1');").map_err(|e| e.to_string())?;
+    }
+    // A file cursor can be replaced; an earlier session's reference must survive it.
+    for (name, event) in [("insert", "INSERT"), ("update", "UPDATE OF state")] {
+        tx.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS monitor_file_creator_{name} AFTER {event} ON monitor_files
+            WHEN json_extract(NEW.state,'$.quota_identity_error') IS NULL
+              AND json_type(NEW.state,'$.session.id')='text' AND trim(json_extract(NEW.state,'$.session.id'))<>''
+              AND json_type(NEW.state,'$.quota_account_id')='text' AND trim(json_extract(NEW.state,'$.quota_account_id'))<>''
+            BEGIN
+                INSERT INTO monitor_session_creators VALUES (
+                    NEW.tool,json_extract(NEW.state,'$.session.id'),'account:'||json_extract(NEW.state,'$.quota_account_id'))
+                    ON CONFLICT(tool,session_id,account_key) DO NOTHING;
+            END;")).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())
 }
 
 fn migrate_codex_response_namespace(conn: &Connection) -> Result<(), String> {

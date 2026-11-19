@@ -37,7 +37,9 @@ struct RuntimeStatus {
     collecting: bool,
     sources: Vec<SourceStatus>,
     error: Option<String>,
+    storage_paused: bool,
     antigravity: Option<SourceStatus>,
+    antigravity_running: bool,
 }
 
 #[derive(Clone, Default)]
@@ -63,29 +65,72 @@ impl MonitorRuntime {
             .map_err(|error| error.to_string())
     }
 
-    fn update_error(&self, error: Option<String>) {
+    fn collector_failed(&self, error: String) {
         if let Ok(mut s) = self.inner.lock() {
-            s.error = error;
+            s.storage_paused = error == "database or disk is full";
+            s.collecting = false;
+            s.error = Some(error);
         }
     }
     pub fn start(&self) {
         if let Ok(mut state) = self.inner.lock() {
             state.started_at_ms = crate::ledger_db::now_ms();
         }
-        if let Err(error) = crate::ledger_db::open_default()
-            .map_err(|e| e.to_string())
-            .and_then(|conn| {store::initialize(&conn)?;account_names::collect(&conn,crate::ledger_db::now_ms())})
-        {
-            self.update_error(Some(error));
+        if let Err(error) = self.start_collector() {
+            self.collector_failed(error);
             return;
         }
+        self.start_antigravity();
+    }
+    fn start_collector(&self) -> Result<(), String> {
+        crate::ledger_db::open_default()
+            .map_err(|e| e.to_string())
+            .and_then(|conn| {store::initialize(&conn)?;account_names::collect(&conn,crate::ledger_db::now_ms())})?;
         let runtime = self.clone();
         std::thread::spawn(move || {
-            if let Err(error)=retry_database_busy(||collector::run(runtime.clone())){runtime.update_error(Some(error));}
+            if let Err(error)=retry_database_busy(||collector::run(runtime.clone())){runtime.collector_failed(error);}
         });
-        let runtime = self.clone();
-        std::thread::spawn(move ||{let _=retry_database_busy(||antigravity_loop(runtime.clone()));});
+        Ok(())
     }
+    fn claim_storage_retry(&self) -> Result<bool, String> {
+        let mut state = self.inner.lock().map_err(|error| error.to_string())?;
+        if !std::mem::take(&mut state.storage_paused) { return Ok(false); }
+        state.started_at_ms = crate::ledger_db::now_ms();
+        Ok(true)
+    }
+    fn start_antigravity(&self) {
+        let Ok(mut state) = self.inner.lock() else { return; };
+        if std::mem::replace(&mut state.antigravity_running, true) { return; }
+        drop(state);
+        let runtime = self.clone();
+        std::thread::spawn(move || {
+            let result = retry_database_busy(|| antigravity_loop(runtime.clone()));
+            if let Ok(mut state) = runtime.inner.lock() {
+                state.antigravity_running = false;
+                if let Err(error) = result {
+                    state.antigravity = Some(SourceStatus {
+                        tool: "antigravity".into(), root: "Antigravity language server".into(),
+                        status: "error".into(), error: Some(error), ..Default::default()
+                    });
+                }
+            }
+        });
+    }
+}
+
+#[tauri::command]
+pub async fn usage_monitor_retry_storage(runtime: tauri::State<'_, MonitorRuntime>) -> Result<(), String> {
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if runtime.claim_storage_retry()? {
+            if let Err(error) = runtime.start_collector() {
+                runtime.collector_failed(error.clone());
+                return Err(error);
+            }
+            runtime.start_antigravity();
+        }
+        Ok(())
+    }).await.map_err(|error| error.to_string())?
 }
 
 fn connection() -> Result<rusqlite::Connection, String> {
@@ -275,6 +320,7 @@ pub async fn usage_monitor_snapshot(
             sources,
             collecting,
             error,
+            storage_paused: state.storage_paused,
         };
         tx.commit().map_err(|e| e.to_string())?;
         Ok(snapshot)
@@ -521,6 +567,18 @@ pub async fn usage_monitor_analysis(
 #[cfg(test)]
 mod pricing_reason_filter_tests {
     use super::*;
+    #[test]
+    fn disk_full_recovery_can_be_claimed_once_and_does_not_retry_other_failures() {
+        let runtime = MonitorRuntime::default();
+        runtime.collector_failed("database is locked".into());
+        assert!(!runtime.claim_storage_retry().unwrap());
+        for _ in 0..2 {
+            runtime.collector_failed("database or disk is full".into());
+            assert!(runtime.status_snapshot().unwrap().storage_paused);
+            assert!(runtime.claim_storage_retry().unwrap());
+            assert!(!runtime.claim_storage_retry().unwrap());
+        }
+    }
     #[test]
     fn status_snapshot_releases_the_mutex_and_keeps_one_consistent_status() {
         let runtime = MonitorRuntime::default();

@@ -37,6 +37,16 @@ it('filters by the actual client while keeping one upstream account identity',as
   expect(wrapper.find('[data-account-key="codex:a"]').exists()).toBe(false);expect(wrapper.get('[data-account-key="api:all"]').exists()).toBe(true)
   wrapper.unmount()
 })
+it('does not display zero as confirmed usage for a named account without period records', () => {
+  const snapshot = data()
+  const account = snapshot.report.accounts[1]
+  account.totals = { ...account.totals, requestCount: 0, totalTokens: 0 }
+  account.verifiedRequests = 0
+  const row = { ...account, name: account.label, metrics: localCostMetrics(account, snapshot.report, []) }
+  const wrapper = mount(UsageCostAccounts, { props: { data: snapshot, rows: [row], saving: false, saveSettings: vi.fn() } })
+  expect(wrapper.get('[data-account-key="codex:a"]').findAll('td')[2].text()).toBe('本期无已确认用量')
+  wrapper.unmount()
+})
 it('keeps name editing, account status, records and expense entry on the same stable row',async()=>{
   const snapshot=data(),rows=snapshot.report.accounts.map(account=>({...account,name:account.label,metrics:localCostMetrics(account,snapshot.report,[])})),save=vi.fn().mockResolvedValue(undefined)
   const wrapper=mount(UsageCostAccounts,{props:{data:snapshot,rows,saving:false,saveSettings:save}})

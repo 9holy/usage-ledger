@@ -35,7 +35,9 @@ export default {
   integration: {
     cockpitSourceReloading: 'Cockpit 数据来源已变化，正在重新读取当前实例。',
     cockpitSourceReadFailed: '无法确认或读取 Cockpit 当前实例，未载入该批数据：{detail}',
-    cockpitUsageLedgerReadFailed: '历史用量账本读取失败，已保留原文件并跳过写回：{detail}',
+    cockpitUsageLedgerReadFailed: '暂时读不到已保存的 Cockpit 用量，原记录未改动。',
+    cockpitUsageLedgerSaveFailed: '本次 Cockpit 用量未能保存，原记录未改动。',
+    cockpitLegacyUsageUnresolved: '{count} 条旧用量记录无法确认属于哪个账号，已原样保留。',
     quotaPrimaryWindow: '主窗口',
     quotaSecondaryWindow: '次窗口',
     quotaRecordedValue: '上次 {value}',

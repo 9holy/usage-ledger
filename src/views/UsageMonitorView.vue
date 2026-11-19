@@ -43,7 +43,7 @@ import { isDesktopRuntime } from '@/api/url'
 import { getUsageMonitorAccounts, type AccountUsageReport } from '@/api/usageAccounts'
 import { getModelCatalogStatus, refreshModelCatalog, quoteModelCatalogBatch, type ModelCatalogStatus } from '@/api/modelCatalog'
 import {
-  getUsageMonitorSnapshot, getUsageMonitorAnalysis, getUsageMonitorSession, monitorTotalCost, monitorToken,
+  getUsageMonitorSnapshot, retryUsageMonitorStorage, getUsageMonitorAnalysis, getUsageMonitorSession, monitorTotalCost, monitorToken,
   monitorSingleQuotes, monitorAutomaticMode, monitorAutomaticPriceSummary, monitorRequestAutomaticPrice, monitorUnquotedRequests, monitorAmount, monitorMode, monitorScenarioLabel,
   monitorCacheRatio, monitorCacheCoverage, monitorContext, monitorKnownTokenTotal, monitorTokenCoverage, monitorRequestCountLabel, monitorIsUnitemizedRecord,
   getUsageMonitorWeekly, getUsageMonitorQuotas, monitorWeekBounds,
@@ -132,6 +132,7 @@ const weeklyError = ref('')
 const quotaError = ref('')
 const accountUsageError = ref('')
 const quotaHistoryOpen = ref(false)
+const sessionQuotaOpen = ref(false)
 const hiddenQuotaAccountsKey = 'usage-monitor:hidden-quota-accounts:v1'
 const quotaAccountStorageError = ref<{ operation: 'read' | 'save'; message: string } | null>(null)
 function loadHiddenQuotaAccounts(): string[] {
@@ -156,7 +157,15 @@ let accountListViewport: Element | null = null
 const costPeriodKey = computed(() => `${range.value}:${range.value === 'custom' ? customWindow.value.startMs + ':' + customWindow.value.endMs : ''}`)
 const costsEnabled = computed(() => desktop && tab.value !== 'sessions')
 const { data: costData, rows: costRows, error: costError, busy: costBusy, saving: costSaving, reload: reloadCosts, save: saveCostSettings, upstreamErrors: upstreamReadErrors } = useMonitorCosts(() => periodAt(Date.now()), costPeriodKey, costsEnabled)
-const costAccountChoices = computed(() => costRows.value.filter(row => row.id !== 'unassigned').map(row => ({ id: row.id, name: row.name })))
+const costAccountChoices = computed(() => {
+  const now = Date.now()
+  return costRows.value.filter(row => row.id !== 'unassigned').map(row => {
+    const month = accountUsageByKey.value.get(row.id)?.subscriptionMonth ?? row.periods?.subscriptionMonth
+    const billingPeriod = month && row.billingKind !== 'api' && month.startMs <= now && now < month.endMs
+      ? { startMs: month.startMs, endMs: month.endMs } : undefined
+    return { id: row.id, name: row.name, billingPeriod }
+  })
+})
 const selectedAccountCost = computed(() => costRows.value.find(row => row.id === selectedQuotaAccountKey.value))
 const inspectedAccount = computed(() => costRows.value.find(row => row.id === costAccountId.value))
 const accountLiveEnabled = computed(() => tab.value === 'costs' && costPage.value === 'account' && !!inspectedAccount.value?.tool)
@@ -531,16 +540,38 @@ const accountQuotaPrediction = computed(() => {
   }
 })
 
+function isVerifiedCodexMainReading(item: MonitorQuota): boolean {
+  return item.tool === 'codex' && item.limitId === 'codex' && item.modelId == null
+    && item.attribution === 'account' && item.billingAccountVerified === true && item.usedPercent != null
+    && (item.windowMinutes === 300 || item.windowMinutes === 10080)
+    && (item.windowSeconds == null || item.windowSeconds === item.windowMinutes * 60)
+}
 const alternateQuotaIds = computed(() => {
   const resetsByWindow = new Map<string, number[]>()
   const alternates = new Set<number>()
+  const officialWeekStarts = new Map<string, number>()
+  for (const item of visibleQuotas.value) {
+    if (item.source !== 'codex_official_usage' || item.windowMinutes !== 10080
+      || !isVerifiedCodexMainReading(item) || item.expired || item.sourceError
+      || item.resetsAtMs == null || item.observedAtMs == null) continue
+    const cycle = accountUsageByKey.value.get(item.accountKey)?.currentCycle
+    if (cycle?.current && item.observedAtMs >= cycle.startMs && Math.abs(item.resetsAtMs - cycle.resetAtMs) <= 1000) {
+      officialWeekStarts.set(item.accountKey, cycle.startMs)
+    }
+  }
   // Readings are already ordered from fresh to stale, newest first within each group.
   for (const item of visibleQuotas.value) {
-    const { windowMinutes, windowSeconds, resetsAtMs } = item
-    if (item.tool !== 'codex' || item.limitId !== 'codex' || item.modelId != null
-      || item.attribution !== 'account' || item.billingAccountVerified !== true
-      || item.usedPercent == null || resetsAtMs == null || (windowMinutes !== 300 && windowMinutes !== 10080)
-      || (windowSeconds != null && windowSeconds !== windowMinutes * 60)) continue
+    const { windowMinutes, resetsAtMs, observedAtMs } = item
+    if (!isVerifiedCodexMainReading(item) || resetsAtMs == null) continue
+    const started = officialWeekStarts.get(item.accountKey)
+    // An early rollover can close the old cycle before its advertised reset.
+    if (windowMinutes === 10080 && started != null && observedAtMs != null && observedAtMs < started
+      && accountUsageByKey.value.get(item.accountKey)?.quotaCycles.some(cycle =>
+        !cycle.current && cycle.endMs <= started && cycle.startMs <= observedAtMs && observedAtMs < cycle.endMs
+        && Math.abs(cycle.resetAtMs - resetsAtMs) <= 1000)) {
+      alternates.add(item.id)
+      continue
+    }
     const key = `${item.accountKey}:${windowMinutes}`
     const resets = resetsByWindow.get(key) ?? []
     // Different sources can report the same reset a second apart.
@@ -580,7 +611,7 @@ const knownQuotaAccounts = computed(() => {
     if (!previous || (row.observedAtMs ?? 0) > (previous.observedAtMs ?? 0)) latest.set(row.accountKey, row)
   }
   const confirmedWithoutQuota = (accountUsage.value?.accounts ?? []).filter(account =>
-    ((account.verifiedWeekRequests ?? 0) > 0 || (account.verifiedHistory?.totals.requestCount ?? 0) > 0)
+    (account.hasStoredHistory && account.billingKind !== 'api' || (account.verifiedWeekRequests ?? 0) > 0 || (account.verifiedHistory?.totals.requestCount ?? 0) > 0)
     && !latest.has(account.accountKey) && matchesAccountTool(account))
   const api = accountUsage.value?.apiUsage || explicitQuotaAccountKey.value === 'api:all' ? [{accountKey:'api:all',accountLabel:'API',tool:'api',source:'api_usage',billingAccountVerified:true}] : []
   return [...latest.values(), ...confirmedWithoutQuota, ...api]
@@ -716,10 +747,11 @@ const exhaustedQuotas = computed(() => {
 })
 const quotaGroups = computed(() => [
   { id: 'current', label: t('usageMonitor.text.accountQuota'), items: displayQuotas.value.filter(item => item.accountKey === selectedQuotaAccountKey.value) },
-  { id: 'history', label: t('usageMonitor.text.historyUnidentifiedAccounts'), items: visibleQuotas.value.filter(item => !displayQuotaIds.value.has(item.id)
+  { id: 'history', label: t('usageMonitor.text.accountQuotaHistory'), items: visibleQuotas.value.filter(item => !displayQuotaIds.value.has(item.id)
     && !alternateQuotaIds.value.has(item.id)
-    && (item.attribution !== 'account' || item.accountKey === selectedQuotaAccountKey.value)) },
+    && item.attribution === 'account' && item.accountKey === selectedQuotaAccountKey.value) },
 ].filter(group => group.items.length))
+const sessionQuotaReadings = computed(() => visibleQuotas.value.filter(item => item.attribution !== 'account'))
 function quotaIsHistorical(item: MonitorQuota): boolean { return !!quotaError.value || item.stale || item.expired || !!item.sourceError || item.attribution !== 'account' }
 function sessionName(session: { project: string | null; id: string }): string { return session.project?.split(/[\\/]/).filter(Boolean).at(-1) || session.id.slice(0, 12) }
 function summaryMoney(amount: number | null, currency: string, forecast = false): string {
@@ -984,6 +1016,11 @@ function refreshWindow() {
   else anchor.value = now
 }
 function manualRefresh() { void refreshLive(); refreshWindow(); void refreshSummary(); void reloadCosts() }
+async function retryStorage() {
+  try { await retryUsageMonitorStorage() }
+  catch (failure) { error.value = errorMessage(failure) }
+  finally { void refreshLive() }
+}
 function refreshOnResume() {
   if (document.visibilityState === 'hidden') return
   void refreshLive()
@@ -1144,7 +1181,8 @@ onBeforeUnmount(() => {
     <p v-if="!desktop" class="notice" role="status">{{ t('usageMonitor.text.thisPageRequiresTheDesktopAppToReadLocal') }}</p>
     <template v-else>
       <p v-if="upstreamReadErrors?.length" class="cost-read-error" role="status" :title="upstreamReadErrors.join(' / ')">{{ t('usageMonitor.routes.unavailable') }} · {{ upstreamReadErrors.join(' / ') }}</p>
-      <p v-if="error || snapshot?.error" class="notice error" role="alert" :title="errorMessage(error || snapshot?.error)">{{ t('usageMonitor.text.failedToReadUsageSources') }}<span v-if="snapshot"> · {{ t('usageMonitor.text.liveDataRetainedItMayBeStaleOrIncomplete') }}</span></p>
+      <p v-if="snapshot?.storagePaused" class="notice error" role="alert" :title="snapshot.error ?? undefined">{{ t('usageMonitor.storage.paused') }} <button class="monitor-storage-retry" type="button" @click="retryStorage"><RefreshCw :size="13" />{{ t('usageMonitor.storage.retry') }}</button></p>
+      <p v-else-if="error || snapshot?.error" class="notice error" role="alert" :title="errorMessage(error || snapshot?.error)">{{ t('usageMonitor.text.failedToReadUsageSources') }}<span v-if="snapshot"> {{ t('usageMonitor.text.liveDataRetainedItMayBeStaleOrIncomplete') }}</span></p>
       <p v-if="analysisError" class="notice error" role="alert" :title="analysisError">{{ t('usageMonitor.text.failedToReadPeriodAnalysis') }}<span v-if="analysis"> · {{ t('usageMonitor.text.lastSuccessfulDataRetainedTheDisplayedRangeApplies') }}</span></p>
       <div class="monitor-navigation">
         <nav class="monitor-tabs" role="tablist" :aria-label="t('usageMonitor.text.monitorViews')" @keydown.left.prevent="moveTab(-1)" @keydown.right.prevent="moveTab(1)"><button v-for="item in tabs" :id="`monitor-tab-${item.id}`" :key="item.id" type="button" role="tab" :aria-selected="tab === item.id" :tabindex="tab === item.id ? 0 : -1" :aria-controls="`monitor-panel-${item.id}`" @click="selectTab(item.id)">{{ item.label }}</button></nav>
@@ -1258,7 +1296,7 @@ onBeforeUnmount(() => {
               <p v-if="!quotaAccountChoices.length" class="page-note">{{ summaryBusy && !quotas ? t('usageMonitor.text.loadingQuotas') : hiddenKnownQuotaAccounts.length ? t('usageMonitor.text.noVisibleAccounts') : t('usageMonitor.text.noConfirmableAccountQuotaYet') }}</p>
               <details v-for="group in quotaGroups" :key="group.id" class="quota-group" :class="{ 'current-quotas': group.id === 'current' }" :open="group.id === 'current'" @toggle="group.id === 'history' && (quotaHistoryOpen = ($event.currentTarget as HTMLDetailsElement).open)">
                 <summary>{{ group.label }} <span>{{ group.items.length }}</span></summary>
-                <div v-if="group.id === 'current' || quotaHistoryOpen" class="allowance-list" role="region" :aria-label="group.id === 'current' ? t('usageMonitor.text.remainingQuotaByAccount') : t('usageMonitor.text.historicalQuotasUnidentifiedAccounts')" :tabindex="group.id === 'history' ? 0 : undefined">
+                <div v-if="group.id === 'current' || quotaHistoryOpen" class="allowance-list" role="region" :aria-label="group.id === 'current' ? t('usageMonitor.text.remainingQuotaByAccount') : t('usageMonitor.text.accountQuotaHistory')" :tabindex="group.id === 'history' ? 0 : undefined">
                 <div v-for="item in group.items" :key="item.id" class="allowance-item" :class="{ 'is-stale': quotaIsHistorical(item), 'has-account-amounts': accountUsageQuotaIds.has(item.id) && accountUsageByKey.has(item.accountKey), 'has-quota-dial': group.id === 'current' && item.remainingPercent != null }" :style="{ '--quota-color': quotaIsHistorical(item) || item.remainingPercent == null ? usageColors.unknown : item.remainingPercent === 0 ? usageColors.danger : item.remainingPercent <= 10 ? usageColors.warning : usageColors.success }">
                   <div v-if="group.id === 'current' && item.remainingPercent != null" class="quota-dial" role="img" :aria-label="quotaAccountLabel(item) + (quotaIsHistorical(item) ? t('usageMonitor.text.lastUsed') : t('usageMonitor.text.used')) + usagePercentLabel(100 - item.remainingPercent) + (quotaIsHistorical(item) ? t('usageMonitor.text.lastRemaining') : t('usageMonitor.text.remaining')) + quotaValue(item)" :style="{ '--quota-fill': (100 - item.remainingPercent) * 3.6 + 'deg' }"><strong>{{ usagePercentLabel(100 - item.remainingPercent) }}<small>{{ quotaIsHistorical(item) ? t('usageMonitor.text.lastUsed') : t('usageMonitor.text.used') }}</small></strong></div>
                   <div class="quota-copy">
@@ -1293,7 +1331,7 @@ onBeforeUnmount(() => {
                 </details>
                 <p class="page-note">{{ t('usageMonitor.text.creditsAndPlanQuotaAreSeparateNotConvertedTo') }}</p>
               </section>
-              <details v-if="!apiAccountSelected && (quotaSources.length || alternateQuotaReadings.length || visibleQuotas.some(item => item.billingAccountVerified === false))" class="quota-source-details">
+              <details v-if="!apiAccountSelected && (quotaSources.length || alternateQuotaReadings.length || sessionQuotaReadings.length || visibleQuotas.some(item => item.billingAccountVerified === false))" class="quota-source-details">
                 <summary>{{ t('usageMonitor.text.quotaSourcesStatus') }} <span v-if="quotaSources.length">{{ quotaSources.length }} {{ t('usageMonitor.text.sources') }}</span><b v-if="quotaSourceWarnings">{{ quotaSourceWarnings }} {{ t('usageMonitor.text.itemsUnconfirmed') }}</b></summary>
                 <p v-for="item in alternateQuotaReadings" :key="item.id" class="quota-source-note" :title="item.sourceError ?? undefined">
                   {{ quotaSourceName(item.source) }} · {{ quotaWindow(item) }} ·
@@ -1302,6 +1340,16 @@ onBeforeUnmount(() => {
                 </p>
                 <p v-if="visibleQuotas.some(item => item.billingAccountVerified === false)" class="quota-source-note">{{ t('usageMonitor.text.quotaAccountUnconfirmed') }}</p>
                 <p v-for="source in quotaSources" :key="source.tool + source.source" class="quota-source-note">{{ toolName(source.tool) }} · {{ source.error || quotaSourceStatus(source.status) }}<template v-if="source.scopeNote"> · {{ quotaScopeNote(source.scopeNote) }}</template><template v-if="source.coverage?.scopesUnreported"> · {{ source.coverage.scopesUnreported }} {{ t('usageMonitor.text.sourcesWithoutQuotaData') }}</template></p>
+                <details v-if="sessionQuotaReadings.length" class="session-quota-details" @toggle="sessionQuotaOpen = ($event.currentTarget as HTMLDetailsElement).open">
+                  <summary>{{ t('usageMonitor.text.sessionQuotaReadings') }} <span>{{ sessionQuotaReadings.length }}</span></summary>
+                  <div v-if="sessionQuotaOpen" class="allowance-list" role="region" :aria-label="t('usageMonitor.text.sessionQuotaReadings')" tabindex="0">
+                    <div v-for="item in sessionQuotaReadings" :key="item.id" class="quota-source-note" :title="item.sourceError ?? undefined">
+                      <div>{{ toolName(item.tool) }} · {{ quotaAccountLabel(item) }}</div>
+                      <div>{{ quotaWindow(item) }} · {{ t('usageMonitor.text.lastRemaining2') }} {{ quotaValue(item) }}<template v-if="item.resetsAtMs"> · {{ t('usageMonitor.text.resets') }}{{ time(item.resetsAtMs) }}</template></div>
+                      <div>{{ quotaSourceName(item.source) }} {{ t('usageMonitor.text.updated2') }} {{ time(item.observedAtMs) }}</div>
+                    </div>
+                  </div>
+                </details>
               </details>
                <p v-if="quotaError" class="unpriced" role="status" :title="quotaError">{{ t('usageMonitor.text.quotaReadFailed') }}<template v-if="quotas?.quotas.length"> · {{ t('usageMonitor.text.existingSnapshotsDoNotRepresentCurrentQuota') }}</template></p>
               <UsageAccountCost v-if="costData && selectedAccountCost" compact :key="selectedAccountCost.id" :row="selectedAccountCost" :data="costData" :saving="costSaving" :save-settings="saveCostSettings" @record="openCostRecords" @inspect="inspectCostAccount" @prices="openApiPrices" @changed="costsChanged" />
@@ -1508,6 +1556,7 @@ onBeforeUnmount(() => {
 .allowance-item meter::-webkit-meter-bar{border:0;background:var(--cost-line);border-radius:3px}.allowance-item meter::-webkit-meter-optimum-value{background:var(--quota-color)}
 .allowance-item.is-stale strong{color:var(--cost-muted)}.allowance-item.is-stale meter::-webkit-meter-optimum-value{background:#6f7a71}
 .quota-source-note{padding:10px 0;margin:0;border-bottom:1px solid var(--cost-line);overflow-wrap:anywhere}.quota-group>summary{font-size:12px}.quota-group>summary>span{color:var(--cost-muted);margin-left:8px}.current-quotas>summary{display:none}
+.session-quota-details>summary{padding:8px 0;color:var(--cost-muted);font-size:11px;cursor:pointer}.session-quota-details>summary span{margin-left:6px}
 @media(max-width:1000px){.weekly-workspace{grid-template-columns:minmax(0,1fr);gap:22px}.weekly-value{padding-right:0;border-right:0;padding-bottom:18px;border-bottom:1px solid var(--cost-line)}}
 @media(max-width:600px){.week-figures{gap:12px}.week-figures>div+div{padding-left:12px}.week-figures strong{font-size:23px}.weekly-token-strip{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.weekly-token-strip>div{padding-left:0;border:0}}
 .paused-state{color:var(--cost-gold);font-size:11px}.history-controls{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;padding:0 0 16px}.history-search{display:flex;flex:1 1 290px;min-width:0;max-width:480px;gap:6px}.history-search input{height:36px;min-width:0;flex:1;padding:0 10px;background:var(--cost-panel);color:var(--cost-text);border:1px solid var(--cost-line-strong);border-radius:4px;font-size:12px}.history-status,.unpriced-filter{display:flex;align-items:center;gap:7px;color:var(--cost-muted);font-size:11px;white-space:nowrap}.history-status select{height:36px;max-width:280px;padding:0 24px 0 9px;border:1px solid var(--cost-line-strong);border-radius:4px;background:var(--cost-panel);color:var(--cost-text);font-size:12px}.unpriced-filter input{width:14px;height:14px;accent-color:var(--cost-lime)}.history-scope{flex-basis:100%;font-size:10px;color:var(--cost-muted)}.unpriced-link,.parent-link{color:var(--cost-gold);text-decoration:underline;text-underline-offset:3px;text-align:left}.parent-link{color:var(--cost-blue)}.unpriced-link:hover,.parent-link:hover{color:var(--cost-text)}.detail-actions{flex-wrap:wrap}
@@ -1604,6 +1653,7 @@ h2{font-size:20px;font-weight:600;margin:0}h2 span,h3 span{color:var(--cost-mute
   .price-form { grid-template-columns:minmax(0,1fr) 105px; }
   .lookup-context { column-gap:12px; }
 }
+.monitor-storage-retry{display:inline-flex;align-items:center;gap:5px;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:4px}
 </style>
 
 

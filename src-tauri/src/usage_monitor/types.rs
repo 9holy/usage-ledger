@@ -393,6 +393,7 @@ pub struct MonitorSnapshot {
     pub error: Option<String>,
     pub live: LiveSnapshot,
     pub status_counts: MonitorStatusCounts,
+    pub storage_paused: bool,
     pub tool_status_counts: std::collections::BTreeMap<String, MonitorStatusCounts>,
 }
 

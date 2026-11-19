@@ -1,12 +1,17 @@
 import './usageI18nFixture'
 import i18n from '@/i18n'
 import { nextTick } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AccountUsage, AccountUsageCycle, AccountUsagePeriod } from '@/api/usageAccounts'
+import { getSubscriptionCycles, getSubscriptionCycleUsage } from '@/api/usageAccounts'
 import type { MonitorTotals } from '@/api/usageMonitor'
 import { usageColors } from '../usageChartPalette'
 import UsageAccountPeriods from '../UsageAccountPeriods.vue'
+
+vi.mock('@/api/usageAccounts', async original => ({
+  ...await original<typeof import('@/api/usageAccounts')>(), getSubscriptionCycles: vi.fn(), getSubscriptionCycleUsage: vi.fn(),
+}))
 
 const day = (value: string) => Date.parse(`${value}T00:00:00Z`)
 function totals(overrides: Partial<MonitorTotals> = {}): MonitorTotals {
@@ -28,6 +33,47 @@ function identified(usd: number, cny?: number): MonitorTotals {
 afterEach(() => vi.useRealTimers())
 
 describe('account allowance periods', () => {
+  it('loads any saved cycle on demand and keeps a selected cycle across renewal', async () => {
+    i18n.global.locale.value = 'zh'
+    vi.useFakeTimers(); vi.setSystemTime(day('2026-11-17'))
+    const subscription = { ...account().subscription, source: 'official' as const, startMs: day('2026-09-01') }
+    const currentMonth = { ...period(identified(400.23)), startMs: day('2026-11-08'), endMs: day('2026-12-08'), observedEndMs: day('2026-11-17') }
+    const oldMonth = { ...period(identified(300)), startMs: day('2026-10-08'), endMs: day('2026-11-08'), observedEndMs: day('2026-11-08') }
+    const reference = { ...oldMonth, totals: identified(10000) }
+    const old = account({ subscription, subscriptionMonth: oldMonth, unsegmentedMonth: oldMonth.totals,
+      creatorReference: { ...account(), subscriptionMonth: reference }, historicalSubscriptionEstimate: identified(10300) })
+    const earlier = { ...oldMonth, startMs: day('2026-09-08'), endMs: day('2026-10-08'), observedEndMs: day('2026-10-08'), totals: identified(700) }
+    vi.mocked(getSubscriptionCycles).mockResolvedValue([
+      { ...currentMonth, id: 'current-cycle', kind: 'recorded', current: true },
+      { ...oldMonth, id: 'closed-cycle', kind: 'recorded', current: false },
+      { ...earlier, id: 'earlier-cycle', kind: 'estimated', current: false },
+    ])
+    vi.mocked(getSubscriptionCycleUsage).mockImplementation(async (_, id) => id === 'closed-cycle' ? old : account({ subscriptionMonth: earlier }))
+    const current = account({ subscription, subscriptionMonth: currentMonth })
+    const wrapper = mount(UsageAccountPeriods, { props: { account: current } })
+    expect(getSubscriptionCycles).not.toHaveBeenCalled()
+    const details = wrapper.get<HTMLDetailsElement>('.amount-details')
+    details.element.open = true; await details.trigger('toggle'); await flushPromises()
+    expect(getSubscriptionCycles).toHaveBeenCalledWith(current.accountKey)
+    expect(getSubscriptionCycleUsage).not.toHaveBeenCalled()
+    const selector = wrapper.get('.amount-period-select')
+    expect(selector.findAll('option')).toHaveLength(3)
+    await selector.setValue('closed-cycle'); await flushPromises()
+    expect(getSubscriptionCycleUsage).toHaveBeenCalledWith(current.accountKey, 'closed-cycle')
+    expect(wrapper.get('.subscription-month .period-amount').text()).toBe('$400.23')
+    expect(wrapper.get('.subscription-cycle-result .period-amount').text()).toBe('$10,300.00')
+    expect(wrapper.get('.history-amount-breakdown').text()).toContain('$300.00')
+    expect(wrapper.get('.history-amount-breakdown').text()).toContain('$10,000.00')
+    expect(wrapper.get('.subscription-cycle-result').text()).toContain('没有确认的周额度读数')
+    await selector.setValue('earlier-cycle'); await flushPromises()
+    expect(wrapper.get('.subscription-cycle-result .period-amount').text()).toBe('$700.00')
+    await wrapper.setProps({ account: { ...current, subscriptionMonth: null, subscription: { ...subscription, active: false } } })
+    expect(wrapper.get('.subscription-cycle-result .period-amount').text()).toBe('$700.00')
+    await wrapper.setProps({ account: { ...current, accountKey: 'another-account' } })
+    expect(wrapper.find('.subscription-cycle-result').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows recorded calendar-month money when the subscription billing dates are unknown',()=>{
     i18n.global.locale.value='zh'
     const wrapper=mount(UsageAccountPeriods,{props:{account:account({calendarMonth:period(identified(21))})}})

@@ -25,6 +25,7 @@ export function localCostMetrics(account: LocalCostAccount, report: LocalCostRep
   return {
     valueCny: valueKnown ? valueCny : null,
     expenseCny,
+    missingCoverage: entered.some(row => row.missingCoverageCount > 0),
     factor: !partial && expenseCny != null && valueKnown && valueCny > 0 ? expenseCny / valueCny : null,
     perMillionTokens: costComplete && expenseCny != null && account.totals.totalTokens > 0 ? expenseCny / account.totals.totalTokens * 1e6 : null,
     remainingCny: complete && entered.every(row => row.remainingPrepaid != null) ? entered.reduce((sum, row) => sum + cny(row.remainingPrepaid!, row.currency), 0) : null,
@@ -44,6 +45,7 @@ export function localCostOverview(rows: LocalCostRow[], report: LocalCostReport,
   const pairedExpense = paired.reduce((sum, row) => sum + row.metrics.expenseCny!, 0)
   return {
     expenseCny: sumKnown(rows.map(row => row.metrics.expenseCny)),
+    missingCoverage: finances.some(row => row.missingCoverageCount > 0),
     valueCny: sumKnown(rows.map(row => row.metrics.valueCny)),
     factor: pairedValue > 0 ? pairedExpense / pairedValue : null,
     partial: rows.some(row => row.totals.requestCount > 0 && (row.metrics.partial || row.metrics.expenseCny == null)),

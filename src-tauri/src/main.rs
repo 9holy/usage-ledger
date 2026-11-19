@@ -118,11 +118,17 @@ fn validate_cost_ledger(json: &str) -> Result<(), String> {
         "imageRequestCount", "imageGenerationRequestCount", "imageEditRequestCount",
         "imageGenerationCapabilityFailureCount", "inputTokens", "outputTokens", "totalTokens",
         "cachedTokens", "reasoningTokens", "updatedAt"];
-    let mut emails = std::collections::HashSet::new();
+    let mut identities = std::collections::HashSet::new();
     for account in accounts {
-        let email = account.get("email").and_then(serde_json::Value::as_str)
-            .filter(|email| !email.trim().is_empty()).ok_or("Invalid ledger account identity")?;
-        if !emails.insert(email) { return Err("Ambiguous ledger email history".into()); }
+        let email = match account.get("email") {
+            None => None,
+            Some(value) => Some(value.as_str().filter(|email| !email.trim().is_empty()).ok_or("Invalid ledger email")?),
+        };
+        let identity = match account.get("accountId") {
+            None => (false, email.ok_or("Invalid ledger account identity")?),
+            Some(value) => (true, value.as_str().filter(|id| !id.trim().is_empty()).ok_or("Invalid ledger account ID")?),
+        };
+        if !identities.insert(identity) { return Err("Duplicate ledger account history".into()); }
         let observed = account.get("updatedAt").and_then(serde_json::Value::as_f64)
             .ok_or("Invalid ledger observation time")?;
         if !observed.is_finite() || !(0.0..=8_640_000_000_000_000.0).contains(&observed) || observed.fract() != 0.0 {
@@ -912,7 +918,10 @@ fn main() {
             model_catalog::model_catalog_refresh,
             model_catalog::model_catalog_quote_batch,
             usage_monitor::usage_monitor_snapshot,
+            usage_monitor::usage_monitor_retry_storage,
             usage_monitor::accounts::usage_monitor_accounts,
+            usage_monitor::accounts::usage_monitor_subscription_cycles,
+            usage_monitor::accounts::usage_monitor_subscription_cycle_usage,
             usage_monitor::upstream_accounts::usage_monitor_sync_upstream,
             usage_monitor::upstream_accounts::usage_monitor_upstream_history,
             usage_monitor::local_cost::local_cost_report,
@@ -1206,6 +1215,18 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn cost_ledger_keeps_distinct_account_ids_with_the_same_email() {
+        let entry = serde_json::json!({"email":"same@example.test","updatedAt":1,"usage":{"requestCount":3}});
+        let mut a = entry.clone();
+        a["accountId"] = "source-a".into();
+        let mut b = entry.clone();
+        b["accountId"] = "source-b".into();
+        let unnamed = serde_json::json!({"accountId":"source-c","updatedAt":1,"usage":{"requestCount":8}});
+        assert!(validate_cost_ledger(&serde_json::json!({"accounts":[entry,a,b,unnamed]}).to_string()).is_ok());
+        assert!(validate_cost_ledger(&serde_json::json!({"accounts":[a,a]}).to_string()).is_err());
     }
 
     /// read_cost_ledger 首次使用(文件不存在)返 "null" 而非 Err。

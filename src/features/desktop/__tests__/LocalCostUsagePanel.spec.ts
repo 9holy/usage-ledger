@@ -4,10 +4,13 @@ import { expect, it, vi } from 'vitest'
 import LocalCostUsagePanel from '../LocalCostUsagePanel.vue'
 import type { LocalCostAccount, LocalCostReport } from '@/api/localCost'
 import type { MonitorQuota, MonitorTotals } from '@/api/usageMonitor'
-import type { AccountUsageCycle } from '@/api/usageAccounts'
+import { getSubscriptionCycles, getSubscriptionCycleUsage, type AccountUsageCycle } from '@/api/usageAccounts'
+import { getFinanceLedger, type FinanceAccountSummary } from '@/api/financeLedger'
 import { localCostMetrics } from '../localCostMath'
 
 vi.mock('@/features/cost-center/components/CostLineChart.vue', () => ({ default: { name: 'CostLineChart', props: ['labels', 'series', 'state'], template: '<div class="chart-stub" />' } }))
+vi.mock('@/api/usageAccounts', async original => ({ ...await original<typeof import('@/api/usageAccounts')>(), getSubscriptionCycles: vi.fn(), getSubscriptionCycleUsage: vi.fn() }))
+vi.mock('@/api/financeLedger', async original => ({ ...await original<typeof import('@/api/financeLedger')>(), getFinanceLedger: vi.fn() }))
 
 function data() {
   const now = Date.now(), start = now - 2 * 86400000, observed = now - 60000, end = now + 5 * 86400000
@@ -21,6 +24,24 @@ function data() {
   const rows = report.accounts.map(row => ({ ...row, name: row.label, metrics: localCostMetrics(row, report, []) }))
   return { report, rows, quota, cycle }
 }
+
+it('loads payment and allocated cost for the account and exact cycle selected', async () => {
+  const { report, rows, quota, cycle } = data()
+  const startMs = cycle.startMs - 30 * 86_400_000, endMs = cycle.startMs
+  const period = { ...cycle, startMs, endMs, observedEndMs: endMs }
+  vi.mocked(getSubscriptionCycles).mockResolvedValue([{ id: 'saved-cycle', startMs, endMs, kind: 'recorded', current: false }])
+  vi.mocked(getSubscriptionCycleUsage).mockResolvedValue({ ...rows[0].periods!, accountKey: 'codex:a', accountLabel: 'A', tool: 'codex', attribution: 'request_evidence_with_creator_reference', calendarWeek: period, subscriptionMonth: period })
+  const cost: FinanceAccountSummary = { accountId: 'codex:a', currency: 'CNY', cashOutlay: 100, refunds: 0, accruedExpense: 90, recognizedLoss: 0, expenseCredits: 0, netExpense: 90, remainingPrepaid: 10, ongoingHourlyExpense: 0, unresolvedCount: 0, hasEnteredFacts: true, terminationLoss: 0, amortizedExpense: 90, missingCoverageCount: 0, coverageIntervals: [], lifetimeCoverageIntervals: [], lifetimeAccruedExpense: 90, lifetimeRecognizedLoss: 0, lifetimeExpenseCredits: 0 }
+  vi.mocked(getFinanceLedger).mockResolvedValue({ events: [], totalEvents: 1, purchaseChannels: [], planLabels: [], byAccount: [cost], summary: { eventCount: 1, hasEnteredFacts: true, unresolvedTerminationCount: 0, currencies: [] } })
+  const wrapper = mount(LocalCostUsagePanel, { props: { report, rows, quotas: [quota], quotaError: '', modelValue: 'codex:a' } })
+  const details = wrapper.get<HTMLDetailsElement>('.local-subscription-history')
+  details.element.open = true; await details.trigger('toggle'); await flushPromises()
+  await details.get('.amount-period-select').setValue('saved-cycle'); await flushPromises()
+  expect(getFinanceLedger).toHaveBeenCalledWith({ source: 'local', instanceId: 'usage-monitor', accountId: 'codex:a', startMs, endMs })
+  expect(details.get('.subscription-cycle-cost').text()).toContain('90.00')
+  expect(wrapper.get('.quota-prediction').text()).toContain('$50')
+  wrapper.unmount()
+})
 
 it('keeps each account models separate and retains paired quota amounts when a newer reading arrives', async () => {
   const { report, rows, quota } = data()

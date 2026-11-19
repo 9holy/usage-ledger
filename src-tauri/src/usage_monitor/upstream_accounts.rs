@@ -567,6 +567,7 @@ pub(super) fn owners(conn: &Connection, ids: Option<&str>) -> Result<BTreeMap<(S
     let mut quota=conn.prepare("SELECT r.id,MIN(a.account_key),COUNT(DISTINCT a.account_key) FROM monitor_request_quota_evidence e
       JOIN monitor_codex_quota_accounts a ON a.home=e.home AND a.reset_ms=e.reset_ms AND a.plan=e.plan
       JOIN monitor_requests r ON r.tool='codex' AND r.id=e.id WHERE json_extract(r.usage,'$.billingScope')='api'
+      AND r.timestamp_ms>=e.reset_ms-604800000 AND r.timestamp_ms<e.reset_ms
       AND (?1 IS NULL OR r.id IN (SELECT value FROM json_each(?1))) GROUP BY r.id").map_err(|e|e.to_string())?;
     let rows=quota.query_map([ids],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?))).map_err(|e|e.to_string())?;
     for row in rows {
@@ -805,6 +806,21 @@ mod tests {
         let json=serde_json::to_value(row).unwrap();
         assert_eq!(json["periods"]["currentCycle"]["quotaSnapshot"]["billingTotals"]["subscription"]["requestCount"],1);
         assert_eq!(json["totals"]["pricedCostUsd"],10.);
+    }
+
+    #[test]
+    fn saved_quota_only_attributes_api_requests_inside_its_own_window() {
+        let conn=database();
+        let reset=604801000;
+        conn.execute("INSERT INTO monitor_codex_quota_accounts VALUES('fixture',?1,'pro','account:shared',1000,1)",[reset]).unwrap();
+        for (id,time) in [("before",999),("start",1000),("last",reset-1),("reset",reset)] {
+            let record=UsageRecord { timestamp_ms:time, ..usage(id) };
+            insert(&conn,&record);
+            conn.execute("INSERT INTO monitor_request_quota_evidence VALUES(?1,'fixture',?2,'pro')",params![record.id,reset]).unwrap();
+        }
+        let assigned=owners(&conn,None).unwrap();
+        assert_eq!(assigned.len(),2);
+        for id in ["start","last"] { assert!(assigned[&("codex".into(),usage(id).id)].subscription); }
     }
 
     #[test]

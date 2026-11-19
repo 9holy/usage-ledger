@@ -178,6 +178,7 @@ export default {
     "remainingPrepaid": "未用完的预付费用",
     "factsHaveUnresolvedExpenseAllocation": "笔记录尚不能计入总费用",
     "outlaysLackACoveragePeriod": "笔付款尚未填写使用时间",
+    "useCurrentBillingPeriod": "使用本期账期",
     "terminationLossIsNotLinkedToA": "停用损失尚未关联到完整的使用期，暂未计入总费用。请编辑记录，关联原购买或续费记录并检查使用时间。",
     "financialEventForm": "财务记录表单",
     "account": "账号",

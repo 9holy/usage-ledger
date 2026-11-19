@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Clock3 } from '@lucide/vue'
 import UsageModelCosts from './UsageModelCosts.vue'
@@ -9,6 +9,7 @@ import UsageTokenComposition from './UsageTokenComposition.vue'
 import UsageEfficiencyBand from './UsageEfficiencyBand.vue'
 import UsageValueChart from './UsageValueChart.vue'
 import LocalCostSpeedPanel from './LocalCostSpeedPanel.vue'
+import UsageSubscriptionHistory from './UsageSubscriptionHistory.vue'
 import type { LocalCostReport, LocalCostLiveReport } from '@/api/localCost'
 import type { LocalCostRow } from './localCostMath'
 import type { MonitorQuota, MonitorTotals } from '@/api/usageMonitor'
@@ -29,6 +30,7 @@ const sourceName = (key: string): string => key.split('+').map(item => ({ direct
 const analytics = computed(() => sourceKey.value !== 'all' ? selected.value?.sources?.[sourceKey.value] : accountId.value === 'all' ? props.report.analytics : selected.value?.analytics)
 const totals = computed(() => analytics.value?.totals ?? selected.value?.totals)
 const periods = computed(() => selected.value?.periods)
+const subscriptionOpen = ref(false)
 const monthPeriod = computed(() => periods.value?.subscriptionMonth ?? periods.value?.calendarMonth)
 const currentLive = computed(() => props.live?.accountKey === accountId.value && (props.live.sourceKey ?? 'all') === sourceKey.value ? props.live : null)
 const modelExpenses = computed(() => {
@@ -69,7 +71,13 @@ const value = (totals?: MonitorTotals | null) => monitorAutomaticPriceSummary(to
       <template v-if="!summaryOnly">
       <div class="period-values"><div><span>{{ t('desktop.localCost.cycleUsageValue') }}</span><strong>{{ value(cycle?.totals) }}</strong></div><div><span>{{ t(periods.subscriptionMonth ? 'desktop.localCost.subscriptionMonthValue' : 'usageMonitor.text.usedThisMonth') }}</span><strong>{{ value(monthPeriod?.totals) }}</strong><small v-if="monthPeriod">{{ date(monthPeriod.startMs) }} – {{ date(monthPeriod.endMs) }}</small></div><div><span>{{ t('desktop.localCost.previousCycleValue') }}</span><strong>{{ value(periods.previousCycle?.totals) }}</strong></div><div><span>{{ t('desktop.localCost.subscriptionExpiry') }}</span><strong class="period-date">{{ date(periods.subscription.endMs) }}</strong></div></div>
       <details v-if="periods.quotaCycles.length" class="quota-history"><summary><Clock3 :size="14" />{{ t('desktop.localCost.quotaHistory') }} <span>{{ periods.quotaCycles.length }}</span></summary><div class="usage-table-scroll"><table><thead><tr><th>{{ t('desktop.localCost.cycleDates') }}</th><th>{{ t('desktop.localCost.quotaUsed') }}</th><th>{{ t('desktop.localCost.value') }}</th><th>{{ t('desktop.localCost.requests') }}</th><th>{{ t('desktop.localCost.resetAt') }}</th></tr></thead><tbody><tr v-for="item in periods.quotaCycles" :key="item.startMs + ':' + item.resetAtMs"><td>{{ date(item.startMs) }} – {{ date(item.endMs) }}<small v-if="item.current">{{ t('desktop.localCost.inProgress') }}</small></td><td>{{ item.usedPercent == null ? '—' : item.usedPercent.toFixed(1) + '%' }}</td><td>{{ item.exhaustionUnknown ? t('usageMonitor.text.exhaustionTimeNotRecorded') : value(item.totals) }}</td><td>{{ number(item.totals.requestCount) }}</td><td>{{ date(item.resetAtMs) }}</td></tr></tbody></table></div></details>
-      <details v-if="periods.monthCycles.length || periods.unsegmentedMonth.requestCount" class="quota-history"><summary><Clock3 :size="14" />{{ t('desktop.localCost.monthCycleDetails') }}</summary><p class="usage-note">{{ t('desktop.localCost.monthCycleBasis') }}</p><div class="usage-table-scroll"><table><thead><tr><th>{{ t('desktop.localCost.cycleDates') }}</th><th>{{ t('desktop.localCost.value') }}</th><th>{{ t('desktop.localCost.requests') }}</th></tr></thead><tbody><tr v-for="item in periods.monthCycles" :key="item.startMs + ':' + item.resetAtMs"><td>{{ date(item.startMs) }} – {{ date(item.endMs) }}</td><td>{{ value(item.totals) }}</td><td>{{ number(item.totals.requestCount) }}</td></tr><tr v-if="periods.unsegmentedMonth.requestCount"><td>{{ t('desktop.localCost.unsegmentedMonth') }}</td><td>{{ value(periods.unsegmentedMonth) }}</td><td>{{ number(periods.unsegmentedMonth.requestCount) }}</td></tr></tbody></table></div></details>
+      <details class="quota-history local-subscription-history" @toggle="subscriptionOpen = ($event.currentTarget as HTMLDetailsElement).open">
+        <summary><Clock3 :size="14" />{{ t('usageMonitor.text.subscriptionPeriod') }}</summary>
+        <UsageSubscriptionHistory :account-key="accountId" :enabled="subscriptionOpen" :current-period="periods.subscriptionMonth" include-costs>
+          <p v-if="periods.monthCycles.length || periods.unsegmentedMonth.requestCount" class="usage-note">{{ t('usageMonitor.text.quotaCyclesWithinSubscriptionMonth') }}{{ t('usageMonitor.text.includingUsageAfterQuotaExhaustion') }}</p>
+          <div v-if="periods.monthCycles.length || periods.unsegmentedMonth.requestCount" class="usage-table-scroll"><table><thead><tr><th>{{ t('desktop.localCost.cycleDates') }}</th><th>{{ t('desktop.localCost.value') }}</th><th>{{ t('desktop.localCost.requests') }}</th></tr></thead><tbody><tr v-for="item in periods.monthCycles" :key="item.startMs + ':' + item.resetAtMs"><td>{{ date(item.startMs) }} – {{ date(item.endMs) }}</td><td>{{ value(item.totals) }}</td><td>{{ number(item.totals.requestCount) }}</td></tr><tr v-if="periods.unsegmentedMonth.requestCount"><td>{{ t('desktop.localCost.unsegmentedMonth') }}</td><td>{{ value(periods.unsegmentedMonth) }}</td><td>{{ number(periods.unsegmentedMonth.requestCount) }}</td></tr></tbody></table></div>
+        </UsageSubscriptionHistory>
+      </details>
       <p v-if="periods.verifiedHistory?.totals.requestCount" class="usage-note">{{ t('desktop.localCost.verifiedHistory') }} {{ value(periods.verifiedHistory.totals) }} · {{ date(periods.verifiedHistory.startMs) }} – {{ date(periods.verifiedHistory.observedEndMs) }}</p>
       </template>
     </section>

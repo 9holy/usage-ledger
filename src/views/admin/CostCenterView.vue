@@ -116,6 +116,9 @@
         <span>{{ displayError }}</span>
           <button type="button" @click="reload()">{{ t('costCenter.text.retry') }}</button>
       </div>
+      <div v-if="connectionType === null && cockpitLegacyUsageUnresolved" class="cost-warning-text" role="status">
+        {{ t('costCenter.integration.cockpitLegacyUsageUnresolved', { count: cockpitLegacyUsageUnresolved }) }}
+      </div>
       <div v-if="connectionType !== 'sub2api' && data.legacyLocalCostProfileCount.value" class="cost-warning-text" role="status">
         {{ data.legacyLocalCostProfileCount.value }} {{ t('costCenter.text.legacyCostProfilesLackReliableSourceIdentitiesRetained') }}
       </div>
@@ -1596,7 +1599,7 @@ import { summarizeOperatingCosts, type OperatingAccount, type OperatingSummary }
 import { recordedAccountCosts, sumCompleteCosts } from '@/features/cost-center/recordedCosts'
 import type { CockpitPlatformAccountInput } from '@/features/cost-center/cockpitAdapter'
 import { assertCockpitSourceIdentity } from '@/api/cockpit/sourceIdentity'
-import { applyCockpitUsageLedger, CockpitLedgerIdentityError, cockpitOpsSummaryToTrend, cockpitOpsAccountsToRequestCounts, clipOpsBucketsToWindow, statsAccountCostId, cockpitSnapshotsToAccountUsage } from '@/features/cost-center/cockpitAdapter'
+import { applyCockpitUsageLedger, cockpitOpsSummaryToTrend, cockpitOpsAccountsToRequestCounts, clipOpsBucketsToWindow, statsAccountCostId, cockpitSnapshotsToAccountUsage } from '@/features/cost-center/cockpitAdapter'
 import { getAuthFiles, getRoutingStrategy, getDebug, getConfigSnapshot, getApiKeyUsage, type AuthFile, type ApiKeyUsageBucket } from '@/api/cliproxy/management'
 import { captureAuthConnection, isAuthConnectionCurrent } from '@/api/url'
 import { cliproxyAuthFilesToAccounts } from '@/features/cost-center/cliproxyManagementAdapter'
@@ -1671,6 +1674,7 @@ const {
 } = data
 const fullscreenFailure = ref<string | null>(null)
 const displayError = computed(() => fullscreenFailure.value == null ? error.value : t('costCenter.text.failedToToggleFullscreen', { value0: fullscreenFailure.value }))
+const cockpitLegacyUsageUnresolved = ref(0)
 
 // 渠道配额(PRD P0-21):cockpit 落盘快照 → 每个渠道账号"用了多少"。
 // 默认零外网请求;只有用户点"立即刷新"才走实时路径 A,失败降级并提示。
@@ -4064,9 +4068,11 @@ async function reload(background = false) {
       // An unreadable saved ledger is not a first-use empty ledger. Preserve the file and skip its write.
       let savedLedger: Awaited<ReturnType<typeof readCostLedger>> = null
       let ledgerReadable = false
-      let ledgerReadFailure: string | null = null
+      let ledgerReadFailure = false
+      let ledgerSaveFailure = false
+      cockpitLegacyUsageUnresolved.value = 0
       try { savedLedger = await readCostLedger(); ledgerReadable = true }
-      catch (reason) { ledgerReadFailure = errMsg(reason, '') }
+      catch (reason) { ledgerReadFailure = true; console.warn('[cost-center] Cockpit history could not be read', reason) }
       // 并行读配额历史 + apikey 渠道信息(名+baseUrl)。
       // 当天路由日志(实测 40MB+)不再无条件读:只有 Rust 聚合缺项(分钟级窗口/聚合失败)
       // 需要回退时才读,避免每次切窗口都往 WebView 塞进几十 MB 字符串。
@@ -4218,19 +4224,20 @@ async function reload(background = false) {
         if (ledgerReadable) {
           // Preserve raw same-batch metadata for Unified; ledger history only augments the account archive.
           cockpitStats.value = { ...cockpitStats.value, accounts: cockpitStats.value.accounts.map(account => ({ ...account })) }
-          try {
-            const mergedLedger = applyCockpitUsageLedger(cockpitStats.value, savedLedger?.accounts ?? null)
-            await writeCostLedger(mergedLedger, sourceInstanceId)
-          } catch (failure) {
-            if (!(failure instanceof CockpitLedgerIdentityError)) throw failure
-            ledgerReadFailure = failure.message
+          const { entries, unresolved } = applyCockpitUsageLedger(cockpitStats.value, savedLedger?.accounts ?? null)
+          cockpitLegacyUsageUnresolved.value = unresolved
+          try { await writeCostLedger(entries, sourceInstanceId) }
+          catch (reason) {
+            await assertCockpitSourceIdentity(sourceInstanceId)
+            ledgerSaveFailure = true
+            console.warn('[cost-center] Cockpit history could not be saved', reason)
           }
         }
         await data.loadFromCockpit(cockpitStats.value, cockpitLocalAccess.value, range.value, quotaHistories, apiLog, apiKeyInfoMap, new Map(cockpitCodexAccounts.value.map((a) => [a.id, a])), platformInputs, multiDayOps, multiDayAccountRequests, multiDayRoutes, requestLog, todayRequestLog, cockpitGroupNameMap.value, cockpitWindowTtft, costQueryWindow, sourceInstanceId)
         if (modelWindowDetached.value && modelCostRange.value !== range.value) await reloadModelWindow()
         // 装完 accounts 后回填本地 cost_profile(cockpit 无后端,手动配置存本地 JSON,reload 不丢)
         await data.mergeLocalCostProfiles()
-        if (ledgerReadFailure) error.value = t('costCenter.integration.cockpitUsageLedgerReadFailed', { detail: ledgerReadFailure })
+        if (ledgerReadFailure || ledgerSaveFailure) error.value = t(ledgerReadFailure ? 'costCenter.integration.cockpitUsageLedgerReadFailed' : 'costCenter.integration.cockpitUsageLedgerSaveFailed')
         // ★ 账本持久化(2026-09-12):二期 Rust 的 ledger_ingest 此前**全仓零调用**,
         //   于是 cost_ledger.sqlite 从未落盘——cockpit 自己轮转/重建时历史就跟着丢了。
         //   这里在 cockpit 数据装好后**后台触发一次**(fire-and-forget,不阻塞首屏):

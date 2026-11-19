@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { usageLocale } from '@/utils/usageFormat'
 import { useI18n } from 'vue-i18n'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { accountSubscriptionUnavailable, type AccountUsage, type AccountUsageCycle, type AccountUsagePeriod } from '@/api/usageAccounts'
-import { monitorAmount, monitorAutomaticPriceSummary, monitorPriceSummary, monitorSingleQuotes, monitorRequestCountLabel, type MonitorTotals } from '@/api/usageMonitor'
 import { usageColors, usagePercentLabel } from './usageChartPalette'
+import { periodAmount as money, periodDate as date, periodRange as range } from './accountPeriodFormat'
+import UsageSubscriptionHistory from './UsageSubscriptionHistory.vue'
 
 const { t } = useI18n()
 
@@ -14,32 +14,8 @@ const props = defineProps<{ account: AccountUsage; paused?: boolean }>()
 const verifiedPeriods = computed(() => props.account.creatorReference != null || props.account.billingAccountVerified === true ? props.account : null)
 const referencePeriods = computed(() => props.account.creatorReference ?? (!verifiedPeriods.value ? props.account : null))
 const subscriptionUnavailable = computed(() => accountSubscriptionUnavailable(props.account.subscription))
-const date = (value: number) => new Date(value).toLocaleString(usageLocale(), { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
-const range = (period: AccountUsagePeriod) => t('usageMonitor.text.to3', { value0: date(period.startMs), value1: date(period.endMs) })
+const detailsOpen = ref(false)
 const colors = [usageColors.cache, usageColors.input, usageColors.output, usageColors.danger]
-const displayAmount = (value: number, currency: string) => {
-  if (currency !== 'USD' && currency !== 'CNY') return monitorAmount(value, currency)
-  const formatted = new Intl.NumberFormat(usageLocale(), { style: 'currency', currency, currencyDisplay: 'narrowSymbol', ...(value !== 0 && Math.abs(value) < 0.01 ? { maximumSignificantDigits: 6 } : { maximumFractionDigits: 2 }) }).format(value)
-  return currency === 'USD' ? formatted : t('usageMonitor.text.cny2', { value0: formatted })
-}
-
-function money(totals: MonitorTotals) {
-  if (!totals.requestCount) return { amount: t('usageMonitor.text.noCollectedUsageYet'), reference: '', note: '' }
-  if (totals.automaticPriceSummary) {
-    const summary = monitorAutomaticPriceSummary(totals)
-    return {
-      amount: summary.currencies.filter(row => row.identifiedSubtotal != null).map(row => displayAmount(row.identifiedSubtotal!, row.currency)).join(' · ') || t('usageMonitor.text.identifiedAmountUnknown'),
-      reference: summary.currencies.filter(row => row.unknownReferenceSubtotal != null).map(row => t('usageMonitor.text.unidentifiedModeReference', { value0: displayAmount(row.unknownReferenceSubtotal!, row.currency) })).join(' · '),
-      note: [monitorRequestCountLabel(totals), summary.unknownRequests ? t('usageMonitor.text.unidentifiedModes', { value0: summary.unknownRequests }) : '', summary.identifiedUnquotedRequests ? t('usageMonitor.text.identifiedModesWithoutUnitPrices', { value0: summary.identifiedUnquotedRequests }) : '', totals.incompleteRequests ? t('usageMonitor.text.incompleteRecords2', { value0: totals.incompleteRequests }) : ''].filter(Boolean).join(' · '),
-    }
-  }
-  const summary = monitorPriceSummary(totals)
-  return {
-    amount: monitorSingleQuotes(totals).map(row => displayAmount(row.amount, row.currency)).join(' · ') || t('usageMonitor.text.amountUnknown'),
-    reference: summary.currencies.filter(row => row.standardRequests > 0).map(row => t('usageMonitor.text.standardPriceReference', { value0: displayAmount(row.referenceSubtotal! - (row.confirmedSubtotal ?? 0), row.currency) })).join(' · '),
-    note: [monitorRequestCountLabel(totals), summary.uncoveredRequests ? t('usageMonitor.text.missingUnitPrices2', { value0: summary.uncoveredRequests }) : '', t('usageMonitor.text.modeIdentificationInformationNotProvided'), totals.incompleteRequests ? t('usageMonitor.text.incompleteRecords2', { value0: totals.incompleteRequests }) : ''].filter(Boolean).join(' · '),
-  }
-}
 
 const unknownExhaustion = (cycle: AccountUsageCycle) => cycle.exhaustionUnknown
 const cycleMoney = (cycle: AccountUsageCycle) => unknownExhaustion(cycle) ? { amount: t('usageMonitor.text.exhaustionTimeNotRecorded'), reference: '', note: '' } : money(cycle.totals)
@@ -60,19 +36,25 @@ const historicalMonth = computed(() => props.account.subscriptionMonth != null &
 const attributionNote = computed(() => (props.account.verifiedHistory?.totals.requestCount ?? props.account.verifiedWeekRequests ?? 0) > 0
   ? t('usageMonitor.text.mixedAccountAmounts', { history: props.account.verifiedHistory?.totals.requestCount ?? props.account.verifiedWeekRequests ?? 0, reference: props.account.creatorReferenceWeekRequests ?? 0 })
   : t('usageMonitor.text.creatorAccountAmountsOnly'))
-const cycles = computed(() => (subscriptionUnavailable.value ? [] : verifiedPeriods.value?.monthCycles ?? []).map((cycle, index) => {
-  const month = props.account.subscriptionMonth!
-  return {
-    ...cycle,
-    money: money(cycle.totals),
-    style: {
-      '--cycle-color': colors[index % colors.length],
-      '--cycle-offset': `${(cycle.startMs - month.startMs) / (month.endMs - month.startMs) * 100}%`,
-      '--cycle-width': `${(cycle.endMs - cycle.startMs) / (month.endMs - month.startMs) * 100}%`,
-    },
-  }
-}))
-const unsegmented = computed(() => !subscriptionUnavailable.value && verifiedPeriods.value && props.account.unsegmentedMonth.requestCount > 0 ? money(props.account.unsegmentedMonth) : null)
+const cycles = computed(() => {
+  const month = verifiedPeriods.value?.subscriptionMonth ?? verifiedPeriods.value?.calendarMonth
+  if (!month || subscriptionUnavailable.value) return []
+  return (verifiedPeriods.value?.monthCycles ?? []).map((cycle, index) => {
+    return {
+      ...cycle,
+      money: money(cycle.totals),
+      style: {
+        '--cycle-color': colors[index % colors.length],
+        '--cycle-offset': `${(cycle.startMs - month.startMs) / (month.endMs - month.startMs) * 100}%`,
+        '--cycle-width': `${(cycle.endMs - cycle.startMs) / (month.endMs - month.startMs) * 100}%`,
+      },
+    }
+  })
+})
+const unsegmented = computed(() => {
+  const totals = verifiedPeriods.value?.unsegmentedMonth
+  return !subscriptionUnavailable.value && totals?.requestCount ? money(totals) : null
+})
 const creatorRows = computed(() => {
   const reference = referencePeriods.value
   if (!reference) return []
@@ -94,8 +76,9 @@ const creatorRows = computed(() => {
       <div v-else class="amount-item"><h4>{{ t('usageMonitor.text.usedThisMonth') }}</h4><small class="unknown-month">{{ t('usageMonitor.text.subscriptionDatesUnconfirmed') }}</small></div>
       <div v-if="previous" class="amount-item previous-cycle"><h4>{{ t('usageMonitor.text.previousWeeklyQuotaUsed') }}</h4><strong class="period-amount">{{ previous.amount }}</strong></div>
     </div>
-    <details class="amount-details">
+    <details class="amount-details" @toggle="detailsOpen = ($event.currentTarget as HTMLDetailsElement).open">
       <summary>{{ t('usageMonitor.text.amountDetails') }}</summary>
+      <UsageSubscriptionHistory :account-key="account.accountKey" :enabled="detailsOpen" :current-period="account.subscriptionMonth">
       <small v-if="account.billingAccountVerified === false" class="source-error">{{ attributionNote }}</small>
       <small v-if="paused">{{ t('usageMonitor.text.collectionPaused') }}</small>
       <div v-if="account.verifiedHistory?.totals.requestCount" class="verified-history"><h4>{{ t('usageMonitor.text.verifiedHistoryAmount') }}</h4><p class="period-range">{{ range(account.verifiedHistory) }}</p><strong>{{ money(account.verifiedHistory.totals).amount }}</strong><small>{{ money(account.verifiedHistory.totals).note }}</small></div>
@@ -159,6 +142,7 @@ const creatorRows = computed(() => {
           <small v-if="row.value.reference">{{ row.value.reference }}</small>
         </div>
       </section>
+      </UsageSubscriptionHistory>
     </details>
     <details v-if="quotaCycles.length" class="quota-cycle-details">
       <summary>{{ t('usageMonitor.text.quotaCycle') }} {{ quotaCycles.length }}</summary>

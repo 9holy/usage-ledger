@@ -798,15 +798,20 @@ describe('cockpit usage ledger', () => {
     return { email, updatedAt, usage }
   }
 
-  it('rejects ambiguous same-email current accounts before applying or replacing retained history', () => {
+  it('holds only ambiguous legacy history while keeping both stable account IDs and unrelated usage', () => {
     const stats = makeStats()
     const first = stats.accounts[0]!
     stats.accounts.push({ ...first, accountId: 'distinct-source-account', usage: usage({ requestCount: 3 }) })
-    const ledger = [ledgerEntry(first.email!, usage({ requestCount: 150 }))]
-    const original = JSON.stringify({ stats, ledger })
-    expect(() => applyCockpitUsageLedger(stats, ledger)).toThrow(/ambiguous/i)
-    expect(JSON.stringify({ stats, ledger })).toBe(original)
-    expect(() => snapshotCockpitLedger(stats)).toThrow(/ambiguous/i)
+    const ambiguous = ledgerEntry(first.email!, usage({ requestCount: 150 }))
+    const independent = ledgerEntry('retired@gmail.com', usage({ requestCount: 120 }))
+    const result = applyCockpitUsageLedger(stats, [ambiguous, independent])
+    expect(result.unresolved).toBe(1)
+    expect(result.entries).toContain(ambiguous)
+    expect(stats.accounts.filter(a => a.email === first.email).map(a => a.usage.requestCount)).toEqual([10, 3])
+    expect(stats.accounts.find(a => a.email === independent.email)?.usage.requestCount).toBe(120)
+    const newStats = { ...makeStats(), accounts: [{ ...first, usage: usage({ requestCount: 1 }) }] }
+    expect(applyCockpitUsageLedger(newStats, result.entries).unresolved).toBe(1)
+    expect(newStats.accounts.filter(a => a.email === first.email).map(a => a.usage.requestCount)).toEqual([10, 3])
   })
 
   it('restores a regressed account: re-added account reset to 0 gets ledger values back (per-field max)', () => {
@@ -820,9 +825,8 @@ describe('cockpit usage ledger', () => {
     expect(regressed.usage.requestCount).toBe(150)
     expect(regressed.usage.inputTokens).toBe(15_000)
     expect(regressed.usage.estimatedCostUsd).toBeCloseTo(0.3, 10)
-    // 返回的持久化载荷包含该 email 且值与回填后一致
-    const persisted = merged.find((e) => e.email === 'plus1@gmail.com')!
-    expect(persisted.usage.requestCount).toBe(150)
+    expect(merged.entries.find(e => e.accountId === regressed.accountId)?.usage.requestCount).toBe(2)
+    expect(merged.entries).toContain(ledger[0])
   })
 
   it('does not double count when current usage grew beyond the ledger', () => {
@@ -853,7 +857,7 @@ describe('cockpit usage ledger', () => {
       .filter((a) => a.name === 'ghost@gmail.com')
     expect(account).toBeTruthy()
     // 持久化载荷含 ghost(下次 reload 仍能注入)
-    expect(merged.some((e) => e.email === 'ghost@gmail.com')).toBe(true)
+    expect(merged.entries.some((e) => e.email === 'ghost@gmail.com')).toBe(true)
   })
 
   it('does not inject duplicates for emails already present in stats (orphan retained world)', () => {
@@ -875,11 +879,11 @@ describe('cockpit usage ledger', () => {
       ledger.push(ledgerEntry(`bulk-${i}@test.local`, usage(), 1_756_000_000_000 + i))
     }
     const merged = applyCockpitUsageLedger(stats, ledger)
-    expect(merged.length).toBe(COCKPIT_LEDGER_CAP)
+    expect(merged.entries.length).toBe(COCKPIT_LEDGER_CAP)
     // 最旧的被裁掉,最新的保留;当前 stats 里的账号(email 有活跃快照)绝不丢
-    expect(merged.some((e) => e.email === 'bulk-0@test.local')).toBe(false)
-    expect(merged.some((e) => e.email === `bulk-${COCKPIT_LEDGER_CAP + 49}@test.local`)).toBe(true)
-    expect(merged.some((e) => e.email === 'plus1@gmail.com')).toBe(true)
+    expect(merged.entries.some((e) => e.email === 'bulk-0@test.local')).toBe(false)
+    expect(merged.entries.some((e) => e.email === `bulk-${COCKPIT_LEDGER_CAP + 49}@test.local`)).toBe(true)
+    expect(merged.entries.some((e) => e.email === 'plus1@gmail.com')).toBe(true)
   })
 
   it('snapshots every email-bearing stats account (including orphans) for persistence', () => {

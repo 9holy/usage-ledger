@@ -74,6 +74,25 @@ describe('CostEventsPanel', () => {
     wrapper.unmount()
   })
 
+  it('saves the known billing period as purchase coverage without requiring date entry', async () => {
+    const startMs = Date.parse('2026-11-08T06:41:12Z'), endMs = Date.parse('2026-12-08T06:41:12Z')
+    const wrapper = mount(CostEventsPanel, { props: {
+      source: 'local', instanceId: 'usage-monitor', startMs, endMs, restrictAccounts: true,
+      accounts: [{ id: 'pro', name: 'Pro', billingPeriod: { startMs, endMs } }, { id: 'unknown', name: 'No dates' }],
+    } })
+    await flushPromises()
+    wrapper.vm.openEntry('pro'); await flushPromises()
+    const form = wrapper.get('form')
+    expect(form.findAll('input[type="datetime-local"]')[1].element.value).not.toBe('')
+    await form.get('select').setValue('unknown')
+    expect(form.findAll('input[type="datetime-local"]')[1].element.value).toBe('')
+    await form.get('select').setValue('pro')
+    await form.get('input[type="number"]').setValue('970')
+    await form.trigger('submit'); await flushPromises()
+    expect(saveFinanceEvent).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'pro', amount: 970, coverageStartMs: startMs, coverageEndMs: endMs }))
+    wrapper.unmount()
+  })
+
   it('requires explicit void confirmation and keeps a voided row visible', async () => {
     vi.mocked(getFinanceLedger).mockResolvedValue(facts())
     const wrapper = panel(); await flushPromises()

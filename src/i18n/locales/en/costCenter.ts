@@ -35,7 +35,9 @@ export default {
   integration: {
     cockpitSourceReloading: 'The Cockpit data source changed. Reading the current instance.',
     cockpitSourceReadFailed: 'The current Cockpit instance could not be verified or read. This batch was not loaded: {detail}',
-    cockpitUsageLedgerReadFailed: 'The saved usage ledger could not be read. Its file was preserved and no replacement was written: {detail}',
+    cockpitUsageLedgerReadFailed: 'Saved Cockpit usage is unavailable. The original records have not changed.',
+    cockpitUsageLedgerSaveFailed: 'The latest Cockpit usage could not be saved. The original records have not changed.',
+    cockpitLegacyUsageUnresolved: '{count} older usage records were kept without an account because ownership could not be confirmed.',
     quotaPrimaryWindow: 'Primary',
     quotaSecondaryWindow: 'Secondary',
     quotaRecordedValue: 'Last recorded {value}',

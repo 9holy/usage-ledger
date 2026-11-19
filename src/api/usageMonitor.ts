@@ -242,6 +242,7 @@ export interface MonitorSnapshot {
   rateSessions?: MonitorSession[]
   sessionCount: number
   statusCounts?: SessionStatusCounts
+  storagePaused?: boolean
   toolStatusCounts?: Record<string, SessionStatusCounts>
   sources: Array<{
     tool: string
@@ -553,6 +554,10 @@ export interface MonitorSessionFilters {
 export function getUsageMonitorSnapshot(tool: string | null, offset: number, filters: MonitorSessionFilters = {}): Promise<MonitorSnapshot> {
   if (!isDesktopRuntime()) return Promise.reject(new Error('全局用量监控需要桌面端'))
   return invoke('usage_monitor_snapshot', { tool, offset, limit: MONITOR_PAGE_SIZE, ...filters })
+}
+
+export function retryUsageMonitorStorage(): Promise<void> {
+  return invoke('usage_monitor_retry_storage')
 }
 
 export function getUsageMonitorAnalysis(query: MonitorAnalysisQuery): Promise<MonitorAnalysis> {

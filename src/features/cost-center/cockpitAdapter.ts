@@ -2974,26 +2974,7 @@ export function cockpitPlatformAccountsToAccounts(
 // 纯函数:输入输出都是数据,invoke 落盘在 api/cockpit + 视图胶水层。
 // ──────────────────────────────────────────────────────────────────────────
 
-/** 台账/当前都是只增累计器,逐字段取历史最大:
- *  cockpit 清零回退 → 取台账值(防丢);正常增长 → 取当前值(防台账重复累加)。 */
-export class CockpitLedgerIdentityError extends Error {
-  constructor() {
-    super('Ambiguous email identity in Cockpit usage history; current account facts are retained without merging or rewriting history')
-    this.name = 'CockpitLedgerIdentityError'
-  }
-}
-
-function assertLedgerEmailIdentity(stats: CockpitStats, ledger: CockpitLedgerEntry[] | null | undefined): void {
-  for (const rows of [stats.accounts, ledger ?? []]) {
-    const seen = new Set<string>()
-    for (const row of rows) {
-      if (!row.email) continue
-      if (seen.has(row.email)) throw new CockpitLedgerIdentityError()
-      seen.add(row.email)
-    }
-  }
-}
-
+/** Retain cumulative counters through a reset without adding the same usage twice. */
 function ledgerMaxUsage<T extends CockpitUsageStats>(current: T, stored: CockpitUsageStats): T {
   const merged: T = { ...current }
   const target = merged as Record<string, unknown>
@@ -3006,16 +2987,14 @@ function ledgerMaxUsage<T extends CockpitUsageStats>(current: T, stored: Cockpit
   }
   return merged
 }
-/** stats.accounts(含孤儿——被移出池的正是要保住的) → 台账快照条目。
- *  无 email 的账号跳过(email 是重建前后的稳定键,没有它无法关联)。 */
-export function snapshotCockpitLedger(stats: CockpitStats): CockpitLedgerEntry[] {
-  assertLedgerEmailIdentity(stats, null)
+export function snapshotCockpitLedger(stats: CockpitStats): (CockpitLedgerEntry & { accountId: string })[] {
   const now = stats.updatedAt ?? Date.now()
-  const entries: CockpitLedgerEntry[] = []
+  const entries: (CockpitLedgerEntry & { accountId: string })[] = []
   for (const acc of stats.accounts) {
-    if (!acc.email) continue
+    if (!acc.accountId || isLedgerStatsAccount(acc)) continue
     entries.push({
-      email: acc.email,
+      accountId: acc.accountId,
+      ...(acc.email?.trim() ? { email: acc.email } : {}),
       updatedAt: acc.usage?.updatedAt ?? now,
       usage: { ...acc.usage },
     })
@@ -3023,55 +3002,61 @@ export function snapshotCockpitLedger(stats: CockpitStats): CockpitLedgerEntry[]
   return entries
 }
 
-/** 应用台账(在 loadFromCockpit 之前调用,原地修改 stats.accounts):
- *  1. 回归回填:同 email 台账值 > 当前值(cockpit 重加账号清零)→ 逐字段回填当前账号 usage;
- *  2. 注入历史行:email 在 stats 完全不存在(账号文件被删且孤儿被清)→ 注入合成账号
- *     accountId=`cockpit:ledger-email:<encoded email>`(显式标记历史 email 身份;无 meta →
- *     cockpit_historical,UI 显示"已移出当前池",采购列显示"—"不计入当前池)。
- *  返回合并后的完整台账条目(存量∪当前快照,已裁剪至上限),供调用方持久化。
- *  双计防护:注入仅针对 stats 中不存在的 email;stats 已保留的孤儿只做 max 合并,不重复注入。 */
+/** Keep verified account histories separate from the legacy email-only archive. */
 export function applyCockpitUsageLedger(
   stats: CockpitStats,
   ledger: CockpitLedgerEntry[] | null | undefined,
-): CockpitLedgerEntry[] {
-  // Upstream aggregates by account_id; an email alone cannot distinguish two accounts.
-  // Reject before mutating any current row or building a replacement history file.
-  assertLedgerEmailIdentity(stats, ledger)
-  const stored = new Map<string, CockpitLedgerEntry>()
-  for (const e of ledger ?? []) {
-    if (e?.email) stored.set(e.email, e)
+): { entries: CockpitLedgerEntry[]; unresolved: number } {
+  const legacy = (ledger ?? []).filter(entry => entry.accountId === undefined)
+  const byId = new Map((ledger ?? []).flatMap(entry => entry.accountId === undefined ? [] : [[entry.accountId, entry] as const]))
+  const current = new Set(stats.accounts.map(account => account.accountId))
+  const idsByEmail = new Map<string, Set<string>>()
+  const associate = (email: string | undefined, id: string) => {
+    if (!email) return
+    const ids = idsByEmail.get(email) ?? new Set<string>()
+    ids.add(id)
+    idsByEmail.set(email, ids)
   }
-  const seen = new Set<string>()
-  const now = Date.now()
-  for (const acc of stats.accounts) {
-    if (!acc.email) continue
-    seen.add(acc.email)
-    const prev = stored.get(acc.email)
-    if (prev) {
-      acc.usage = ledgerMaxUsage(acc.usage, prev.usage)
-      stored.set(acc.email, { email: acc.email, updatedAt: now, usage: { ...acc.usage } })
-    } else {
-      stored.set(acc.email, {
-        email: acc.email,
-        updatedAt: acc.usage?.updatedAt ?? stats.updatedAt ?? now,
-        usage: { ...acc.usage },
-      })
+  for (const [id, entry] of byId) associate(entry.email, id)
+  for (const entry of snapshotCockpitLedger(stats)) {
+    const previous = byId.get(entry.accountId)
+    const usage = previous ? ledgerMaxUsage(entry.usage, previous.usage) : entry.usage
+    byId.set(entry.accountId, { ...entry, updatedAt: Math.max(entry.updatedAt, previous?.updatedAt ?? 0), usage })
+    associate(entry.email, entry.accountId)
+  }
+  for (const [id, entry] of byId) {
+    if (!current.has(id)) stats.accounts.push({ accountId: id, email: entry.email, usage: { ...entry.usage, updatedAt: entry.updatedAt } })
+  }
+  const legacyByEmail = new Map(legacy.map(entry => [entry.email, entry]))
+  for (const account of stats.accounts) {
+    if (isLedgerStatsAccount(account)) continue
+    const saved = byId.get(account.accountId)
+    if (saved) account.usage = ledgerMaxUsage(account.usage, saved.usage)
+    // Legacy history may supplement an unambiguous display, never an ID-keyed saved counter.
+    if (account.email && idsByEmail.get(account.email)?.size === 1) {
+      const previous = legacyByEmail.get(account.email)
+      if (previous) account.usage = ledgerMaxUsage(account.usage, previous.usage)
     }
   }
-  for (const e of stored.values()) {
-    if (seen.has(e.email)) continue
+  let unresolved = 0
+  for (const entry of legacy) {
+    const ids = idsByEmail.get(entry.email)
+    if (ids?.size) {
+      if (ids.size > 1) unresolved++
+      continue
+    }
     const account: LedgerStatsAccount = {
-      accountId: `cockpit:ledger-email:${encodeURIComponent(e.email)}`,
+      accountId: `cockpit:ledger-email:${encodeURIComponent(entry.email)}`,
       costIdentityKind: 'ledger-email',
-      email: e.email,
-      usage: { ...e.usage, updatedAt: e.updatedAt },
+      email: entry.email,
+      usage: { ...entry.usage, updatedAt: entry.updatedAt },
     }
     stats.accounts.push(account)
   }
-  const merged = [...stored.values()]
+  const merged = [...byId.values(), ...legacy]
   if (merged.length > COCKPIT_LEDGER_CAP) {
     merged.sort((a, b) => b.updatedAt - a.updatedAt)
     merged.length = COCKPIT_LEDGER_CAP
   }
-  return merged
+  return { entries: merged, unresolved }
 }

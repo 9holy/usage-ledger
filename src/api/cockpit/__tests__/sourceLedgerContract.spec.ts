@@ -19,6 +19,15 @@ describe('Cockpit saved usage ledger read contract', () => {
     vi.mocked(invoke).mockResolvedValue('{"accounts":[]}')
     expect(await readCostLedger()).toEqual({ accounts: [] })
   })
+  it('round-trips histories for distinct account IDs and their unassigned legacy record', async () => {
+    const legacy = { email: 'same@example.invalid', updatedAt: 1, usage: { requestCount: 9 } }
+    const accounts = [legacy, { ...legacy, accountId: 'source-a' }, { ...legacy, accountId: 'source-b' },
+      { accountId: 'source-c', updatedAt: 1, usage: legacy.usage }] as CockpitLedgerEntry[]
+    vi.mocked(invoke).mockResolvedValue(JSON.stringify({ accounts }))
+    expect(await readCostLedger()).toEqual({ accounts })
+    await writeCostLedger(accounts, 'cockpit:test')
+    expect(invoke).toHaveBeenLastCalledWith('write_cost_ledger', { json: JSON.stringify({ accounts }, null, 2), expectedSourceInstanceId: 'cockpit:test' })
+  })
   it('rejects ambiguous duplicate email histories instead of silently keeping the last one', async () => {
     vi.mocked(invoke).mockResolvedValue(JSON.stringify({ accounts: [
       { email: 'same@example.invalid', updatedAt: 1, usage: { requestCount: 2 } },

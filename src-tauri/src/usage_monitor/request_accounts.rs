@@ -352,14 +352,19 @@ impl EvidenceIndex {
 
     pub(super) fn upstream_owner(&self, usage: &UsageRecord) -> Option<super::upstream_accounts::Owner> {
         let mut owner = self.upstream.get(&(usage.tool.clone(),usage.id.clone())).cloned();
-        if let AccountMatch::Verified(account) = self.proxy_account_for(usage) {
-            let value = owner.get_or_insert_with(|| super::upstream_accounts::Owner { account: account.into(), account_tool:"codex".into(), subscription: true, quota_eligible:true, ..Default::default() });
-            value.conflict |= value.account != account || !value.subscription;
-            value.sources.insert("cockpit".into());
-        } else if matches!(self.proxy_account_for(usage), AccountMatch::Conflict) {
-            return Some(super::upstream_accounts::Owner { conflict: true, ..Default::default() });
+        // Legacy proxy and quota evidence is indexed from Codex logs only.
+        if usage.tool == "codex" {
+            match self.proxy_account_for(usage) {
+                AccountMatch::Verified(account) => {
+                    let value = owner.get_or_insert_with(|| super::upstream_accounts::Owner { account: account.into(), account_tool:"codex".into(), subscription: true, quota_eligible:true, ..Default::default() });
+                    value.conflict |= value.account != account || value.account_tool != "codex" || !value.subscription;
+                    value.sources.insert("cockpit".into());
+                }
+                AccountMatch::Conflict => return Some(super::upstream_accounts::Owner { conflict: true, ..Default::default() }),
+                AccountMatch::None => {}
+            }
         }
-        if owner.is_none() && usage.billing_scope.as_deref() == Some("api") {
+        if owner.is_none() && usage.tool == "codex" && usage.billing_scope.as_deref() == Some("api") {
             if let Some((accounts,_)) = self.quota.get(&usage.id).filter(|(accounts,_)| accounts.len()==1) {
                 owner = Some(super::upstream_accounts::Owner { account: accounts.first().unwrap().clone(), account_tool:"codex".into(), subscription: true, sources: BTreeSet::from(["api".into()]), conflict: false,quota_eligible:true });
             }
@@ -520,6 +525,11 @@ mod tests {
             EvidenceIndex::load(&ledger).unwrap().account_for(&usage),
             AccountMatch::Verified("account:actual")
         ));
+        let mut index = EvidenceIndex::load(&ledger).unwrap();
+        index.quota.insert(usage.id.clone(), (BTreeSet::from(["account:actual".into()]), 12000));
+        let other_client = UsageRecord { tool:"claude".into(), billing_scope:Some("api".into()), ..usage.clone() };
+        assert!(index.upstream_owner(&usage).is_some());
+        assert!(index.upstream_owner(&other_client).is_none());
         for field in ["timestamp", "cache_read_tokens"] {
             usage.unknown_fields = vec![field.into()];
             assert!(matches!(

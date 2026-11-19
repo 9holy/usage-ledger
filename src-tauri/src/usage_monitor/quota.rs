@@ -293,10 +293,13 @@ pub(super) fn account_identity_rows(conn:&Connection,tool:&str)->Result<Vec<(Str
     for key in super::request_identity::native_accounts(conn,tool)?{
         if !keys.iter().any(|(existing,_,_)|existing==&key){keys.push((key,0,None));}
     }
-    let mut creators = conn.prepare("SELECT DISTINCT 'account:'||json_extract(state,'$.quota_account_id') FROM monitor_files
-        WHERE tool=?1 AND json_extract(state,'$.quota_identity_error') IS NULL
-          AND json_type(state,'$.session.id')='text' AND json_type(state,'$.quota_account_id')='text'
-          AND TRIM(json_extract(state,'$.quota_account_id'))<>''").map_err(|e| e.to_string())?;
+    let mut creators = conn.prepare("SELECT DISTINCT account_key FROM monitor_session_creators WHERE tool=?1
+        UNION SELECT account_key FROM monitor_account_cycles WHERE tool=?1 AND attribution_verified=1
+        UNION SELECT account_key FROM monitor_upstream_accounts WHERE tool=?1 AND subscription AND account_key<>''
+        UNION SELECT substr(key, length('account_subscription:')+1) FROM monitor_state
+          WHERE ?1='codex' AND key GLOB 'account_subscription:*'
+        UNION SELECT substr(key, length('account_billing_cycle:')+1) FROM monitor_state
+          WHERE ?1='codex' AND key GLOB 'account_billing_cycle:*'").map_err(|e| e.to_string())?;
     for key in creators.query_map([tool], |r| r.get::<_,String>(0)).map_err(|e| e.to_string())? {
         let key = key.map_err(|e| e.to_string())?;
         if !keys.iter().any(|(existing,_,_)| existing==&key) { keys.push((key,0,None)); }

@@ -793,14 +793,12 @@ export async function writeCostProfiles(map: CostProfileMap): Promise<void> {
   await invoke('write_cost_profiles', { json: JSON.stringify(map, null, 2) })
 }
 
-/** 用量台账条目:按 email 保留的累计用量快照(email 是 cockpit 账号重建前后的稳定键)。
- *  cockpit 移除 API/账号会清数据、重新加入从 0 计数——台账让成本端不丢这些用量。 */
-export interface CockpitLedgerEntry {
-  email: string
+/** Saved account counters. Older entries have only an email, not a verified account ID. */
+export type CockpitLedgerEntry = {
   /** 快照时间(ms),超上限时裁最旧的 */
   updatedAt: number
   usage: CockpitUsageStats
-}
+} & ({ accountId: string; email?: string } | { accountId?: undefined; email: string })
 
 /** 用量台账文件结构(cockpit_usage_ledger.json) */
 export interface CockpitUsageLedger {
@@ -822,17 +820,22 @@ function validateUsageLedger(parsed: unknown): asserts parsed is CockpitUsageLed
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray((parsed as CockpitUsageLedger).accounts)) {
     throw new Error('Invalid Cockpit usage ledger: expected an accounts array')
   }
-  const emails = new Set<string>()
+  const keys = new Set<string>()
   for (const entry of (parsed as CockpitUsageLedger).accounts) {
-    if (!entry || typeof entry.email !== 'string' || !entry.email.trim()
+    if (!entry || ((entry.email !== undefined || entry.accountId === undefined)
+        && (typeof entry.email !== 'string' || !entry.email.trim()))
       || !Number.isSafeInteger(entry.updatedAt) || entry.updatedAt < 0 || entry.updatedAt > 8_640_000_000_000_000
       || !entry.usage || typeof entry.usage !== 'object' || Array.isArray(entry.usage)
       || Object.entries(entry.usage).some(([key, value]) => typeof value !== 'number' || !Number.isFinite(value) || value < 0
         || (ledgerIntegerFields.has(key) && !Number.isSafeInteger(value)))) {
       throw new Error('Invalid Cockpit usage ledger: malformed account history')
     }
-    if (emails.has(entry.email)) throw new Error('Invalid Cockpit usage ledger: ambiguous email history')
-    emails.add(entry.email)
+    if (entry.accountId !== undefined && (typeof entry.accountId !== 'string' || !entry.accountId.trim())) {
+      throw new Error('Invalid Cockpit usage ledger: malformed account ID')
+    }
+    const key = entry.accountId === undefined ? `email:${entry.email}` : `id:${entry.accountId}`
+    if (keys.has(key)) throw new Error('Invalid Cockpit usage ledger: duplicate account history')
+    keys.add(key)
   }
 }
 

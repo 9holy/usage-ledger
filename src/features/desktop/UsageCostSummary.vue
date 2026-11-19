@@ -17,6 +17,8 @@ const usdValue = computed(() => {
   return amounts.length?amounts.reduce((sum,value)=>sum+value,0):null
 })
 const money = (value: number | null | undefined, currency = 'CNY') => value == null ? t('desktop.localCost.notEntered') : new Intl.NumberFormat(usageLocale(), { style: 'currency', currency, ...(value!==0&&Math.abs(value)<.01?{maximumSignificantDigits:6}:{maximumFractionDigits:2}) }).format(value)
+const expense = computed(() => summary.value.expenseCny == null && summary.value.missingCoverage
+  ? t('desktop.localCost.missingBillingPeriod') : money(summary.value.expenseCny))
 const date = (value: number) => new Date(value).toLocaleString(usageLocale(), { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
 const shortDate = (value: number) => new Date(value).toLocaleDateString(usageLocale(),{month:'numeric',day:'numeric'})
 const clock = (value: number) => new Date(value).toLocaleTimeString(usageLocale(),{hour:'2-digit',minute:'2-digit',hour12:false})
@@ -48,7 +50,7 @@ const details = computed(() => {
     <div class="strip-scope"><strong>{{ t('usageMonitor.costs.overview') }}</strong><small>{{ t(scope === 'all' ? 'usageMonitor.delivery.globalScope' : 'usageMonitor.costs.api') }}</small><small><template v-if="data.report.startMs===0">{{ t('usageMonitor.text.all') }}</template><time v-else :datetime="new Date(data.report.startMs).toISOString()">{{ shortDate(data.report.startMs) }}</time> – <time :datetime="new Date(data.report.endMs).toISOString()">{{ shortDate(data.report.endMs-1) }} {{ clock(data.report.endMs-1) }}</time><span v-if="busy"> · {{ t('usageMonitor.text.loading') }}</span></small></div>
     <dl class="strip-values">
       <div><dt>{{ t('desktop.localCost.cashPaid') }}</dt><dd :class="{'is-missing':summary.cashOutlayCny==null}">{{ money(summary.cashOutlayCny) }}</dd></div>
-      <div><dt>{{ t('desktop.localCost.recordedCost') }}<small v-if="summary.expenseCny!=null && summary.costIncomplete" :title="t('usageMonitor.delivery.partialCost')"> · {{ t('desktop.localCost.knownPart') }}</small></dt><dd :class="{'is-missing':summary.expenseCny==null}">{{ money(summary.expenseCny) }}</dd></div>
+      <div><dt>{{ t('desktop.localCost.recordedCost') }}<small v-if="summary.expenseCny!=null && summary.costIncomplete" :title="t('usageMonitor.delivery.partialCost')"> · {{ t('desktop.localCost.knownPart') }}</small></dt><dd :class="{'is-missing':summary.expenseCny==null}">{{ expense }}</dd></div>
       <div :title="t('desktop.localCost.valuationBasis')"><dt>{{ t('desktop.localCost.value') }} · USD</dt><dd class="strip-usage">{{ usdValue==null?'—':money(usdValue,'USD') }}</dd><small v-if="summary.valueCny != null" class="strip-cny">{{ t('usageMonitor.inlineCosts.cnyEquivalent', { amount: money(summary.valueCny) }) }}</small></div>
       <div :title="t('usageMonitor.fusion.factorBasis')"><dt>{{ t('desktop.localCost.factor') }}</dt><dd>{{ summary.factor==null?'—':summary.factor.toFixed(4)+'×' }}</dd></div>
       <div><dt>{{ t('desktop.localCost.remaining') }}</dt><dd :class="{'is-missing':summary.remainingCny==null}">{{ money(summary.remainingCny) }}</dd></div>
@@ -68,7 +70,7 @@ const details = computed(() => {
     </header>
     <div class="cost-summary-values">
       <div><span>{{ t('desktop.localCost.cashPaid') }}</span><strong :class="{'is-unknown':summary.cashOutlayCny==null}">{{ money(summary.cashOutlayCny) }}</strong><button v-if="summary.cashOutlayCny==null || summary.enteredCount<summary.subscriptionCount" type="button" class="enter-purchase" @click="emit('enter')"><Plus :size="12" />{{ t('desktop.localCost.enterPurchase') }}</button></div>
-      <div><span>{{ t('desktop.localCost.recordedCost') }}</span><strong :class="{'is-unknown':summary.expenseCny==null}">{{ money(summary.expenseCny) }}</strong><small v-if="summary.expenseCny!=null && summary.costIncomplete" class="cost-completeness">{{ t('usageMonitor.delivery.partialCost') }}</small></div>
+      <div><span>{{ t('desktop.localCost.recordedCost') }}</span><strong :class="{'is-unknown':summary.expenseCny==null}">{{ expense }}</strong><small v-if="summary.expenseCny!=null && summary.costIncomplete" class="cost-completeness">{{ t('usageMonitor.delivery.partialCost') }}</small></div>
       <div :title="t('usageMonitor.fusion.factorBasis')"><span>{{ t('desktop.localCost.factor') }}</span><strong>{{ summary.factor == null ? '—' : summary.factor.toFixed(4) + '×' }}</strong><small>{{ t('usageMonitor.delivery.matchedFactor',{count:summary.factorAccountCount}) }}</small></div>
       <div :title="t('usageMonitor.delivery.remainingKnown')"><span>{{ t('desktop.localCost.remaining') }}</span><strong :class="{'is-unknown':summary.remainingCny==null}">{{ money(summary.remainingCny) }}</strong></div>
     </div>

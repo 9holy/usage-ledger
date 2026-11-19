@@ -178,6 +178,7 @@ export default {
     "remainingPrepaid": "Unused prepaid amount",
     "factsHaveUnresolvedExpenseAllocation": "records cannot yet be included in total expense",
     "outlaysLackACoveragePeriod": "payments need a usage period",
+    "useCurrentBillingPeriod": "Use current billing period",
     "terminationLossIsNotLinkedToA": "This closure loss has no complete usage period and is not included in total expense yet. Edit it, link the original purchase or renewal, and check the usage dates.",
     "financialEventForm": "Financial record form",
     "account": "Account",
